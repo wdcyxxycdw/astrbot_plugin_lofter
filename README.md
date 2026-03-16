@@ -1,6 +1,7 @@
 # astrbot_plugin_lofter
 
 AstrBot 插件，用于解析 Lofter 链接、订阅 Lofter 标签/博主、搜索 Lofter 内容。
+开发中，有bug或想添加新功能随时提交issue
 
 ## 功能
 
