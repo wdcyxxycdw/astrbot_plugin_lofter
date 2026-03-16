@@ -4,6 +4,7 @@ import os
 import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.star import Context, Star, register
+from astrbot.core.star import StarTools
 
 from .commands import LofterCommands
 from .core.client import LofterClient
@@ -24,7 +25,7 @@ class LofterPlugin(LofterCommands, Star):
         self._config_cookie: str = config.get("lofter_cookie", "")
         self._max_images: int = int(config.get("max_images", 3))
         self._interval: int = int(config.get("poll_interval", 30))
-        db_path = os.path.join(context.data_dir, "lofter.db")
+        db_path = os.path.join(StarTools.get_data_dir(), "lofter.db")
         self._db = LofterDB(db_path)
         self._client = LofterClient("")
         self._storage = SubscriptionStorage(self._db)
