@@ -4,7 +4,7 @@ import re
 
 import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.star import StarTools
 
@@ -115,9 +115,12 @@ class LofterPlugin(Star):
         return lines
 
     async def _send_push(self, session_id: str, text: str, images: list[str]):
-        chain = [Comp.Plain(text)] + [Comp.Image.fromURL(u) for u in images]
+        mc = MessageChain()
+        mc.message(text)
+        for u in images[:self._max_images]:
+            mc.url_image(u)
         try:
-            await self.context.send_message(session_id, chain)
+            await self.context.send_message(session_id, mc)
         except Exception as e:
             logger.error("推送消息失败 session=%s: %s", session_id, e)
 
