@@ -4,7 +4,7 @@ import astrbot.api.message_components as Comp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 
-from .core.parser import parse_post, parse_search_results, parse_posts_list
+from .core.parser import parse_post, parse_search_results
 
 POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
 SEARCH_URL = "https://www.lofter.com/s?q={keyword}"

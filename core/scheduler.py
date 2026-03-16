@@ -4,7 +4,7 @@ from typing import Callable, Awaitable
 from astrbot.api import logger
 
 from .client import LofterClient
-from .parser import parse_posts_list
+from .parser import parse_blog_posts
 from .storage import Subscription, SubscriptionStorage
 
 SendFunc = Callable[[str, list], Awaitable[None]]
@@ -28,7 +28,7 @@ async def _check_subscription(
     url = _sub_url(sub)
     try:
         html = await client.get(url)
-        posts = await parse_posts_list(html)
+        posts = await parse_blog_posts(html)
     except Exception as e:
         logger.error("轮询订阅 %s/%s 失败: %s", sub.type, sub.target, e)
         return
