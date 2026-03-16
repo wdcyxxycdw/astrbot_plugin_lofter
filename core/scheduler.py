@@ -58,8 +58,21 @@ async def _check_subscription(
     new_posts = [p for p in posts if p.post_id in unseen_set]
     label = "标签" if sub.type == "tag" else "博主"
     for post in reversed(new_posts[:5]):
-        text = f"【{label}「{sub.target}」有新内容】\n{post.title or post.url}"
-        await send_func(sub.session_id, text, [])
+        title = post.title or "(无标题)"
+        tags_list = getattr(post, 'tags', [])
+        tags = f"#{' #'.join(tags_list)}" if tags_list else ""
+        summary = getattr(post, 'summary', '')
+        author = getattr(post, 'author', '')
+        images = getattr(post, 'images', [])
+        lines = [f"【{label}「{sub.target}」有新内容】", f"▸ {title}"]
+        if author:
+            lines.append(f"作者：{author}")
+        if tags:
+            lines.append(tags)
+        if summary:
+            lines.append(summary)
+        lines.append(post.url)
+        await send_func(sub.session_id, "\n".join(lines), images)
 
 
 class SubscriptionScheduler:

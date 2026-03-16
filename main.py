@@ -120,10 +120,19 @@ class LofterPlugin(Star):
         if not posts:
             yield event.plain_result("没有找到相关内容")
             return
-        lines = [f"「{keyword}」标签搜索结果："]
-        for p in posts[:5]:
-            lines.append(f"• {p.title or '(无标题)'}\n  {p.url}")
-        yield event.plain_result("\n".join(lines))
+        yield event.plain_result(f"「{keyword}」标签搜索结果，共 {len(posts)} 条：")
+        for p in posts[:3]:
+            title = p.title or "(无标题)"
+            tags = f"#{' #'.join(p.tags)}" if p.tags else ""
+            text_parts = [f"▸ {title}", f"作者：{p.author}  {p.publish_time}"]
+            if tags:
+                text_parts.append(tags)
+            if p.summary:
+                text_parts.append(p.summary)
+            text_parts.append(p.url)
+            chain = [Comp.Plain("\n".join(text_parts))]
+            chain += [Comp.Image.fromURL(u) for u in p.images[:self._max_images]]
+            yield event.chain_result(chain)
 
     @lofter.command("list")
     async def sub_list(self, event: AstrMessageEvent):
