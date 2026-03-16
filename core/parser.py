@@ -82,8 +82,3 @@ async def parse_blog_posts(html: str) -> list[Post]:
         title = a.get_text(strip=True)
         posts.append(Post(post_id=post_id, title=title, text="", url=url))
     return posts
-
-
-async def parse_search_results(html: str) -> list[Post]:
-    """解析搜索结果页（结构与博主页相同）。"""
-    return await parse_blog_posts(html)

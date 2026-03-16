@@ -10,12 +10,12 @@ from astrbot.core.star import StarTools
 
 from .core.client import LofterClient
 from .core.db import LofterDB
-from .core.parser import parse_post, parse_search_results
+from .core.dwr_parser import parse_dwr_response
+from .core.parser import parse_post
 from .core.scheduler import SubscriptionScheduler
 from .core.storage import SubscriptionStorage
 
 POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
-SEARCH_URL = "https://www.lofter.com/s?q={keyword}"
 
 
 @register(
@@ -106,22 +106,21 @@ class LofterPlugin(Star):
 
     @lofter.command("search")
     async def search(self, event: AstrMessageEvent):
-        """搜索 Lofter 内容。用法：/lofter search <关键词>"""
+        """搜索 Lofter 标签内容。用法：/lofter search <标签名>"""
         keyword = event.message_str.strip()
         if not keyword:
-            yield event.plain_result("请提供搜索关键词，例如：/lofter search 原创")
+            yield event.plain_result("请提供标签名，例如：/lofter search 原创")
             return
-        url = SEARCH_URL.format(keyword=keyword)
         try:
-            html = await self._client.get(url)
-            posts = await parse_search_results(html)
+            raw = await self._client.search_tag(keyword, limit=10)
+            posts = parse_dwr_response(raw)
         except Exception as e:
             yield event.plain_result(f"搜索失败：{e}")
             return
         if not posts:
             yield event.plain_result("没有找到相关内容")
             return
-        lines = [f"「{keyword}」搜索结果："]
+        lines = [f"「{keyword}」标签搜索结果："]
         for p in posts[:5]:
             lines.append(f"• {p.title or '(无标题)'}\n  {p.url}")
         yield event.plain_result("\n".join(lines))
