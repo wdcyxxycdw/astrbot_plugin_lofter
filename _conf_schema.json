@@ -13,5 +13,10 @@
         "description": "解析帖子时最多展示的图片数量",
         "type": "int",
         "default": 3
+    },
+    "search_limit": {
+        "description": "搜索结果最多返回的条数",
+        "type": "int",
+        "default": 3
     }
 }

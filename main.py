@@ -29,6 +29,7 @@ class LofterPlugin(Star):
         super().__init__(context)
         self._config_cookie: str = config.get("lofter_cookie", "")
         self._max_images: int = int(config.get("max_images", 3))
+        self._search_limit: int = int(config.get("search_limit", 3))
         self._interval: int = int(config.get("poll_interval", 30))
         db_path = os.path.join(StarTools.get_data_dir(), "lofter.db")
         self._db = LofterDB(db_path)
@@ -121,7 +122,7 @@ class LofterPlugin(Star):
             yield event.plain_result("没有找到相关内容")
             return
         yield event.plain_result(f"「{keyword}」标签搜索结果，共 {len(posts)} 条：")
-        for p in posts[:3]:
+        for p in posts[:self._search_limit]:
             title = p.title or "(无标题)"
             tags = f"#{' #'.join(p.tags)}" if p.tags else ""
             text_parts = [f"▸ {title}", f"作者：{p.author}  {p.publish_time}"]
