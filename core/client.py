@@ -10,7 +10,7 @@ HEADERS = {
         "Gecko/20100101 Firefox/145.0"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Accept-Encoding": "gzip, deflate",
     "Referer": "https://www.lofter.com/",
 }
 

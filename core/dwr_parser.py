@@ -22,10 +22,7 @@ class DwrPost:
 
 def _decode(s: str) -> str:
     """还原 DWR 字符串中的 \\uXXXX Unicode 转义。"""
-    try:
-        return s.encode("utf-8").decode("unicode_escape")
-    except Exception:
-        return s
+    return re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), s)
 
 
 def parse_dwr_response(body: str) -> list[DwrPost]:
