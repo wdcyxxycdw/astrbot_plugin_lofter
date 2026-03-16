@@ -1,0 +1,11 @@
+[project]
+name = "astrbot-plugin-lofter"
+version = "0.1.0"
+description = "AstrBot 插件：解析/订阅 Lofter 内容"
+requires-python = ">=3.10"
+dependencies = [
+    "aiohttp>=3.8.0",
+    "brotli>=1.0.0",
+    "beautifulsoup4>=4.11.0",
+    "lxml>=4.9.0",
+]

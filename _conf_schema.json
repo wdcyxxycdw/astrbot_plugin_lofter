@@ -1,0 +1,17 @@
+{
+    "lofter_cookie": {
+        "description": "Lofter 登录 Cookie（用于访问需要登录的内容）",
+        "type": "string",
+        "default": ""
+    },
+    "poll_interval": {
+        "description": "订阅轮询间隔（分钟）",
+        "type": "int",
+        "default": 30
+    },
+    "max_images": {
+        "description": "解析帖子时最多展示的图片数量",
+        "type": "int",
+        "default": 3
+    }
+}
