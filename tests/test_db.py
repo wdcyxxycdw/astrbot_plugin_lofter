@@ -77,6 +77,26 @@ async def test_cold_start_no_push(db):
 
 
 @pytest.mark.asyncio
+async def test_filter_unsent_marks_sent(db):
+    """同一 session 内跨订阅去重：mark_sent 后 filter_unsent 应过滤掉已发送的帖子"""
+    await db.mark_sent("sess1", ["a", "b"])
+    result = await db.filter_unsent("sess1", ["a", "b", "c"])
+    assert result == ["c"]
+
+    await db.mark_sent("sess1", ["c"])
+    result2 = await db.filter_unsent("sess1", ["a", "b", "c"])
+    assert result2 == []
+
+
+@pytest.mark.asyncio
+async def test_sent_posts_session_isolated(db):
+    """不同 session 的 sent_posts 互不干扰"""
+    await db.mark_sent("sess1", ["x"])
+    result = await db.filter_unsent("sess2", ["x"])
+    assert result == ["x"]
+
+
+@pytest.mark.asyncio
 async def test_cascade_delete(db):
     """删除订阅时 seen_posts 应联级删除"""
     await db.add_subscription("sess1", "tag", "test")

@@ -23,6 +23,22 @@ async def fetch_posts(sub: Subscription, client: LofterClient):
         return await parse_blog_posts(html)
 
 
+async def _push_posts(posts, sub: Subscription, send_func: SendFunc):
+    label = "标签" if sub.type == "tag" else "博主"
+    for post in reversed(posts[:5]):
+        title = post.title or "(无标题)"
+        tags = f"#{' #'.join(post.tags)}" if post.tags else ""
+        lines = [f"【{label}「{sub.target}」有新内容】", f"▸ {title}"]
+        if post.author:
+            lines.append(f"作者：{post.author}")
+        if tags:
+            lines.append(tags)
+        if post.summary:
+            lines.append(post.summary)
+        lines.append(post.url)
+        await send_func(sub.session_id, "\n".join(lines), post.images)
+
+
 async def _check_subscription(
     sub: Subscription,
     client: LofterClient,
@@ -56,19 +72,15 @@ async def _check_subscription(
 
     unseen_set = set(unseen_ids)
     new_posts = [p for p in posts if p.post_id in unseen_set]
-    label = "标签" if sub.type == "tag" else "博主"
-    for post in reversed(new_posts[:5]):
-        title = post.title or "(无标题)"
-        tags = f"#{' #'.join(post.tags)}" if post.tags else ""
-        lines = [f"【{label}「{sub.target}」有新内容】", f"▸ {title}"]
-        if post.author:
-            lines.append(f"作者：{post.author}")
-        if tags:
-            lines.append(tags)
-        if post.summary:
-            lines.append(post.summary)
-        lines.append(post.url)
-        await send_func(sub.session_id, "\n".join(lines), post.images)
+
+    actually_new_ids = await db.filter_unsent(sub.session_id, [p.post_id for p in new_posts])
+    if not actually_new_ids:
+        return
+
+    actually_new_set = set(actually_new_ids)
+    actually_new = [p for p in new_posts if p.post_id in actually_new_set]
+    await _push_posts(actually_new, sub, send_func)
+    await db.mark_sent(sub.session_id, actually_new_ids)
 
 
 class SubscriptionScheduler:
@@ -105,9 +117,16 @@ class SubscriptionScheduler:
             await asyncio.sleep(self._interval)
             await self._poll_all()
 
+    async def _poll_session(self, subs: list[Subscription]):
+        for sub in subs:
+            await _check_subscription(sub, self._client, self._db, self._send_func)
+
     async def _poll_all(self):
         subs = await self._storage.all()
+        by_session: dict[str, list[Subscription]] = {}
+        for s in subs:
+            by_session.setdefault(s.session_id, []).append(s)
         await asyncio.gather(
-            *[_check_subscription(s, self._client, self._db, self._send_func) for s in subs],
+            *[self._poll_session(session_subs) for session_subs in by_session.values()],
             return_exceptions=True,
         )

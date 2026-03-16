@@ -26,6 +26,13 @@ CREATE TABLE IF NOT EXISTS seen_posts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_seen_posts_sub ON seen_posts(subscription_id);
+
+CREATE TABLE IF NOT EXISTS sent_posts (
+    session_id TEXT    NOT NULL,
+    post_id    TEXT    NOT NULL,
+    sent_at    INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    PRIMARY KEY (session_id, post_id)
+);
 """
 
 
@@ -150,6 +157,38 @@ class LofterDB:
             return [pid for pid in post_ids if pid not in seen]
 
         return await self._run(_filter)
+
+    async def filter_unsent(self, session_id: str, post_ids: list[str]) -> list[str]:
+        if not post_ids:
+            return []
+        conn = self._conn
+
+        def _filter():
+            placeholders = ",".join("?" * len(post_ids))
+            sent = {
+                row[0]
+                for row in conn.execute(
+                    f"SELECT post_id FROM sent_posts WHERE session_id=? AND post_id IN ({placeholders})",
+                    (session_id, *post_ids),
+                ).fetchall()
+            }
+            return [pid for pid in post_ids if pid not in sent]
+
+        return await self._run(_filter)
+
+    async def mark_sent(self, session_id: str, post_ids: list[str]):
+        if not post_ids:
+            return
+        conn = self._conn
+
+        def _mark():
+            conn.executemany(
+                "INSERT OR IGNORE INTO sent_posts(session_id,post_id) VALUES(?,?)",
+                [(session_id, pid) for pid in post_ids],
+            )
+            conn.commit()
+
+        await self._run(_mark)
 
     async def mark_seen(self, subscription_id: int, post_ids: list[str]):
         if not post_ids:
