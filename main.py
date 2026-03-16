@@ -95,7 +95,16 @@ class LofterPlugin(Star):
         if not post:
             yield event.plain_result("未能解析该帖子内容")
             return
-        chain = [Comp.Plain(post.text)] + [Comp.Image.fromURL(u) for u in post.images]
+        tags = f"#{' #'.join(post.tags)}" if post.tags else ""
+        text_parts = [f"▸ {post.title}" if post.title else "▸ (无标题)"]
+        text_parts.append(f"作者：{post.author}  {post.publish_time}".strip())
+        if tags:
+            text_parts.append(tags)
+        if post.text:
+            text_parts.append(post.text)
+        text_parts.append(post.url)
+        chain = [Comp.Plain("\n".join(text_parts))]
+        chain += [Comp.Image.fromURL(u) for u in post.images]
         yield event.chain_result(chain)
 
     # ──────────────────────────────────────────
