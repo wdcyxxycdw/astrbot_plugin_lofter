@@ -1,7 +1,7 @@
+import asyncio
 import time
 
 import aiohttp
-from typing import Optional
 
 
 HEADERS = {
@@ -37,6 +37,19 @@ class LofterClient:
             ) as resp:
                 resp.raise_for_status()
                 return await resp.text()
+
+    async def search_tag_paged(self, tag: str, total: int) -> list[str]:
+        """翻页获取多页 DWR 响应，total 上限 100，每页 20 条，返回各页原始文本列表。"""
+        total = min(total, 100)
+        page_size = 20
+        pages = []
+        for offset in range(0, total, page_size):
+            limit = min(page_size, total - offset)
+            raw = await self.search_tag(tag, offset=offset, limit=limit)
+            pages.append(raw)
+            if offset + page_size < total:
+                await asyncio.sleep(0.3)
+        return pages
 
     async def search_tag(self, tag: str, offset: int = 0, limit: int = 20) -> str:
         """调用 DWR TagBean.search 接口，返回原始响应文本。"""

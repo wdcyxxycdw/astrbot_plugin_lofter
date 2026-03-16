@@ -15,7 +15,7 @@
         "default": 3
     },
     "search_limit": {
-        "description": "搜索结果最多返回的条数",
+        "description": "搜索结果最多返回的条数（最大 100，超过 20 条自动翻页）",
         "type": "int",
         "default": 3
     }

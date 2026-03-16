@@ -113,8 +113,18 @@ class LofterPlugin(Star):
             yield event.plain_result("请提供标签名，例如：/lofter search 原创")
             return
         try:
-            raw = await self._client.search_tag(keyword, limit=10)
-            posts = parse_dwr_response(raw)
+            limit = min(self._search_limit, 100)
+            if limit <= 20:
+                pages = [await self._client.search_tag(keyword, limit=limit)]
+            else:
+                pages = await self._client.search_tag_paged(keyword, total=limit)
+            seen_ids: set[str] = set()
+            posts = []
+            for raw in pages:
+                for p in parse_dwr_response(raw):
+                    if p.post_id not in seen_ids:
+                        seen_ids.add(p.post_id)
+                        posts.append(p)
         except Exception as e:
             yield event.plain_result(f"搜索失败：{e}")
             return
