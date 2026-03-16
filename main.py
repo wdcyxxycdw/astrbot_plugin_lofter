@@ -11,11 +11,14 @@ from astrbot.core.star import StarTools
 from .core.client import LofterClient
 from .core.db import LofterDB
 from .core.dwr_parser import parse_dwr_response
-from .core.parser import parse_post
 from .core.scheduler import SubscriptionScheduler
 from .core.storage import SubscriptionStorage
 
 POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
+_IMG_CDN_RE = re.compile(
+    r'(https://imglf\d+\.lf127\.net/img/[A-Za-z0-9/_=.+%-]+\.(?:jpg|png|gif|webp))'
+    r'\?[^"\'<>\s]*quality='
+)
 
 
 @register(
@@ -87,24 +90,24 @@ class LofterPlugin(Star):
         url = "https://" + match.group(0)
         try:
             html = await self._client.get(url)
-            post = await parse_post(html, url, self._max_images)
         except Exception as e:
-            logger.error("解析 Lofter 链接失败: %s", e)
-            yield event.plain_result(f"解析失败：{e}")
+            logger.error("获取 Lofter 帖子失败: %s", e)
             return
-        if not post:
-            yield event.plain_result("未能解析该帖子内容")
-            return
-        tags = f"#{' #'.join(post.tags)}" if post.tags else ""
-        text_parts = [f"▸ {post.title}" if post.title else "▸ (无标题)"]
-        text_parts.append(f"作者：{post.author}  {post.publish_time}".strip())
-        if tags:
-            text_parts.append(tags)
-        if post.summary:
-            text_parts.append(post.summary)
-        text_parts.append(post.url)
-        chain = [Comp.Plain("\n".join(text_parts))]
-        chain += [Comp.Image.fromURL(u) for u in post.images]
+
+        seen: set[str] = set()
+        images: list[str] = []
+        for base_url in _IMG_CDN_RE.findall(html):
+            if base_url not in seen:
+                seen.add(base_url)
+                images.append(base_url)
+            if len(images) >= self._max_images:
+                break
+
+        if not images:
+            return  # 非图片帖，静默忽略
+
+        chain = [Comp.Image.fromURL(u) for u in images]
+        chain.append(Comp.Plain(url))
         yield event.chain_result(chain)
 
     # ──────────────────────────────────────────
