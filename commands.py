@@ -13,10 +13,6 @@ SEARCH_URL = "https://www.lofter.com/s?q={keyword}"
 class LofterCommands:
     """命令处理 mixin，通过多继承挂载到 LofterPlugin"""
 
-    # ──────────────────────────────────────────
-    # 自动解析消息中的 Lofter 链接
-    # ──────────────────────────────────────────
-
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
     async def auto_parse(self, event: AstrMessageEvent):
         msg = str(event.message_obj) or event.message_str
@@ -36,10 +32,6 @@ class LofterCommands:
             return
         chain = [Comp.Plain(post.text)] + [Comp.Image.fromURL(u) for u in post.images]
         yield event.chain_result(chain)
-
-    # ──────────────────────────────────────────
-    # /lofter 命令组
-    # ──────────────────────────────────────────
 
     @filter.command_group("lofter")
     def lofter(self): ...
@@ -69,7 +61,7 @@ class LofterCommands:
     @lofter.command("list")
     async def sub_list(self, event: AstrMessageEvent):
         """查看当前会话的订阅列表"""
-        subs = self._storage.list_by_session(event.unified_msg_origin)
+        subs = await self._storage.list_by_session(event.unified_msg_origin)
         if not subs:
             yield event.plain_result("当前没有订阅")
             return
@@ -79,52 +71,53 @@ class LofterCommands:
             lines.append(f"• [{label}] {s.target}")
         yield event.plain_result("\n".join(lines))
 
-    # ── sub 子命令组 ──
+    @lofter.command("cookie")
+    async def set_cookie(self, event: AstrMessageEvent):
+        """更新 Lofter Cookie。用法：/lofter cookie <cookie值>"""
+        value = event.message_str.strip()
+        if not value:
+            yield event.plain_result("请提供 Cookie 值，例如：/lofter cookie your_cookie_here")
+            return
+        await self._db.set_config("lofter_cookie", value)
+        self._client.update_cookie(value)
+        yield event.plain_result("Cookie 已更新")
 
-    @lofter.command_group("sub")
-    def sub(self): ...
-
-    @sub.command("tag")
+    @lofter.command("subtag")
     async def sub_tag(self, event: AstrMessageEvent):
-        """订阅标签。用法：/lofter sub tag <标签名>"""
+        """订阅标签。用法：/lofter subtag <标签名>"""
         tag = event.message_str.strip()
         if not tag:
-            yield event.plain_result("请提供标签名，例如：/lofter sub tag 原创")
+            yield event.plain_result("请提供标签名，例如：/lofter subtag 原创")
             return
-        ok = self._storage.add(event.unified_msg_origin, "tag", tag)
+        ok = await self._storage.add(event.unified_msg_origin, "tag", tag)
         yield event.plain_result(f"已订阅标签「{tag}」" if ok else f"已经订阅过标签「{tag}」了")
 
-    @sub.command("blog")
+    @lofter.command("subblog")
     async def sub_blog(self, event: AstrMessageEvent):
-        """订阅博主。用法：/lofter sub blog <用户名>"""
+        """订阅博主。用法：/lofter subblog <用户名>"""
         username = event.message_str.strip()
         if not username:
-            yield event.plain_result("请提供博主用户名，例如：/lofter sub blog username")
+            yield event.plain_result("请提供博主用户名，例如：/lofter subblog username")
             return
-        ok = self._storage.add(event.unified_msg_origin, "blog", username)
+        ok = await self._storage.add(event.unified_msg_origin, "blog", username)
         yield event.plain_result(f"已订阅博主「{username}」" if ok else f"已经订阅过博主「{username}」了")
 
-    # ── unsub 子命令组 ──
-
-    @lofter.command_group("unsub")
-    def unsub(self): ...
-
-    @unsub.command("tag")
+    @lofter.command("unsubtag")
     async def unsub_tag(self, event: AstrMessageEvent):
-        """取消订阅标签。用法：/lofter unsub tag <标签名>"""
+        """取消订阅标签。用法：/lofter unsubtag <标签名>"""
         tag = event.message_str.strip()
         if not tag:
             yield event.plain_result("请提供标签名")
             return
-        ok = self._storage.remove(event.unified_msg_origin, "tag", tag)
+        ok = await self._storage.remove(event.unified_msg_origin, "tag", tag)
         yield event.plain_result(f"已取消订阅标签「{tag}」" if ok else f"未找到标签「{tag}」的订阅")
 
-    @unsub.command("blog")
+    @lofter.command("unsubblog")
     async def unsub_blog(self, event: AstrMessageEvent):
-        """取消订阅博主。用法：/lofter unsub blog <用户名>"""
+        """取消订阅博主。用法：/lofter unsubblog <用户名>"""
         username = event.message_str.strip()
         if not username:
             yield event.plain_result("请提供博主用户名")
             return
-        ok = self._storage.remove(event.unified_msg_origin, "blog", username)
+        ok = await self._storage.remove(event.unified_msg_origin, "blog", username)
         yield event.plain_result(f"已取消订阅博主「{username}」" if ok else f"未找到博主「{username}」的订阅")

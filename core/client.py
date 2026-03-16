@@ -21,6 +21,9 @@ class LofterClient:
     def __init__(self, cookie: str = ""):
         self._cookie = cookie
 
+    def update_cookie(self, cookie: str):
+        self._cookie = cookie
+
     def _make_session(self) -> aiohttp.ClientSession:
         headers = dict(HEADERS)
         if self._cookie:

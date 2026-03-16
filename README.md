@@ -28,7 +28,7 @@ AstrBot 插件，用于解析 Lofter 链接、订阅 Lofter 标签/博主、搜�
 1. 浏览器登录 [lofter.com](https://www.lofter.com)
 2. 打开开发者工具（F12）→ Network 标签
 3. 刷新页面，点击任意请求，复制请求头中的 `Cookie` 字段值
-4. 粘贴到插件配置的 `lofter_cookie` 中
+4. 粘贴到插件配置的 `lofter_cookie` 中，或运行时使用 `/lofter cookie <值>` 命令更新
 
 ## 使用
 
@@ -45,11 +45,24 @@ https://username.lofter.com/post/xxxxxx
 | 命令 | 说明 |
 |------|------|
 | `/lofter search <关键词>` | 搜索 Lofter 内容 |
-| `/lofter sub tag <标签名>` | 订阅标签 |
-| `/lofter sub blog <用户名>` | 订阅博主 |
-| `/lofter unsub tag <标签名>` | 取消订阅标签 |
-| `/lofter unsub blog <用户名>` | 取消订阅博主 |
+| `/lofter subtag <标签名>` | 订阅标签 |
+| `/lofter subblog <用户名>` | 订阅博主 |
+| `/lofter unsubtag <标签名>` | 取消订阅标签 |
+| `/lofter unsubblog <用户名>` | 取消订阅博主 |
 | `/lofter list` | 查看当前会话的订阅列表 |
+| `/lofter cookie <值>` | 运行时更新 Lofter Cookie，立即生效 |
+
+## 数据存储
+
+插件使用 SQLite 持久化数据，文件位于：
+
+```
+<astrbot_root>/data/plugins/astrbot_plugin_lofter/lofter.db
+```
+
+- **精确去重**：通过 `seen_posts` 表记录已推送的帖子 ID，两次轮询间出现多条新帖也不会漏推
+- **冷启动保护**：首次轮询时自动标记所有已有内容，不会刷屏推送历史帖子
+- **JSON 迁移**：若目录下存在旧版 `subscriptions.json`，首次启动会自动导入，原文件保留
 
 ## 许可证
 

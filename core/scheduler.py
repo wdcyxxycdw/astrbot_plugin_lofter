@@ -4,6 +4,7 @@ from typing import Callable, Awaitable
 from astrbot.api import logger
 
 from .client import LofterClient
+from .db import LofterDB
 from .dwr_parser import parse_dwr_response
 from .parser import parse_blog_posts
 from .storage import Subscription, SubscriptionStorage
@@ -25,7 +26,7 @@ async def _fetch_posts(sub: Subscription, client: LofterClient):
 async def _check_subscription(
     sub: Subscription,
     client: LofterClient,
-    storage: SubscriptionStorage,
+    db: LofterDB,
     send_func: SendFunc,
 ):
     try:
@@ -37,21 +38,24 @@ async def _check_subscription(
     if not posts:
         return
 
-    latest_id = posts[0].post_id
-    if latest_id == sub.last_post_id:
+    sub_id = await db.get_subscription_id(sub.session_id, sub.type, sub.target)
+    if sub_id is None:
         return
 
-    new_posts = [p for p in posts if p.post_id != sub.last_post_id]
-    if sub.last_post_id:
-        # 只推送比上次更新的
-        new_posts = list(
-            p for p in posts
-            if int(p.post_id) > int(sub.last_post_id)
-            if p.post_id.isdigit() and sub.last_post_id.isdigit()
-        ) or new_posts[:1]
+    all_ids = [p.post_id for p in posts]
+    unseen_ids = await db.filter_unseen(sub_id, all_ids)
 
-    storage.update_last_post_id(sub.session_id, sub.type, sub.target, latest_id)
+    if not unseen_ids:
+        return
 
+    is_cold_start = len(unseen_ids) == len(all_ids)
+    await db.mark_seen(sub_id, unseen_ids)
+
+    if is_cold_start:
+        return
+
+    unseen_set = set(unseen_ids)
+    new_posts = [p for p in posts if p.post_id in unseen_set]
     label = "标签" if sub.type == "tag" else "博主"
     for post in reversed(new_posts[:5]):
         text = f"【{label}「{sub.target}」有新内容】\n{post.title or post.url}"
@@ -63,11 +67,13 @@ class SubscriptionScheduler:
         self,
         storage: SubscriptionStorage,
         client: LofterClient,
+        db: LofterDB,
         send_func: SendFunc,
         interval_minutes: int = 30,
     ):
         self._storage = storage
         self._client = client
+        self._db = db
         self._send_func = send_func
         self._interval = interval_minutes * 60
         self._task: asyncio.Task | None = None
@@ -91,8 +97,8 @@ class SubscriptionScheduler:
             await self._poll_all()
 
     async def _poll_all(self):
-        subs = self._storage.all()
+        subs = await self._storage.all()
         await asyncio.gather(
-            *[_check_subscription(s, self._client, self._storage, self._send_func) for s in subs],
+            *[_check_subscription(s, self._client, self._db, self._send_func) for s in subs],
             return_exceptions=True,
         )
