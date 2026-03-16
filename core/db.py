@@ -140,6 +140,18 @@ class LofterDB:
 
         return await self._run(_list)
 
+    async def fix_subscription_target(self, sub_id: int, new_target: str):
+        conn = self._conn
+
+        def _fix():
+            conn.execute(
+                "UPDATE subscriptions SET target=? WHERE id=?",
+                (new_target, sub_id),
+            )
+            conn.commit()
+
+        await self._run(_fix)
+
     async def filter_unseen(self, subscription_id: int, post_ids: list[str]) -> list[str]:
         if not post_ids:
             return []

@@ -40,12 +40,20 @@ def _extract_summary(value) -> str:
 
 def _extract_images(value) -> list[str]:
     if isinstance(value, list):
-        return [u.split("?")[0] for u in value if isinstance(u, str)]
+        seen: dict[str, None] = {}
+        for u in value:
+            if isinstance(u, str) and u:
+                seen[u.split("?")[0]] = None
+        return list(seen)
     if isinstance(value, str):
         try:
             urls = json.loads(value)
             if isinstance(urls, list):
-                return [u.split("?")[0] for u in urls if isinstance(u, str)]
+                seen = {}
+                for u in urls:
+                    if isinstance(u, str) and u:
+                        seen[u.split("?")[0]] = None
+                return list(seen)
         except Exception:
             pass
         if value.startswith("http"):

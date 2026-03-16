@@ -45,8 +45,13 @@ class LofterPlugin(Star):
     async def initialize(self):
         await self._db.initialize()
         await self._migrate_json_once()
+        await self._fix_corrupted_subscriptions()
         cookie = await self._db.get_config("lofter_cookie") or self._config_cookie
         if cookie:
+            # 修复旧版本 bug：cookie 可能被误存为带 "lofter cookie " 前缀的形式
+            if cookie.lower().startswith("lofter cookie "):
+                cookie = cookie[len("lofter cookie "):]
+            cookie = cookie.strip()
             await self._db.set_config("lofter_cookie", cookie)
         self._client.update_cookie(cookie)
         self._scheduler.start()
@@ -54,6 +59,32 @@ class LofterPlugin(Star):
     async def terminate(self):
         await self._scheduler.stop()
         await self._db.close()
+
+    async def _fix_corrupted_subscriptions(self):
+        """修复旧版本 bug：订阅 target 可能带有命令前缀，如 'lofter subtag 原创' → '原创'。"""
+        if await self._db.get_config("subscriptions_fixed"):
+            return
+        _PREFIXES = [
+            "lofter subtagpreview ",
+            "lofter subtag ",
+            "lofter subblog ",
+        ]
+        rows = await self._db.list_subscriptions()
+        for row in rows:
+            sub_id, session_id, sub_type, target = row
+            for prefix in _PREFIXES:
+                if target.lower().startswith(prefix):
+                    new_target = target[len(prefix):]
+                    await self._db.fix_subscription_target(sub_id, new_target)
+                    logger.info("Lofter: 修复订阅 target '%s' → '%s'", target, new_target)
+                    break
+        await self._db.set_config("subscriptions_fixed", "1")
+
+    @staticmethod
+    def _cmd_arg(message_str: str) -> str:
+        """从 event.message_str 中提取子命令参数（去掉前两个词，即 'lofter <subcmd>'）。"""
+        parts = message_str.strip().split(None, 2)
+        return parts[2] if len(parts) > 2 else ""
 
     async def _migrate_json_once(self):
         if await self._db.get_config("json_migrated"):
@@ -133,7 +164,7 @@ class LofterPlugin(Star):
     @lofter.command("search")
     async def search(self, event: AstrMessageEvent):
         """搜索 Lofter 标签内容。用法：/lofter search <标签名>"""
-        keyword = event.message_str.strip()
+        keyword = self._cmd_arg(event.message_str)
         if not keyword:
             yield event.plain_result("请提供标签名，例如：/lofter search 原创")
             return
@@ -186,7 +217,7 @@ class LofterPlugin(Star):
     @lofter.command("cookie")
     async def set_cookie(self, event: AstrMessageEvent):
         """更新 Lofter Cookie。用法：/lofter cookie <cookie值>"""
-        value = event.message_str.strip()
+        value = self._cmd_arg(event.message_str)
         if not value:
             yield event.plain_result("请提供 Cookie 值，例如：/lofter cookie your_cookie_here")
             return
@@ -197,7 +228,7 @@ class LofterPlugin(Star):
     @lofter.command("subtag")
     async def sub_tag(self, event: AstrMessageEvent):
         """订阅标签。用法：/lofter subtag <标签名>"""
-        tag = event.message_str.strip()
+        tag = self._cmd_arg(event.message_str)
         if not tag:
             yield event.plain_result("请提供标签名，例如：/lofter subtag 原创")
             return
@@ -207,7 +238,7 @@ class LofterPlugin(Star):
     @lofter.command("subtagpreview")
     async def sub_tag_preview(self, event: AstrMessageEvent):
         """订阅标签并立即预览最新内容。用法：/lofter subtagpreview <标签名>"""
-        tag = event.message_str.strip()
+        tag = self._cmd_arg(event.message_str)
         if not tag:
             yield event.plain_result("请提供标签名，例如：/lofter subtagpreview 原创")
             return
@@ -240,7 +271,7 @@ class LofterPlugin(Star):
     @lofter.command("subblog")
     async def sub_blog(self, event: AstrMessageEvent):
         """订阅博主。用法：/lofter subblog <用户名>"""
-        username = event.message_str.strip()
+        username = self._cmd_arg(event.message_str)
         if not username:
             yield event.plain_result("请提供博主用户名，例如：/lofter subblog username")
             return
@@ -250,7 +281,7 @@ class LofterPlugin(Star):
     @lofter.command("unsubtag")
     async def unsub_tag(self, event: AstrMessageEvent):
         """取消订阅标签。用法：/lofter unsubtag <标签名>"""
-        tag = event.message_str.strip()
+        tag = self._cmd_arg(event.message_str)
         if not tag:
             yield event.plain_result("请提供标签名")
             return
@@ -260,7 +291,7 @@ class LofterPlugin(Star):
     @lofter.command("unsubblog")
     async def unsub_blog(self, event: AstrMessageEvent):
         """取消订阅博主。用法：/lofter unsubblog <用户名>"""
-        username = event.message_str.strip()
+        username = self._cmd_arg(event.message_str)
         if not username:
             yield event.plain_result("请提供博主用户名")
             return
