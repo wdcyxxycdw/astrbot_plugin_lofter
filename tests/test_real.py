@@ -13,6 +13,7 @@ import os
 import pytest
 
 from core.client import LofterClient
+from core.dwr_parser import parse_dwr_response
 from core.parser import parse_post, parse_blog_posts
 
 COOKIE = os.getenv("LOFTER_COOKIE", "")
@@ -23,7 +24,7 @@ BLOG = os.getenv("LOFTER_BLOG", "")
 
 def skip_if_missing(*vars_):
     missing = [v for v in vars_ if not v]
-    return pytest.mark.skipif(bool(missing), reason=f"缺少环境变量")
+    return pytest.mark.skipif(bool(missing), reason="缺少环境变量")
 
 
 @pytest.mark.asyncio
@@ -31,35 +32,36 @@ def skip_if_missing(*vars_):
 async def test_real_parse_post():
     client = LofterClient(COOKIE)
     html = await client.get(POST_URL)
-
     print(f"\n[HTML 长度] {len(html)} 字符")
 
     post = await parse_post(html, POST_URL, max_images=9)
-    assert post is not None, "解析结果为 None，可能 div.content 选择器不匹配，请检查实际 HTML"
+    assert post is not None, "解析结果为 None，可能选择器不匹配"
 
     print(f"[post_id]  {post.post_id}")
     print(f"[title]    {post.title}")
     print(f"[images]   {len(post.images)} 张: {post.images}")
     print(f"[text 前100字] {post.text[:100]}")
-
     assert post.post_id, "未能提取 post_id"
 
 
 @pytest.mark.asyncio
 @skip_if_missing(COOKIE, TAG)
-async def test_real_parse_tag():
+async def test_real_tag_dwr():
+    """通过 DWR TagBean.search 获取标签帖子列表"""
     client = LofterClient(COOKIE)
-    url = f"https://www.lofter.com/tag/{TAG}"
-    html = await client.get(url)
+    raw = await client.search_tag(TAG, limit=20)
+    print(f"\n[DWR 响应长度] {len(raw)} 字符")
 
-    print(f"\n[标签页 HTML 长度] {len(html)} 字符")
-
-    posts = await parse_blog_posts(html)
+    posts = parse_dwr_response(raw)
     print(f"[解析到帖子数] {len(posts)}")
     for p in posts[:3]:
-        print(f"  - {p.post_id} | {p.title} | {p.url}")
+        print(f"  - {p.post_id} | {p.url}")
+        if p.content:
+            print(f"    content 前50字: {p.content[:50]}")
 
-    assert len(posts) > 0, "标签页未解析到任何帖子（标签页为 JS 渲染，此项可能无法通过 HTML 解析）"
+    assert len(posts) > 0, "未从 DWR 响应中解析到帖子"
+    assert all(p.post_id for p in posts), "存在缺少 post_id 的帖子"
+    assert all(p.url for p in posts), "存在缺少 url 的帖子"
 
 
 @pytest.mark.asyncio
@@ -68,7 +70,6 @@ async def test_real_parse_blog():
     client = LofterClient(COOKIE)
     url = f"https://{BLOG}.lofter.com"
     html = await client.get(url)
-
     print(f"\n[博主页 HTML 长度] {len(html)} 字符")
 
     posts = await parse_blog_posts(html)
@@ -76,4 +77,4 @@ async def test_real_parse_blog():
     for p in posts[:3]:
         print(f"  - {p.post_id} | {p.title} | {p.url}")
 
-    assert len(posts) > 0, "博主页未解析到任何帖子，请检查 parse_blog_posts 中的选择器"
+    assert len(posts) > 0, "博主页未解析到任何帖子"

@@ -4,19 +4,22 @@ from typing import Callable, Awaitable
 from astrbot.api import logger
 
 from .client import LofterClient
+from .dwr_parser import parse_dwr_response
 from .parser import parse_blog_posts
 from .storage import Subscription, SubscriptionStorage
 
-SendFunc = Callable[[str, list], Awaitable[None]]
+SendFunc = Callable[[str, str, list], Awaitable[None]]
 
-TAG_URL = "https://www.lofter.com/tag/{tag}"
 BLOG_URL = "https://{username}.lofter.com"
 
 
-def _sub_url(sub: Subscription) -> str:
+async def _fetch_posts(sub: Subscription, client: LofterClient):
     if sub.type == "tag":
-        return TAG_URL.format(tag=sub.target)
-    return BLOG_URL.format(username=sub.target)
+        raw = await client.search_tag(sub.target, limit=20)
+        return parse_dwr_response(raw)
+    else:
+        html = await client.get(BLOG_URL.format(username=sub.target))
+        return await parse_blog_posts(html)
 
 
 async def _check_subscription(
@@ -25,10 +28,8 @@ async def _check_subscription(
     storage: SubscriptionStorage,
     send_func: SendFunc,
 ):
-    url = _sub_url(sub)
     try:
-        html = await client.get(url)
-        posts = await parse_blog_posts(html)
+        posts = await _fetch_posts(sub, client)
     except Exception as e:
         logger.error("轮询订阅 %s/%s 失败: %s", sub.type, sub.target, e)
         return
@@ -40,19 +41,21 @@ async def _check_subscription(
     if latest_id == sub.last_post_id:
         return
 
-    # 找到上次已推送位置，仅推送新帖
-    new_posts = []
-    for p in posts:
-        if p.post_id == sub.last_post_id:
-            break
-        new_posts.append(p)
+    new_posts = [p for p in posts if p.post_id != sub.last_post_id]
+    if sub.last_post_id:
+        # 只推送比上次更新的
+        new_posts = list(
+            p for p in posts
+            if int(p.post_id) > int(sub.last_post_id)
+            if p.post_id.isdigit() and sub.last_post_id.isdigit()
+        ) or new_posts[:1]
 
     storage.update_last_post_id(sub.session_id, sub.type, sub.target, latest_id)
 
-    for post in reversed(new_posts):
-        label = "标签" if sub.type == "tag" else "博主"
-        header = f"【{label}「{sub.target}」有新内容】\n{post.title or post.url}"
-        await send_func(sub.session_id, header, post.images[:1])
+    label = "标签" if sub.type == "tag" else "博主"
+    for post in reversed(new_posts[:5]):
+        text = f"【{label}「{sub.target}」有新内容】\n{post.title or post.url}"
+        await send_func(sub.session_id, text, [])
 
 
 class SubscriptionScheduler:
@@ -89,8 +92,7 @@ class SubscriptionScheduler:
 
     async def _poll_all(self):
         subs = self._storage.all()
-        tasks = [
-            _check_subscription(s, self._client, self._storage, self._send_func)
-            for s in subs
-        ]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(
+            *[_check_subscription(s, self._client, self._storage, self._send_func) for s in subs],
+            return_exceptions=True,
+        )
