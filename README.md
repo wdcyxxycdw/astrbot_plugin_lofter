@@ -22,6 +22,7 @@ AstrBot 插件，用于解析 Lofter 链接、订阅 Lofter 标签/博主、搜�
 | `lofter_cookie` | Lofter 登录 Cookie（从浏览器开发者工具复制） | 空 |
 | `poll_interval` | 订阅轮询间隔（分钟） | 30 |
 | `max_images` | 解析帖子时最多展示的图片数量 | 3 |
+| `search_limit` | 搜索结果最多返回的条数（最大 100，超过 20 条自动翻页） | 3 |
 
 ### 获取 Cookie
 
