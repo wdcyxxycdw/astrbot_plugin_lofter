@@ -11,8 +11,8 @@ from astrbot.core.star import StarTools
 from .core.client import LofterClient
 from .core.db import LofterDB
 from .core.dwr_parser import parse_dwr_response
-from .core.scheduler import SubscriptionScheduler
-from .core.storage import SubscriptionStorage
+from .core.scheduler import SubscriptionScheduler, fetch_posts
+from .core.storage import Subscription, SubscriptionStorage
 
 POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
 _IMG_CDN_RE = re.compile(
@@ -69,6 +69,19 @@ class LofterPlugin(Star):
             except Exception as e:
                 logger.error("Lofter: JSON 迁移失败: %s", e)
         await self._db.set_config("json_migrated", "1")
+
+    def _format_post_lines(self, post, label: str, target: str) -> list[str]:
+        title = post.title or "(无标题)"
+        lines = [f"【{label}「{target}」有新内容】", f"▸ {title}"]
+        if post.author:
+            lines.append(f"作者：{post.author}")
+        tags = f"#{' #'.join(post.tags)}" if post.tags else ""
+        if tags:
+            lines.append(tags)
+        if post.summary:
+            lines.append(post.summary)
+        lines.append(post.url)
+        return lines
 
     async def _send_push(self, session_id: str, text: str, images: list[str]):
         chain = [Comp.Plain(text)] + [Comp.Image.fromURL(u) for u in images]
@@ -190,6 +203,39 @@ class LofterPlugin(Star):
             return
         ok = await self._storage.add(event.unified_msg_origin, "tag", tag)
         yield event.plain_result(f"已订阅标签「{tag}」" if ok else f"已经订阅过标签「{tag}」了")
+
+    @lofter.command("subtagpreview")
+    async def sub_tag_preview(self, event: AstrMessageEvent):
+        """订阅标签并立即预览最新内容。用法：/lofter subtagpreview <标签名>"""
+        tag = event.message_str.strip()
+        if not tag:
+            yield event.plain_result("请提供标签名，例如：/lofter subtagpreview 原创")
+            return
+
+        session_id = event.unified_msg_origin
+        await self._storage.add(session_id, "tag", tag)
+
+        sub = Subscription(session_id=session_id, type="tag", target=tag)
+        try:
+            posts = await fetch_posts(sub, self._client)
+        except Exception as e:
+            yield event.plain_result(f"已订阅标签「{tag}」，但获取内容失败：{e}")
+            return
+
+        if not posts:
+            yield event.plain_result(f"已订阅标签「{tag}」，暂无内容")
+            return
+
+        sub_id = await self._db.get_subscription_id(session_id, "tag", tag)
+        if sub_id is not None:
+            await self._db.mark_seen(sub_id, [p.post_id for p in posts])
+
+        yield event.plain_result(f"已订阅标签「{tag}」，以下是最新 3 条内容：")
+        for post in posts[:3]:
+            lines = self._format_post_lines(post, "标签", tag)
+            chain = [Comp.Plain("\n".join(lines))]
+            chain += [Comp.Image.fromURL(u) for u in post.images[:self._max_images]]
+            yield event.chain_result(chain)
 
     @lofter.command("subblog")
     async def sub_blog(self, event: AstrMessageEvent):

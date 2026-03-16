@@ -1,5 +1,4 @@
 import asyncio
-import time
 
 import aiohttp
 
@@ -53,7 +52,6 @@ class LofterClient:
 
     async def search_tag(self, tag: str, offset: int = 0, limit: int = 20) -> str:
         """调用 DWR TagBean.search 接口，返回原始响应文本。"""
-        ts = int(time.time() * 1000)
         body = (
             f"callCount=1\n"
             f"scriptSessionId=${{scriptSessionId}}187\n"
@@ -68,8 +66,8 @@ class LofterClient:
             f"c0-param4=boolean:false\n"
             f"c0-param5=number:0\n"
             f"c0-param6=number:{limit}\n"
-            f"c0-param7=number:{limit}\n"
-            f"c0-param8=number:{ts}\n"
+            f"c0-param7=number:0\n"
+            f"c0-param8=number:0\n"
             f"batchId=1"
         )
         headers = {**HEADERS, "Content-Type": "text/plain", "Referer": f"https://www.lofter.com/tag/{tag}"}

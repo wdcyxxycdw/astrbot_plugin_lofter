@@ -14,7 +14,7 @@ SendFunc = Callable[[str, str, list], Awaitable[None]]
 BLOG_URL = "https://{username}.lofter.com"
 
 
-async def _fetch_posts(sub: Subscription, client: LofterClient):
+async def fetch_posts(sub: Subscription, client: LofterClient):
     if sub.type == "tag":
         raw = await client.search_tag(sub.target, limit=20)
         return await parse_dwr_response(raw)
@@ -30,7 +30,7 @@ async def _check_subscription(
     send_func: SendFunc,
 ):
     try:
-        posts = await _fetch_posts(sub, client)
+        posts = await fetch_posts(sub, client)
     except Exception as e:
         logger.error("轮询订阅 %s/%s 失败: %s", sub.type, sub.target, e)
         return
