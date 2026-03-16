@@ -47,6 +47,7 @@ https://username.lofter.com/post/xxxxxx
 |------|------|
 | `/lofter search <关键词>` | 搜索 Lofter 内容 |
 | `/lofter subtag <标签名>` | 订阅标签 |
+| `/lofter subtagpreview <标签名>` | 订阅标签并立即预览最新 3 条内容 |
 | `/lofter subblog <用户名>` | 订阅博主 |
 | `/lofter unsubtag <标签名>` | 取消订阅标签 |
 | `/lofter unsubblog <用户名>` | 取消订阅博主 |
@@ -61,7 +62,8 @@ https://username.lofter.com/post/xxxxxx
 <astrbot_root>/data/plugins/astrbot_plugin_lofter/lofter.db
 ```
 
-- **精确去重**：通过 `seen_posts` 表记录已推送的帖子 ID，两次轮询间出现多条新帖也不会漏推
+- **精确去重**：通过 `seen_posts` 表记录各订阅已处理的帖子 ID，两次轮询间出现多条新帖也不会漏推
+- **跨订阅去重**：通过 `sent_posts` 表记录会话维度已推送的帖子 ID，同一帖子打了多个已订阅标签时只推送一次
 - **冷启动保护**：首次轮询时自动标记所有已有内容，不会刷屏推送历史帖子
 - **JSON 迁移**：若目录下存在旧版 `subscriptions.json`，首次启动会自动导入，原文件保留
 
