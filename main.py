@@ -100,8 +100,8 @@ class LofterPlugin(Star):
         text_parts.append(f"作者：{post.author}  {post.publish_time}".strip())
         if tags:
             text_parts.append(tags)
-        if post.text:
-            text_parts.append(post.text)
+        if post.summary:
+            text_parts.append(post.summary)
         text_parts.append(post.url)
         chain = [Comp.Plain("\n".join(text_parts))]
         chain += [Comp.Image.fromURL(u) for u in post.images]
@@ -130,7 +130,7 @@ class LofterPlugin(Star):
             seen_ids: set[str] = set()
             posts = []
             for raw in pages:
-                for p in parse_dwr_response(raw):
+                for p in await parse_dwr_response(raw):
                     if p.post_id not in seen_ids:
                         seen_ids.add(p.post_id)
                         posts.append(p)
@@ -148,7 +148,7 @@ class LofterPlugin(Star):
             if tags:
                 text_parts.append(tags)
             if p.summary:
-                text_parts.append(p.summary)
+                text_parts.append(p.summary)  # 已截断 300 字
             text_parts.append(p.url)
             chain = [Comp.Plain("\n".join(text_parts))]
             chain += [Comp.Image.fromURL(u) for u in p.images[:self._max_images]]

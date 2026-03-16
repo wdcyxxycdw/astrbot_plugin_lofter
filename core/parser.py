@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup, Tag
 class Post:
     post_id: str
     title: str
-    text: str
+    summary: str
     images: list[str] = field(default_factory=list)
     author: str = ""
     url: str = ""
@@ -64,7 +64,7 @@ def _parse_post_sync(html: str, url: str, max_images: int) -> Optional[Post]:
     return Post(
         post_id=post_id,
         title=title,
-        text=summary,
+        summary=summary,
         images=images,
         author=author,
         url=url,
@@ -93,7 +93,7 @@ async def parse_blog_posts(html: str) -> list[Post]:
             if not post_id or post_id in seen:
                 continue
             seen.add(post_id)
-            posts.append(Post(post_id=post_id, title=a.get_text(strip=True), text="", url=href))
+            posts.append(Post(post_id=post_id, title=a.get_text(strip=True), summary="", url=href))
         return posts
 
     return await asyncio.get_running_loop().run_in_executor(None, _parse)

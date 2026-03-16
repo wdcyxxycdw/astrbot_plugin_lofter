@@ -17,7 +17,7 @@ BLOG_URL = "https://{username}.lofter.com"
 async def _fetch_posts(sub: Subscription, client: LofterClient):
     if sub.type == "tag":
         raw = await client.search_tag(sub.target, limit=20)
-        return parse_dwr_response(raw)
+        return await parse_dwr_response(raw)
     else:
         html = await client.get(BLOG_URL.format(username=sub.target))
         return await parse_blog_posts(html)
@@ -59,20 +59,16 @@ async def _check_subscription(
     label = "标签" if sub.type == "tag" else "博主"
     for post in reversed(new_posts[:5]):
         title = post.title or "(无标题)"
-        tags_list = getattr(post, 'tags', [])
-        tags = f"#{' #'.join(tags_list)}" if tags_list else ""
-        summary = getattr(post, 'summary', '')
-        author = getattr(post, 'author', '')
-        images = getattr(post, 'images', [])
+        tags = f"#{' #'.join(post.tags)}" if post.tags else ""
         lines = [f"【{label}「{sub.target}」有新内容】", f"▸ {title}"]
-        if author:
-            lines.append(f"作者：{author}")
+        if post.author:
+            lines.append(f"作者：{post.author}")
         if tags:
             lines.append(tags)
-        if summary:
-            lines.append(summary)
+        if post.summary:
+            lines.append(post.summary)
         lines.append(post.url)
-        await send_func(sub.session_id, "\n".join(lines), images)
+        await send_func(sub.session_id, "\n".join(lines), post.images)
 
 
 class SubscriptionScheduler:
