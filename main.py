@@ -139,7 +139,6 @@ class LofterPlugin(Star):
             return
 
         post = await parse_post_page(html, url)
-        # 无有效内容（异常页/无意义帖）→ 静默忽略
         if not post.summary and not post.images:
             return
 
