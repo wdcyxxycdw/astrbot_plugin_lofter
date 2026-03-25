@@ -3,4 +3,4 @@ display_name: Lofter
 desc: 解析 Lofter 链接，订阅 Lofter 标签/博主，搜索 Lofter 内容
 author: user
 version: v1.0.0
-repo: ""
+repo: "https://github.com/wdcyxxycdw/astrbot_plugin_lofter"
