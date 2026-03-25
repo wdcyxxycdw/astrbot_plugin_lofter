@@ -11,14 +11,11 @@ from astrbot.core.star import StarTools
 from .core.client import LofterClient
 from .core.db import LofterDB
 from .core.dwr_parser import parse_dwr_response
+from .core.parser import parse_post_page
 from .core.scheduler import SubscriptionScheduler, fetch_posts
 from .core.storage import Subscription, SubscriptionStorage
 
 POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
-_IMG_CDN_RE = re.compile(
-    r'(https://imglf\d+\.lf127\.net/img/[A-Za-z0-9/_=.+%-]+\.(?:jpg|png|gif|webp))'
-    r'\?[^"\'<>\s]*quality='
-)
 
 
 @register(
@@ -141,20 +138,23 @@ class LofterPlugin(Star):
             logger.error("获取 Lofter 帖子失败: %s", e)
             return
 
-        seen: set[str] = set()
-        images: list[str] = []
-        for base_url in _IMG_CDN_RE.findall(html):
-            if base_url not in seen:
-                seen.add(base_url)
-                images.append(base_url)
-            if len(images) >= self._max_images:
-                break
+        post = await parse_post_page(html, url)
+        # 无有效内容（异常页/无意义帖）→ 静默忽略
+        if not post.summary and not post.images:
+            return
 
-        if not images:
-            return  # 非图片帖，静默忽略
+        text_parts = [f"▸ {post.title or '(无标题)'}"]
+        if post.author:
+            text_parts.append(f"作者：{post.author}")
+        tags = f"#{' #'.join(post.tags)}" if post.tags else ""
+        if tags:
+            text_parts.append(tags)
+        if post.summary:
+            text_parts.append(post.summary)
+        text_parts.append(url)
 
-        chain = [Comp.Image.fromURL(u) for u in images]
-        chain.append(Comp.Plain(url))
+        chain = [Comp.Plain("\n".join(text_parts))]
+        chain += [Comp.Image.fromURL(u) for u in post.images[:self._max_images]]
         yield event.chain_result(chain)
 
     # ──────────────────────────────────────────

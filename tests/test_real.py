@@ -14,7 +14,7 @@ import pytest
 
 from core.client import LofterClient
 from core.dwr_parser import parse_dwr_response
-from core.parser import parse_post, parse_blog_posts
+from core.parser import parse_post_page, parse_blog_posts
 
 COOKIE = os.getenv("LOFTER_COOKIE", "")
 POST_URL = os.getenv("LOFTER_POST_URL", "")
@@ -34,13 +34,13 @@ async def test_real_parse_post():
     html = await client.get(POST_URL)
     print(f"\n[HTML 长度] {len(html)} 字符")
 
-    post = await parse_post(html, POST_URL, max_images=9)
+    post = await parse_post_page(html, POST_URL)
     assert post is not None, "解析结果为 None，可能选择器不匹配"
 
     print(f"[post_id]  {post.post_id}")
     print(f"[title]    {post.title}")
     print(f"[images]   {len(post.images)} 张: {post.images}")
-    print(f"[text 前100字] {post.text[:100]}")
+    print(f"[summary 前100字] {post.summary[:100] if post.summary else ''}")
     assert post.post_id, "未能提取 post_id"
 
 
