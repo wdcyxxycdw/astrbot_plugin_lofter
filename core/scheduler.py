@@ -6,7 +6,7 @@ from astrbot.api import logger
 from .client import LofterClient
 from .db import LofterDB
 from .dwr_parser import parse_dwr_response
-from .parser import parse_blog_posts
+from .parser import parse_blog_posts, parse_post_page
 from .storage import Subscription, SubscriptionStorage
 
 SendFunc = Callable[[str, str, list], Awaitable[None]]
@@ -37,6 +37,21 @@ async def _push_posts(posts, sub: Subscription, send_func: SendFunc):
             lines.append(post.summary)
         lines.append(post.url)
         await send_func(sub.session_id, "\n".join(lines), post.images)
+
+
+async def _enrich_blog_posts(posts: list, client: LofterClient) -> list:
+    """对博主新帖逐个抓取详情（串行），失败时降级为原始 bare post。"""
+    enriched = []
+    for post in posts:
+        try:
+            html = await client.get(post.url)
+            rich = await parse_post_page(html, post.url)
+            rich.post_id = post.post_id  # 保留原始 ID，与 mark_sent 一致
+            enriched.append(rich)
+        except Exception as e:
+            logger.warning("获取博主帖子详情失败 %s: %s", post.url, e)
+            enriched.append(post)
+    return enriched
 
 
 async def _check_subscription(
@@ -79,6 +94,8 @@ async def _check_subscription(
 
     actually_new_set = set(actually_new_ids)
     actually_new = [p for p in new_posts if p.post_id in actually_new_set]
+    if sub.type == "blog":
+        actually_new = await _enrich_blog_posts(actually_new, client)
     await _push_posts(actually_new, sub, send_func)
     await db.mark_sent(sub.session_id, actually_new_ids)
 
