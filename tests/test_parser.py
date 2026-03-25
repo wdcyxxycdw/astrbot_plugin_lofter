@@ -1,5 +1,5 @@
 import pytest
-from core.parser import parse_post_page
+from core.parser import parse_post_page, parse_blog_posts
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -34,6 +34,35 @@ EMPTY_HTML = """\
 <!DOCTYPE html><html><head>
 <title>某标题-某作者</title>
 </head><body></body></html>"""
+
+LONG_DESC_HTML = """\
+<!DOCTYPE html><html><head>
+<title>标题-作者</title>
+<meta name="Description" content="{desc}"/>
+</head><body></body></html>""".format(desc="字" * 350)
+
+HTML_ENTITY_HTML = """\
+<!DOCTYPE html><html><head>
+<title>标题-作者</title>
+<meta name="Description" content="a &amp; b &lt;c&gt;"/>
+</head><body></body></html>"""
+
+DEDUP_IMAGE_HTML = """\
+<!DOCTYPE html><html><head><title>t-a</title></head><body>
+<img src="https://imglf5.lf127.net/img/abc/foo.jpg?imageView&quality=96"/>
+<img src="https://imglf5.lf127.net/img/abc/foo.jpg?imageView&quality=96"/>
+<img src="https://imglf5.lf127.net/img/abc/bar.png?imageView&quality=96"/>
+</body></html>"""
+
+BLOG_HOME_HTML = """\
+<!DOCTYPE html><html><body>
+<a href="https://user.lofter.com/post/aaa_111">帖子一</a>
+<a href="https://user.lofter.com/post/bbb_222">帖子二</a>
+<a href="https://user.lofter.com/post/aaa_111">重复链接</a>
+<a href="https://user.lofter.com/about">非帖子链接</a>
+</body></html>"""
+
+BLOG_HOME_EMPTY_HTML = "<html><body><p>没有帖子</p></body></html>"
 
 POST_URL = "https://test.lofter.com/post/abc_123def"
 
@@ -89,3 +118,53 @@ async def test_silent_condition_when_no_summary_no_images():
 async def test_post_id_extracted_from_url():
     post = await parse_post_page(TEXT_POST_HTML, "https://user.lofter.com/post/aaf97d58_34d8bede3")
     assert post.post_id == "aaf97d58_34d8bede3"
+
+
+@pytest.mark.asyncio
+async def test_summary_truncated_at_300_chars():
+    post = await parse_post_page(LONG_DESC_HTML, POST_URL)
+    assert len(post.summary) == 301  # 300 chars + "…"
+    assert post.summary.endswith("…")
+
+
+@pytest.mark.asyncio
+async def test_summary_html_entities_unescaped():
+    post = await parse_post_page(HTML_ENTITY_HTML, POST_URL)
+    assert post.summary == "a & b <c>"
+
+
+@pytest.mark.asyncio
+async def test_images_deduplicated():
+    post = await parse_post_page(DEDUP_IMAGE_HTML, POST_URL)
+    assert len(post.images) == 2
+    assert len(set(post.images)) == 2  # 无重复
+
+
+# ── parse_blog_posts ───────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_blog_posts_extracted():
+    posts = await parse_blog_posts(BLOG_HOME_HTML)
+    assert len(posts) == 2
+    ids = [p.post_id for p in posts]
+    assert "aaa_111" in ids
+    assert "bbb_222" in ids
+
+
+@pytest.mark.asyncio
+async def test_blog_posts_deduplicated():
+    posts = await parse_blog_posts(BLOG_HOME_HTML)
+    assert len(posts) == len({p.post_id for p in posts})
+
+
+@pytest.mark.asyncio
+async def test_blog_posts_have_url():
+    posts = await parse_blog_posts(BLOG_HOME_HTML)
+    for p in posts:
+        assert p.url.startswith("https://")
+
+
+@pytest.mark.asyncio
+async def test_blog_posts_empty_page():
+    posts = await parse_blog_posts(BLOG_HOME_EMPTY_HTML)
+    assert posts == []
