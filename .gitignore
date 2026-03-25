@@ -1,3 +1,5 @@
+.env.test
+data/
 .DS_Store
 __pycache__/
 .venv/
@@ -5,3 +7,4 @@ __pycache__/
 *.pyc
 .claude/
 plans/
+docs/
