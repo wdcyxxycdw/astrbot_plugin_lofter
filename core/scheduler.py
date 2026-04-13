@@ -6,6 +6,7 @@ from astrbot.api import logger
 from .client import LofterClient
 from .db import LofterDB
 from .dwr_parser import parse_dwr_response
+from .filter import apply_filter, filter_rule_from_json
 from .parser import parse_blog_posts, parse_post_page
 from .storage import Subscription, SubscriptionStorage
 
@@ -16,11 +17,29 @@ BLOG_URL = "https://{username}.lofter.com"
 
 async def fetch_posts(sub: Subscription, client: LofterClient):
     if sub.type == "tag":
-        raw = await client.search_tag(sub.target, limit=20)
-        return await parse_dwr_response(raw)
+        return await _fetch_tag_posts(sub, client)
     else:
         html = await client.get(BLOG_URL.format(username=sub.target))
         return await parse_blog_posts(html)
+
+
+async def _fetch_tag_posts(sub: Subscription, client: LofterClient):
+    search_tags = [sub.target]
+    if sub.filter_rule:
+        rule = filter_rule_from_json(sub.filter_rule)
+        if rule.search_tags:
+            search_tags = rule.search_tags
+
+    seen_ids: set[str] = set()
+    result = []
+    for tag in search_tags:
+        raw = await client.search_tag(tag, limit=20)
+        posts = await parse_dwr_response(raw)
+        for p in posts:
+            if p.post_id not in seen_ids:
+                seen_ids.add(p.post_id)
+                result.append(p)
+    return result
 
 
 async def _push_posts(posts, sub: Subscription, send_func: SendFunc):
@@ -65,6 +84,13 @@ async def _check_subscription(
     except Exception as e:
         logger.error("轮询订阅 %s/%s 失败: %s", sub.type, sub.target, e)
         return
+
+    if not posts:
+        return
+
+    if sub.filter_rule:
+        rule = filter_rule_from_json(sub.filter_rule)
+        posts = apply_filter(posts, rule)
 
     if not posts:
         return

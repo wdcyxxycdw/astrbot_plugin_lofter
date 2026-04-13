@@ -53,6 +53,11 @@ class LofterDB:
             conn.execute("PRAGMA foreign_keys=ON")
             conn.executescript(_DDL)
             conn.commit()
+            try:
+                conn.execute("ALTER TABLE subscriptions ADD COLUMN filter_rule TEXT DEFAULT NULL")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
             return conn
 
         self._conn = await self._run(_init)
@@ -84,14 +89,14 @@ class LofterDB:
 
         await self._run(_set)
 
-    async def add_subscription(self, session_id: str, sub_type: str, target: str) -> bool:
+    async def add_subscription(self, session_id: str, sub_type: str, target: str, filter_rule: str | None = None) -> bool:
         conn = self._conn
 
         def _add():
             try:
                 conn.execute(
-                    "INSERT INTO subscriptions(session_id,type,target) VALUES(?,?,?)",
-                    (session_id, sub_type, target),
+                    "INSERT INTO subscriptions(session_id,type,target,filter_rule) VALUES(?,?,?,?)",
+                    (session_id, sub_type, target, filter_rule),
                 )
                 conn.commit()
                 return True
@@ -131,14 +136,26 @@ class LofterDB:
         def _list():
             if session_id:
                 return conn.execute(
-                    "SELECT id,session_id,type,target FROM subscriptions WHERE session_id=?",
+                    "SELECT id,session_id,type,target,filter_rule FROM subscriptions WHERE session_id=?",
                     (session_id,),
                 ).fetchall()
             return conn.execute(
-                "SELECT id,session_id,type,target FROM subscriptions"
+                "SELECT id,session_id,type,target,filter_rule FROM subscriptions"
             ).fetchall()
 
         return await self._run(_list)
+
+    async def update_filter_rule(self, sub_id: int, filter_rule: str | None):
+        conn = self._conn
+
+        def _update():
+            conn.execute(
+                "UPDATE subscriptions SET filter_rule=? WHERE id=?",
+                (filter_rule, sub_id),
+            )
+            conn.commit()
+
+        await self._run(_update)
 
     async def fix_subscription_target(self, sub_id: int, new_target: str):
         conn = self._conn

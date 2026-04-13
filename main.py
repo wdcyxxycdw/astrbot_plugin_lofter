@@ -11,6 +11,7 @@ from astrbot.core.star import StarTools
 from .core.client import LofterClient
 from .core.db import LofterDB
 from .core.dwr_parser import parse_dwr_response
+from .core.filter import apply_filter, filter_rule_from_json, filter_rule_to_json, has_filter, parse_filter_expr
 from .core.parser import parse_post_page
 from .core.scheduler import SubscriptionScheduler, fetch_posts
 from .core.storage import Subscription, SubscriptionStorage
@@ -31,6 +32,7 @@ class LofterPlugin(Star):
         self._max_images: int = int(config.get("max_images", 3))
         self._search_limit: int = int(config.get("search_limit", 3))
         self._interval: int = int(config.get("poll_interval", 30))
+        self._max_or_tags: int = int(config.get("max_or_tags", 3))
         db_path = os.path.join(StarTools.get_data_dir(), "lofter.db")
         self._db = LofterDB(db_path)
         self._client = LofterClient("")
@@ -68,7 +70,7 @@ class LofterPlugin(Star):
         ]
         rows = await self._db.list_subscriptions()
         for row in rows:
-            sub_id, session_id, sub_type, target = row
+            sub_id, session_id, sub_type, target = row[:4]
             for prefix in _PREFIXES:
                 if target.lower().startswith(prefix):
                     new_target = target[len(prefix):]
@@ -213,7 +215,11 @@ class LofterPlugin(Star):
         lines = ["当前订阅列表："]
         for s in subs:
             label = "标签" if s.type == "tag" else "博主"
-            lines.append(f"• [{label}] {s.target}")
+            line = f"• [{label}] {s.target}"
+            if s.filter_rule:
+                rule = filter_rule_from_json(s.filter_rule)
+                line += f"  过滤：{rule.raw}"
+            lines.append(line)
         yield event.plain_result("\n".join(lines))
 
     @lofter.command("cookie")
@@ -229,43 +235,74 @@ class LofterPlugin(Star):
 
     @lofter.command("subtag")
     async def sub_tag(self, event: AstrMessageEvent):
-        """订阅标签。用法：/lofter subtag <标签名>"""
-        tag = self._cmd_arg(event.message_str)
-        if not tag:
-            yield event.plain_result("请提供标签名，例如：/lofter subtag 原创")
+        """订阅标签。用法：/lofter subtag <标签名> [+包含 -排除 标签A|标签B]"""
+        raw = self._cmd_arg(event.message_str)
+        if not raw:
+            yield event.plain_result("请提供标签名，例如：/lofter subtag 原创\n支持过滤：/lofter subtag 原神 +同人 -R18")
             return
-        ok = await self._storage.add(event.unified_msg_origin, "tag", tag)
-        yield event.plain_result(f"已订阅标签「{tag}」" if ok else f"已经订阅过标签「{tag}」了")
+        rule = parse_filter_expr(raw)
+        if len(rule.search_tags) > self._max_or_tags:
+            yield event.plain_result(f"OR 搜索标签最多 {self._max_or_tags} 个")
+            return
+        primary_tag = rule.search_tags[0] if rule.search_tags else raw
+        filter_json = filter_rule_to_json(rule) if has_filter(rule) else None
+        ok = await self._storage.add(event.unified_msg_origin, "tag", primary_tag, filter_json)
+        if not ok:
+            if filter_json:
+                await self._storage.update_filter(event.unified_msg_origin, "tag", primary_tag, filter_json)
+                yield event.plain_result(f"已更新标签「{primary_tag}」的过滤规则：{rule.raw}")
+            else:
+                yield event.plain_result(f"已经订阅过标签「{primary_tag}」了")
+            return
+        msg = f"已订阅标签「{primary_tag}」"
+        if has_filter(rule):
+            msg += f"\n过滤规则：{rule.raw}"
+        yield event.plain_result(msg)
 
     @lofter.command("subtagpreview")
     async def sub_tag_preview(self, event: AstrMessageEvent):
-        """订阅标签并立即预览最新内容。用法：/lofter subtagpreview <标签名>"""
-        tag = self._cmd_arg(event.message_str)
-        if not tag:
+        """订阅标签并立即预览最新内容。用法：/lofter subtagpreview <标签名> [+包含 -排除]"""
+        raw = self._cmd_arg(event.message_str)
+        if not raw:
             yield event.plain_result("请提供标签名，例如：/lofter subtagpreview 原创")
             return
-
+        rule = parse_filter_expr(raw)
+        if len(rule.search_tags) > self._max_or_tags:
+            yield event.plain_result(f"OR 搜索标签最多 {self._max_or_tags} 个")
+            return
+        primary_tag = rule.search_tags[0] if rule.search_tags else raw
+        filter_json = filter_rule_to_json(rule) if has_filter(rule) else None
         session_id = event.unified_msg_origin
-        await self._storage.add(session_id, "tag", tag)
 
-        sub = Subscription(session_id=session_id, type="tag", target=tag)
+        ok = await self._storage.add(session_id, "tag", primary_tag, filter_json)
+        if not ok and filter_json:
+            await self._storage.update_filter(session_id, "tag", primary_tag, filter_json)
+
+        sub = Subscription(session_id=session_id, type="tag", target=primary_tag, filter_rule=filter_json or "")
         try:
             posts = await fetch_posts(sub, self._client)
         except Exception as e:
-            yield event.plain_result(f"已订阅标签「{tag}」，但获取内容失败：{e}")
+            yield event.plain_result(f"已订阅标签「{primary_tag}」，但获取内容失败：{e}")
             return
+
+        if has_filter(rule):
+            posts = apply_filter(posts, rule)
 
         if not posts:
-            yield event.plain_result(f"已订阅标签「{tag}」，暂无内容")
+            yield event.plain_result(f"已订阅标签「{primary_tag}」，暂无匹配内容")
             return
 
-        sub_id = await self._db.get_subscription_id(session_id, "tag", tag)
+        sub_id = await self._db.get_subscription_id(session_id, "tag", primary_tag)
         if sub_id is not None:
             await self._db.mark_seen(sub_id, [p.post_id for p in posts])
 
-        yield event.plain_result(f"已订阅标签「{tag}」，以下是最新 3 条内容：")
+        msg = f"已订阅标签「{primary_tag}」"
+        if has_filter(rule):
+            msg += f"（过滤：{rule.raw}）"
+        msg += f"，以下是最新 {min(3, len(posts))} 条内容："
+        yield event.plain_result(msg)
         for post in posts[:3]:
-            lines = self._format_post_lines(post, "标签", tag)
+            lines = self._format_post_lines(post, "标签", primary_tag)
             chain = [Comp.Plain("\n".join(lines))]
             chain += [Comp.Image.fromURL(u) for u in post.images[:self._max_images]]
             yield event.chain_result(chain)
