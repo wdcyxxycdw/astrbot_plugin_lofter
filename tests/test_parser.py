@@ -168,3 +168,69 @@ async def test_blog_posts_have_url():
 async def test_blog_posts_empty_page():
     posts = await parse_blog_posts(BLOG_HOME_EMPTY_HTML)
     assert posts == []
+
+
+# ── _extract_body_text ────────────────────────────────────────────────────────
+
+P_ID_HTML = """\
+<!DOCTYPE html><html><body>
+<div class="txtcont">
+<p id="p_abc123">第一段正文内容，这是一段比较长的文字。</p>
+<p id="p_def456">第二段正文内容，继续写一些内容。</p>
+<p id="p_ghi789">第三段正文内容，结尾部分。</p>
+</div>
+</body></html>"""
+
+TXTCONT_FALLBACK_HTML = """\
+<!DOCTYPE html><html><body>
+<div class="txtcont">这是一段超过一百字的正文内容，用来测试回退到 txtcont 选择器的情况，需要确保文本足够长才能触发提取逻辑，所以这里继续添加一些内容直到超过一百个字符为止。</div>
+</body></html>"""
+
+NO_CONTENT_HTML = """\
+<!DOCTYPE html><html><head><title>t-a</title></head><body>
+<div class="sidebar">短文本</div>
+</body></html>"""
+
+P_ID_WITH_FULL_POST_HTML = """\
+<!DOCTYPE html><html><head>
+<title>测试标题-测试作者</title>
+<meta name="Description" content="摘要"/>
+</head><body>
+<div class="txtcont">
+<p id="p_aaa">正文第一段，内容足够长以便测试提取功能是否正常工作。</p>
+<p id="p_bbb">正文第二段，更多内容。</p>
+</div>
+</body></html>"""
+
+
+@pytest.mark.asyncio
+async def test_body_text_extracted_from_p_id():
+    from core.parser import _extract_body_text, _make_soup
+    soup = _make_soup(P_ID_HTML)
+    content = _extract_body_text(soup)
+    assert "第一段正文内容" in content
+    assert "第二段正文内容" in content
+    assert "第三段正文内容" in content
+
+
+@pytest.mark.asyncio
+async def test_body_text_fallback_to_txtcont():
+    from core.parser import _extract_body_text, _make_soup
+    soup = _make_soup(TXTCONT_FALLBACK_HTML)
+    content = _extract_body_text(soup)
+    assert "超过一百字的正文内容" in content
+
+
+@pytest.mark.asyncio
+async def test_body_text_empty_when_no_content():
+    from core.parser import _extract_body_text, _make_soup
+    soup = _make_soup(NO_CONTENT_HTML)
+    content = _extract_body_text(soup)
+    assert content == ""
+
+
+@pytest.mark.asyncio
+async def test_post_content_field_populated():
+    post = await parse_post_page(P_ID_WITH_FULL_POST_HTML, POST_URL)
+    assert "正文第一段" in post.content
+    assert "正文第二段" in post.content

@@ -16,12 +16,31 @@ class Post:
     url: str = ""
     tags: list[str] = field(default_factory=list)
     publish_time: str = ""
+    content: str = ""
 
 
 _IMG_CDN_RE = re.compile(
     r'(https://imglf\d+\.lf127\.net/img/[A-Za-z0-9/_=.+%-]+\.(?:jpg|png|gif|webp))'
     r'\?[^"\'<>\s]*quality='
 )
+
+
+_BODY_SELECTORS = ["div.txtcont", "div.ct"]
+_MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
+
+
+def _extract_body_text(soup: BeautifulSoup) -> str:
+    paragraphs = soup.find_all("p", id=lambda x: x and x.startswith("p_"))
+    if paragraphs:
+        lines = [p.get_text() for p in paragraphs]
+        raw = "\n".join(lines)
+        return _MULTI_NEWLINE_RE.sub("\n\n", raw).strip()
+    for sel in _BODY_SELECTORS:
+        el = soup.select_one(sel)
+        if el and len(el.get_text(strip=True)) > 50:
+            raw = el.get_text(separator="\n").strip()
+            return _MULTI_NEWLINE_RE.sub("\n\n", raw)
+    return ""
 
 
 def _make_soup(html: str) -> BeautifulSoup:
@@ -83,6 +102,8 @@ async def parse_post_page(html: str, url: str) -> Post:
                 seen.add(base_url)
                 images.append(base_url)
 
+        content = _extract_body_text(soup)
+
         return Post(
             post_id=_extract_post_id_from_url(url),
             title=title,
@@ -91,6 +112,7 @@ async def parse_post_page(html: str, url: str) -> Post:
             tags=tags,
             images=images,
             url=url,
+            content=content,
         )
 
     return await asyncio.get_running_loop().run_in_executor(None, _parse)

@@ -13,6 +13,7 @@ from .core.db import LofterDB
 from .core.dwr_parser import parse_dwr_response
 from .core.filter import apply_filter, filter_rule_from_json, filter_rule_to_json, has_filter, parse_filter_expr
 from .core.parser import parse_post_page
+from .core.utils import _split_text
 from .core.scheduler import SubscriptionScheduler, fetch_posts
 from .core.storage import Subscription, SubscriptionStorage
 
@@ -23,7 +24,7 @@ POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
     "astrbot_plugin_lofter",
     "user",
     "解析 Lofter 链接，订阅 Lofter 标签/博主，搜索 Lofter 内容",
-    "v0.1.0",
+    "v0.1.1",
 )
 class LofterPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -141,7 +142,7 @@ class LofterPlugin(Star):
             return
 
         post = await parse_post_page(html, url)
-        if not post.summary and not post.images:
+        if not post.summary and not post.images and not post.content:
             return
 
         text_parts = [f"▸ {post.title or '(无标题)'}"]
@@ -150,13 +151,27 @@ class LofterPlugin(Star):
         tags = f"#{' #'.join(post.tags)}" if post.tags else ""
         if tags:
             text_parts.append(tags)
-        if post.summary:
-            text_parts.append(post.summary)
-        text_parts.append(url)
+        header = "\n".join(text_parts)
 
-        chain = [Comp.Plain("\n".join(text_parts))]
-        chain += [Comp.Image.fromURL(u) for u in post.images[:self._max_images]]
-        yield event.chain_result(chain)
+        if post.images:
+            if post.summary:
+                text_parts.append(post.summary)
+            text_parts.append(url)
+            chain = [Comp.Plain("\n".join(text_parts))]
+            chain += [Comp.Image.fromURL(u) for u in post.images[:self._max_images]]
+            yield event.chain_result(chain)
+        elif post.content:
+            author_name = post.author or "Lofter"
+            chunks = _split_text(post.content)
+            nodes = [Comp.Node(content=[Comp.Plain(header)], name=author_name, uin="0")]
+            for chunk in chunks:
+                nodes.append(Comp.Node(content=[Comp.Plain(chunk)], name=author_name, uin="0"))
+            nodes.append(Comp.Node(content=[Comp.Plain(url)], name=author_name, uin="0"))
+            yield event.chain_result([Comp.Nodes(nodes=nodes)])
+        else:
+            text_parts.append(post.summary)
+            text_parts.append(url)
+            yield event.chain_result([Comp.Plain("\n".join(text_parts))])
 
     # ──────────────────────────────────────────
     # /lofter 命令组
