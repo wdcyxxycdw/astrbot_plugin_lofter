@@ -161,13 +161,20 @@ class LofterPlugin(Star):
             chain += [Comp.Image.fromURL(u) for u in post.images[:self._max_images]]
             yield event.chain_result(chain)
         elif post.content:
-            author_name = post.author or "Lofter"
-            chunks = _split_text(post.content)
-            nodes = [Comp.Node(content=[Comp.Plain(header)], name=author_name, uin="0")]
-            for chunk in chunks:
-                nodes.append(Comp.Node(content=[Comp.Plain(chunk)], name=author_name, uin="0"))
-            nodes.append(Comp.Node(content=[Comp.Plain(url)], name=author_name, uin="0"))
-            yield event.chain_result([Comp.Nodes(nodes=nodes)])
+            is_private = "FriendMessage" in event.unified_msg_origin
+            if is_private:
+                preview = post.content[:500] + ("…\n（全文请点击链接）" if len(post.content) > 500 else "")
+                text_parts.append(preview)
+                text_parts.append(url)
+                yield event.chain_result([Comp.Plain("\n".join(text_parts))])
+            else:
+                author_name = post.author or "Lofter"
+                chunks = _split_text(post.content)
+                nodes = [Comp.Node(content=[Comp.Plain(header)], name=author_name, uin="0")]
+                for chunk in chunks:
+                    nodes.append(Comp.Node(content=[Comp.Plain(chunk)], name=author_name, uin="0"))
+                nodes.append(Comp.Node(content=[Comp.Plain(url)], name=author_name, uin="0"))
+                yield event.chain_result([Comp.Nodes(nodes=nodes)])
         else:
             text_parts.append(post.summary)
             text_parts.append(url)
