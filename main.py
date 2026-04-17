@@ -14,6 +14,7 @@ from .core.dwr_parser import parse_dwr_response
 from .core.filter import apply_filter, filter_rule_from_json, filter_rule_to_json, has_filter, parse_filter_expr
 from .core.parser import parse_post_page
 from .core.utils import _split_text
+from .core.formatter import format_post
 from .core.scheduler import SubscriptionScheduler, fetch_posts
 from .core.storage import Subscription, SubscriptionStorage
 
@@ -101,19 +102,6 @@ class LofterPlugin(Star):
                 logger.error("Lofter: JSON 迁移失败: %s", e)
         await self._db.set_config("json_migrated", "1")
 
-    def _format_post_lines(self, post, label: str, target: str) -> list[str]:
-        title = post.title or "(无标题)"
-        lines = [f"【{label}「{target}」有新内容】", f"▸ {title}"]
-        if post.author:
-            lines.append(f"作者：{post.author}")
-        tags = f"#{' #'.join(post.tags)}" if post.tags else ""
-        if tags:
-            lines.append(tags)
-        if post.summary:
-            lines.append(post.summary)
-        lines.append(post.url)
-        return lines
-
     async def _send_push(self, session_id: str, text: str, images: list[str]):
         mc = MessageChain()
         mc.message(text)
@@ -145,40 +133,31 @@ class LofterPlugin(Star):
         if not post.summary and not post.images and not post.content:
             return
 
-        text_parts = [f"▸ {post.title or '(无标题)'}"]
-        if post.author:
-            text_parts.append(f"作者：{post.author}")
-        tags = f"#{' #'.join(post.tags)}" if post.tags else ""
-        if tags:
-            text_parts.append(tags)
-        header = "\n".join(text_parts)
-
         if post.images:
-            if post.summary:
-                text_parts.append(post.summary)
-            text_parts.append(url)
-            chain = [Comp.Plain("\n".join(text_parts))]
+            chain = [Comp.Plain(format_post(post))]
             chain += [Comp.Image.fromURL(u) for u in post.images[:self._max_images]]
             yield event.chain_result(chain)
         elif post.content:
             is_private = "FriendMessage" in event.unified_msg_origin
             if is_private:
                 preview = post.content[:500] + ("…\n（全文请点击链接）" if len(post.content) > 500 else "")
-                text_parts.append(preview)
-                text_parts.append(url)
-                yield event.chain_result([Comp.Plain("\n".join(text_parts))])
+                yield event.chain_result([Comp.Plain(format_post(post, body=preview))])
             else:
                 author_name = post.author or "Lofter"
+                header_lines = [f"▸ {post.title or '(无标题)'}"]
+                if post.author:
+                    header_lines.append(f"作者：{post.author}")
+                if post.tags:
+                    header_lines.append(f"#{' #'.join(post.tags)}")
+                node_header = "\n".join(header_lines)
                 chunks = _split_text(post.content)
-                nodes = [Comp.Node(content=[Comp.Plain(header)], name=author_name, uin="0")]
+                nodes = [Comp.Node(content=[Comp.Plain(node_header)], name=author_name, uin="0")]
                 for chunk in chunks:
                     nodes.append(Comp.Node(content=[Comp.Plain(chunk)], name=author_name, uin="0"))
                 nodes.append(Comp.Node(content=[Comp.Plain(url)], name=author_name, uin="0"))
                 yield event.chain_result([Comp.Nodes(nodes=nodes)])
         else:
-            text_parts.append(post.summary)
-            text_parts.append(url)
-            yield event.chain_result([Comp.Plain("\n".join(text_parts))])
+            yield event.chain_result([Comp.Plain(format_post(post))])
 
     # ──────────────────────────────────────────
     # /lofter 命令组
@@ -215,15 +194,7 @@ class LofterPlugin(Star):
             return
         yield event.plain_result(f"「{keyword}」标签搜索结果，共 {len(posts)} 条：")
         for p in posts[:self._search_limit]:
-            title = p.title or "(无标题)"
-            tags = f"#{' #'.join(p.tags)}" if p.tags else ""
-            text_parts = [f"▸ {title}", f"作者：{p.author}  {p.publish_time}"]
-            if tags:
-                text_parts.append(tags)
-            if p.summary:
-                text_parts.append(p.summary)  # 已截断 300 字
-            text_parts.append(p.url)
-            chain = [Comp.Plain("\n".join(text_parts))]
+            chain = [Comp.Plain(format_post(p, include_time=True))]
             chain += [Comp.Image.fromURL(u) for u in p.images[:self._max_images]]
             yield event.chain_result(chain)
 
@@ -324,8 +295,8 @@ class LofterPlugin(Star):
         msg += f"，以下是最新 {min(3, len(posts))} 条内容："
         yield event.plain_result(msg)
         for post in posts[:3]:
-            lines = self._format_post_lines(post, "标签", primary_tag)
-            chain = [Comp.Plain("\n".join(lines))]
+            header = f"【标签「{primary_tag}」有新内容】"
+            chain = [Comp.Plain(format_post(post, header=header))]
             chain += [Comp.Image.fromURL(u) for u in post.images[:self._max_images]]
             yield event.chain_result(chain)
 
