@@ -18,10 +18,5 @@
         "description": "搜索结果最多返回的条数（最大 100，超过 20 条自动翻页）",
         "type": "int",
         "default": 3
-    },
-    "max_or_tags": {
-        "description": "OR 搜索标签的最大数量（每个 OR 标签都需要单独调用 API）",
-        "type": "int",
-        "default": 3
     }
 }
