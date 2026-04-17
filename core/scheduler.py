@@ -7,6 +7,7 @@ from .client import LofterClient
 from .db import LofterDB
 from .dwr_parser import parse_dwr_response
 from .filter import apply_filter, filter_rule_from_json
+from .formatter import format_post
 from .parser import parse_blog_posts, parse_post_page
 from .storage import Subscription, SubscriptionStorage
 
@@ -45,17 +46,9 @@ async def _fetch_tag_posts(sub: Subscription, client: LofterClient):
 async def _push_posts(posts, sub: Subscription, send_func: SendFunc):
     label = "标签" if sub.type == "tag" else "博主"
     for post in reversed(posts[:5]):
-        title = post.title or "(无标题)"
-        tags = f"#{' #'.join(post.tags)}" if post.tags else ""
-        lines = [f"【{label}「{sub.target}」有新内容】", f"▸ {title}"]
-        if post.author:
-            lines.append(f"作者：{post.author}")
-        if tags:
-            lines.append(tags)
-        if post.summary:
-            lines.append(post.summary)
-        lines.append(post.url)
-        await send_func(sub.session_id, "\n".join(lines), post.images)
+        header = f"【{label}「{sub.target}」有新内容】"
+        text = format_post(post, header=header)
+        await send_func(sub.session_id, text, post.images)
 
 
 async def _enrich_blog_posts(posts: list, client: LofterClient) -> list:
