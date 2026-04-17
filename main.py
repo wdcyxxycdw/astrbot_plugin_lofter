@@ -12,11 +12,11 @@ from .core.client import LofterClient
 from .core.db import LofterDB
 from .core.dwr_parser import parse_dwr_response
 from .core.filter import apply_filter, filter_rule_from_json, filter_rule_to_json, has_filter, parse_filter_expr
-from .core.parser import parse_post_page
-from .core.utils import _split_text
 from .core.formatter import format_post
+from .core.parser import parse_post_page
 from .core.scheduler import SubscriptionScheduler, fetch_posts
 from .core.storage import Subscription, SubscriptionStorage
+from .core.utils import _split_text
 
 POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
 
