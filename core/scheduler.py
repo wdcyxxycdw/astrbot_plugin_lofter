@@ -7,6 +7,7 @@ from .client import LofterClient
 from .db import LofterDB
 from .dwr_parser import parse_dwr_response
 from .filter import FilterRule, apply_filter
+from .formatter import format_post
 from .parser import Post, parse_blog_posts, parse_post_page
 from .storage import Subscription, SubscriptionStorage
 
@@ -48,31 +49,15 @@ def _pick_display_tag(post: Post, search_tags: list[str]) -> str:
 async def _push_tag_posts(session_id: str, posts: list[Post], rule: FilterRule, send_func: SendFunc):
     for post in reversed(posts[:5]):
         display_tag = _pick_display_tag(post, rule.search_tags)
-        title = post.title or "(无标题)"
-        tags = f"#{' #'.join(post.tags)}" if post.tags else ""
-        lines = [f"【标签「{display_tag}」有新内容】", f"▸ {title}"]
-        if post.author:
-            lines.append(f"作者：{post.author}")
-        if tags:
-            lines.append(tags)
-        if post.summary:
-            lines.append(post.summary)
-        lines.append(post.url)
-        await send_func(session_id, "\n".join(lines), post.images)
+        header = f"【标签「{display_tag}」有新内容】"
+        text = format_post(post, header=header)
+        await send_func(session_id, text, post.images)
 
 
 async def _push_blog_post(session_id: str, post: Post, username: str, send_func: SendFunc):
-    title = post.title or "(无标题)"
-    tags = f"#{' #'.join(post.tags)}" if post.tags else ""
-    lines = [f"【博主「{username}」有新内容】", f"▸ {title}"]
-    if post.author:
-        lines.append(f"作者：{post.author}")
-    if tags:
-        lines.append(tags)
-    if post.summary:
-        lines.append(post.summary)
-    lines.append(post.url)
-    await send_func(session_id, "\n".join(lines), post.images)
+    header = f"【博主「{username}」有新内容】"
+    text = format_post(post, header=header)
+    await send_func(session_id, text, post.images)
 
 
 async def _enrich_blog_posts(posts: list[Post], client: LofterClient) -> list[Post]:
