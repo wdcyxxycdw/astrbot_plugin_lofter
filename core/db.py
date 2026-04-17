@@ -230,6 +230,27 @@ class LofterDB:
 
         await self._run(_mark)
 
+    async def clear_session(self, session_id: str):
+        """删除指定 session 的所有 seen/sent 记录，用于测试清理。"""
+        conn = self._conn
+
+        def _clear():
+            conn.execute("DELETE FROM seen_posts WHERE session_id=?", (session_id,))
+            conn.execute("DELETE FROM sent_posts WHERE session_id=?", (session_id,))
+            conn.commit()
+
+        await self._run(_clear)
+
+    async def delete_config(self, key: str):
+        """删除指定配置项。"""
+        conn = self._conn
+
+        def _del():
+            conn.execute("DELETE FROM config WHERE key=?", (key,))
+            conn.commit()
+
+        await self._run(_del)
+
 
 def _get_schema_version(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT value FROM config WHERE key='schema_version'").fetchone()

@@ -350,6 +350,17 @@ class LofterPlugin(Star):
         else:
             yield event.plain_result(f"删除失败，请重新 list 确认编号")
 
+    @lofter.command("test")
+    async def run_e2e_test(self, event: AstrMessageEvent):
+        """运行端到端集成测试（真实网络 + 真实推送）。用法：/lofter test"""
+        from .core.e2e_test import E2ETestRunner, format_report
+        runner = E2ETestRunner(
+            self._db, self._client, self._storage, self._scheduler, self._send_push
+        )
+        yield event.plain_result("开始端到端测试，请等待……")
+        results = await runner.run_all(event.unified_msg_origin)
+        yield event.plain_result(format_report(results))
+
     async def _add_tag_entries(self, session_id: str, subscribes: list[str], excludes: list[str]) -> tuple[list[str], list[str]]:
         added_subs: list[str] = []
         added_excls: list[str] = []
