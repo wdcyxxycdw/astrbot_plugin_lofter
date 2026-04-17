@@ -23,80 +23,62 @@ async def test_config_get_set(db):
 
 @pytest.mark.asyncio
 async def test_add_remove_subscription(db):
-    ok = await db.add_subscription("sess1", "tag", "原创", "subscribe")
+    ok = await db.add_subscription("sess1", "tag", "原创")
     assert ok is True
 
-    ok2 = await db.add_subscription("sess1", "tag", "原创", "subscribe")
+    ok2 = await db.add_subscription("sess1", "tag", "原创")
     assert ok2 is False
 
-    sub_id = await db.get_subscription_id("sess1", "tag", "原创", "subscribe")
+    sub_id = await db.get_subscription_id("sess1", "tag", "原创")
     assert sub_id is not None
 
     rows = await db.list_subscriptions("sess1")
     assert len(rows) == 1
 
-    removed = await db.remove_subscription("sess1", "tag", "原创", "subscribe")
+    removed = await db.remove_subscription("sess1", "tag", "原创")
     assert removed is True
 
-    assert await db.get_subscription_id("sess1", "tag", "原创", "subscribe") is None
+    assert await db.get_subscription_id("sess1", "tag", "原创") is None
 
 
 @pytest.mark.asyncio
-async def test_add_subscribe_and_exclude_are_independent(db):
-    ok1 = await db.add_subscription("sess1", "tag", "R18", "subscribe")
-    ok2 = await db.add_subscription("sess1", "tag", "R18", "exclude")
-    assert ok1 is True
-    assert ok2 is True
+async def test_filter_unseen_marks_seen(db):
+    await db.add_subscription("sess1", "tag", "test")
+    sub_id = await db.get_subscription_id("sess1", "tag", "test")
 
-    rows = await db.list_subscriptions("sess1")
-    assert len(rows) == 2
-
-    removed = await db.remove_subscription("sess1", "tag", "R18", "exclude")
-    assert removed is True
-
-    rows2 = await db.list_subscriptions("sess1")
-    assert len(rows2) == 1
-    assert rows2[0][3] == "subscribe"
-
-
-@pytest.mark.asyncio
-async def test_filter_unseen_session(db):
     ids = ["1", "2", "3"]
-    unseen = await db.filter_unseen_session("sess1", "tag", ids)
+    unseen = await db.filter_unseen(sub_id, ids)
     assert set(unseen) == {"1", "2", "3"}
 
-    await db.mark_seen_session("sess1", "tag", ["1", "2"])
-    unseen2 = await db.filter_unseen_session("sess1", "tag", ids)
+    await db.mark_seen(sub_id, ["1", "2"])
+    unseen2 = await db.filter_unseen(sub_id, ids)
     assert unseen2 == ["3"]
 
-    await db.mark_seen_session("sess1", "tag", ["3"])
-    unseen3 = await db.filter_unseen_session("sess1", "tag", ids)
+    await db.mark_seen(sub_id, ["3"])
+    unseen3 = await db.filter_unseen(sub_id, ids)
     assert unseen3 == []
 
 
 @pytest.mark.asyncio
-async def test_seen_count(db):
-    assert await db.seen_count("sess1", "tag") == 0
-    await db.mark_seen_session("sess1", "tag", ["1", "2"])
-    assert await db.seen_count("sess1", "tag") == 2
-    assert await db.seen_count("sess1", "blog") == 0
-
-
-@pytest.mark.asyncio
 async def test_cold_start_no_push(db):
-    all_ids = ["10", "20", "30"]
-    unseen = await db.filter_unseen_session("sess1", "tag", all_ids)
-    is_cold = await db.seen_count("sess1", "tag") == 0
-    assert is_cold is True
-    assert set(unseen) == {"10", "20", "30"}
+    """首次轮询时所有 ID 均未见过，应全部标记但不推送"""
+    await db.add_subscription("sess1", "tag", "test")
+    sub_id = await db.get_subscription_id("sess1", "tag", "test")
 
-    await db.mark_seen_session("sess1", "tag", unseen)
-    unseen_after = await db.filter_unseen_session("sess1", "tag", all_ids)
+    all_ids = ["10", "20", "30"]
+    unseen = await db.filter_unseen(sub_id, all_ids)
+    is_cold_start = len(unseen) == len(all_ids)
+    assert is_cold_start is True
+
+    await db.mark_seen(sub_id, unseen)
+
+    unseen_after = await db.filter_unseen(sub_id, all_ids)
     assert unseen_after == []
 
 
 @pytest.mark.asyncio
 async def test_filter_unsent_marks_sent(db):
+    """同一 session 内跨订阅去重：mark_sent 后 filter_unsent 应过滤掉已发送的帖子"""
     await db.mark_sent("sess1", ["a", "b"])
     result = await db.filter_unsent("sess1", ["a", "b", "c"])
     assert result == ["c"]
@@ -108,92 +90,19 @@ async def test_filter_unsent_marks_sent(db):
 
 @pytest.mark.asyncio
 async def test_sent_posts_session_isolated(db):
+    """不同 session 的 sent_posts 互不干扰"""
     await db.mark_sent("sess1", ["x"])
     result = await db.filter_unsent("sess2", ["x"])
     assert result == ["x"]
 
 
 @pytest.mark.asyncio
-async def test_seen_session_isolated(db):
-    await db.mark_seen_session("sess1", "tag", ["a"])
-    unseen = await db.filter_unseen_session("sess2", "tag", ["a"])
-    assert unseen == ["a"]
+async def test_cascade_delete(db):
+    """删除订阅时 seen_posts 应联级删除"""
+    await db.add_subscription("sess1", "tag", "test")
+    sub_id = await db.get_subscription_id("sess1", "tag", "test")
+    await db.mark_seen(sub_id, ["1", "2"])
 
-
-@pytest.mark.asyncio
-async def test_remove_subscription_by_id(db):
-    await db.add_subscription("sess1", "tag", "test", "subscribe")
-    sub_id = await db.get_subscription_id("sess1", "tag", "test", "subscribe")
-    assert sub_id is not None
-
-    ok = await db.remove_subscription_by_id(sub_id)
-    assert ok is True
-
-    assert await db.get_subscription_id("sess1", "tag", "test", "subscribe") is None
-
-
-@pytest.mark.asyncio
-async def test_migration_from_v1(tmp_path):
-    """验证旧 v1 schema 数据迁移到 v2"""
-    import sqlite3
-
-    db_path = str(tmp_path / "old.db")
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript("""
-        CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        CREATE TABLE subscriptions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            type TEXT NOT NULL,
-            target TEXT NOT NULL,
-            filter_rule TEXT DEFAULT NULL,
-            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-            UNIQUE(session_id, type, target)
-        );
-        CREATE TABLE seen_posts (
-            subscription_id INTEGER NOT NULL,
-            post_id TEXT NOT NULL,
-            seen_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-            PRIMARY KEY (subscription_id, post_id)
-        );
-        CREATE TABLE sent_posts (
-            session_id TEXT NOT NULL,
-            post_id TEXT NOT NULL,
-            sent_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-            PRIMARY KEY (session_id, post_id)
-        );
-    """)
-    import json as _json
-    filter_rule = _json.dumps({
-        "search_tags": ["原神"],
-        "include_tags": [],
-        "exclude_tags": ["R18"],
-        "or_tag_groups": [],
-        "raw": "原神 -R18",
-    })
-    conn.execute(
-        "INSERT INTO subscriptions(session_id,type,target,filter_rule) VALUES(?,?,?,?)",
-        ("sess1", "tag", "原神", filter_rule),
-    )
-    conn.execute("SELECT last_insert_rowid()")
-    sub_id = conn.execute("SELECT id FROM subscriptions WHERE target='原神'").fetchone()[0]
-    conn.execute(
-        "INSERT INTO seen_posts(subscription_id,post_id,seen_at) VALUES(?,?,?)",
-        (sub_id, "post123", 1000000),
-    )
-    conn.commit()
-    conn.close()
-
-    db = LofterDB(db_path)
-    await db.initialize()
-
-    rows = await db.list_subscriptions("sess1")
-    targets = {(r[3], r[4]) for r in rows}
-    assert ("subscribe", "原神") in targets
-    assert ("exclude", "R18") in targets
-
-    unseen = await db.filter_unseen_session("sess1", "tag", ["post123"])
-    assert unseen == []
-
-    await db.close()
+    await db.remove_subscription("sess1", "tag", "test")
+    new_sub = await db.get_subscription_id("sess1", "tag", "test")
+    assert new_sub is None

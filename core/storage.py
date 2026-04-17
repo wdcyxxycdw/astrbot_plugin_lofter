@@ -6,42 +6,40 @@ from .db import LofterDB
 
 @dataclass
 class Subscription:
-    id: int
     session_id: str
     type: Literal["tag", "blog"]
-    role: Literal["subscribe", "exclude"]
     target: str
-    created_at: int = 0
+    last_post_id: str = ""
+    filter_rule: str = ""
 
 
 class SubscriptionStorage:
     def __init__(self, db: LofterDB):
         self._db = db
 
-    async def add(self, session_id: str, sub_type: Literal["tag", "blog"], target: str, role: str = "subscribe") -> bool:
-        return await self._db.add_subscription(session_id, sub_type, target, role)
+    async def add(self, session_id: str, sub_type: Literal["tag", "blog"], target: str, filter_rule: str | None = None) -> bool:
+        return await self._db.add_subscription(session_id, sub_type, target, filter_rule)
 
-    async def remove(self, session_id: str, sub_type: Literal["tag", "blog"], target: str, role: str = "subscribe") -> bool:
-        return await self._db.remove_subscription(session_id, sub_type, target, role)
-
-    async def remove_by_id(self, sub_id: int) -> bool:
-        return await self._db.remove_subscription_by_id(sub_id)
+    async def remove(self, session_id: str, sub_type: Literal["tag", "blog"], target: str) -> bool:
+        return await self._db.remove_subscription(session_id, sub_type, target)
 
     async def list_by_session(self, session_id: str) -> list[Subscription]:
         rows = await self._db.list_subscriptions(session_id)
-        return [_row_to_sub(r) for r in rows]
+        return [Subscription(session_id=r[1], type=r[2], target=r[3], filter_rule=r[4] or "") for r in rows]
 
     async def all(self) -> list[Subscription]:
         rows = await self._db.list_subscriptions()
-        return [_row_to_sub(r) for r in rows]
+        return [Subscription(session_id=r[1], type=r[2], target=r[3], filter_rule=r[4] or "") for r in rows]
 
-    async def get(self, session_id: str, sub_type: str, target: str, role: str = "subscribe") -> Optional[Subscription]:
+    async def get(self, session_id: str, sub_type: str, target: str) -> Optional[Subscription]:
         rows = await self._db.list_subscriptions(session_id)
         for r in rows:
-            if r[2] == sub_type and r[3] == role and r[4] == target:
-                return _row_to_sub(r)
+            if r[2] == sub_type and r[3] == target:
+                return Subscription(session_id=r[1], type=r[2], target=r[3], filter_rule=r[4] or "")
         return None
 
-
-def _row_to_sub(r: tuple) -> Subscription:
-    return Subscription(id=r[0], session_id=r[1], type=r[2], role=r[3], target=r[4], created_at=r[5])
+    async def update_filter(self, session_id: str, sub_type: str, target: str, filter_rule: str | None):
+        sub_id = await self._db.get_subscription_id(session_id, sub_type, target)
+        if sub_id is None:
+            return
+        await self._db.update_filter_rule(sub_id, filter_rule)
