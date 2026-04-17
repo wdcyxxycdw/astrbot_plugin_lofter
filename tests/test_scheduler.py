@@ -7,9 +7,11 @@ from core.parser import Post
 from core.scheduler import (
     _check_tag_session,
     _enrich_blog_posts,
-    _push_posts,
+    _push_tag_posts,
+    _push_blog_post,
     _build_tag_rule,
 )
+from core.filter import FilterRule
 from core.storage import Subscription
 
 RICH_HTML = """\
@@ -64,17 +66,16 @@ async def test_enrich_fallback_on_error():
     assert result[0].title == ""
 
 
-# ── _push_posts ───────────────────────────────────────────────────────────────
+# ── _push_tag_posts / _push_blog_post ────────────────────────────────────────
 
-TAG_SUB = Subscription(id=1, session_id="sess1", type="tag", role="subscribe", target="原创")
-BLOG_SUB = Subscription(id=2, session_id="sess1", type="blog", role="subscribe", target="someuser")
+TAG_RULE = FilterRule(search_tags=["原创"])
 
 FULL_POST = Post(
     post_id="p1",
     title="帖子标题",
     author="作者名",
     summary="这是摘要",
-    tags=["tag1", "tag2"],
+    tags=["原创", "tag2"],
     images=["https://img1.jpg", "https://img2.jpg"],
     url="https://user.lofter.com/post/p1",
 )
@@ -83,7 +84,7 @@ FULL_POST = Post(
 @pytest.mark.asyncio
 async def test_push_tag_label():
     send = AsyncMock()
-    await _push_posts([FULL_POST], TAG_SUB, send)
+    await _push_tag_posts("sess1", [FULL_POST], TAG_RULE, send)
     text = send.call_args[0][1]
     assert "【标签「原创」有新内容】" in text
 
@@ -91,7 +92,7 @@ async def test_push_tag_label():
 @pytest.mark.asyncio
 async def test_push_blog_label():
     send = AsyncMock()
-    await _push_posts([FULL_POST], BLOG_SUB, send)
+    await _push_blog_post("sess1", FULL_POST, "someuser", send)
     text = send.call_args[0][1]
     assert "【博主「someuser」有新内容】" in text
 
@@ -99,18 +100,18 @@ async def test_push_blog_label():
 @pytest.mark.asyncio
 async def test_push_includes_author_summary_tags_url():
     send = AsyncMock()
-    await _push_posts([FULL_POST], TAG_SUB, send)
+    await _push_tag_posts("sess1", [FULL_POST], TAG_RULE, send)
     text = send.call_args[0][1]
     assert "作者：作者名" in text
     assert "这是摘要" in text
-    assert "#tag1" in text
+    assert "#原创" in text
     assert FULL_POST.url in text
 
 
 @pytest.mark.asyncio
 async def test_push_includes_images():
     send = AsyncMock()
-    await _push_posts([FULL_POST], TAG_SUB, send)
+    await _push_tag_posts("sess1", [FULL_POST], TAG_RULE, send)
     images = send.call_args[0][2]
     assert images == FULL_POST.images
 
@@ -119,7 +120,7 @@ async def test_push_includes_images():
 async def test_push_no_title_shows_placeholder():
     send = AsyncMock()
     post = Post(post_id="p2", title="", summary="有摘要", url="https://u.lofter.com/post/p2")
-    await _push_posts([post], TAG_SUB, send)
+    await _push_tag_posts("sess1", [post], TAG_RULE, send)
     text = send.call_args[0][1]
     assert "(无标题)" in text
 
@@ -131,7 +132,7 @@ async def test_push_reversed_order():
         Post(post_id=f"p{i}", title=f"帖子{i}", summary="", url=f"https://u.lofter.com/post/p{i}")
         for i in range(3)
     ]
-    await _push_posts(posts, TAG_SUB, send)
+    await _push_tag_posts("sess1", posts, TAG_RULE, send)
     calls = send.call_args_list
     titles = [c[0][1] for c in calls]
     assert "帖子2" in titles[0]
@@ -145,7 +146,7 @@ async def test_push_max_5_posts():
         Post(post_id=f"p{i}", title=f"帖子{i}", summary="", url=f"https://u.lofter.com/post/p{i}")
         for i in range(8)
     ]
-    await _push_posts(posts, TAG_SUB, send)
+    await _push_tag_posts("sess1", posts, TAG_RULE, send)
     assert send.call_count == 5
 
 

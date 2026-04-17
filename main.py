@@ -85,6 +85,17 @@ class LofterPlugin(Star):
         except Exception as e:
             logger.warning("Lofter: warmup 标签「%s」失败: %s", target, e)
 
+    async def _warmup_blog(self, session_id: str, username: str):
+        from .core.scheduler import fetch_blog_posts
+        from .core.storage import Subscription
+        try:
+            sub = Subscription(id=0, session_id=session_id, type="blog", role="subscribe", target=username)
+            posts = await fetch_blog_posts(sub, self._client)
+            if posts:
+                await self._db.mark_seen_session(session_id, "blog", [p.post_id for p in posts])
+        except Exception as e:
+            logger.warning("Lofter: warmup 博主「%s」失败: %s", username, e)
+
     def _format_post_lines(self, post, label: str, target: str) -> list[str]:
         title = post.title or "(无标题)"
         lines = [f"【{label}「{target}」有新内容】", f"▸ {title}"]
@@ -311,6 +322,8 @@ class LofterPlugin(Star):
             yield event.plain_result("请提供博主用户名，例如：/lofter subblog username")
             return
         ok = await self._storage.add(event.unified_msg_origin, "blog", username)
+        if ok:
+            await self._warmup_blog(event.unified_msg_origin, username)
         yield event.plain_result(f"已订阅博主「{username}」" if ok else f"已经订阅过博主「{username}」了")
 
     @lofter.command("unsubtag")

@@ -89,22 +89,6 @@ async def _enrich_blog_posts(posts: list[Post], client: LofterClient) -> list[Po
     return enriched
 
 
-async def _push_posts(posts: list[Post], sub: Subscription, send_func: SendFunc):
-    label = "标签" if sub.type == "tag" else "博主"
-    for post in reversed(posts[:5]):
-        title = post.title or "(无标题)"
-        tags = f"#{' #'.join(post.tags)}" if post.tags else ""
-        lines = [f"【{label}「{sub.target}」有新内容】", f"▸ {title}"]
-        if post.author:
-            lines.append(f"作者：{post.author}")
-        if tags:
-            lines.append(tags)
-        if post.summary:
-            lines.append(post.summary)
-        lines.append(post.url)
-        await send_func(sub.session_id, "\n".join(lines), post.images)
-
-
 async def _check_tag_session(
     session_id: str,
     subs: list[Subscription],
@@ -187,15 +171,6 @@ async def _check_blog_sub(
     await db.mark_sent(sub.session_id, actually_new_ids)
 
 
-async def _poll_tag_session(session_id: str, tag_subs: list[Subscription], client: LofterClient, db: LofterDB, send_func: SendFunc):
-    await _check_tag_session(session_id, tag_subs, client, db, send_func)
-
-
-async def _poll_blog_session(session_id: str, blog_subs: list[Subscription], client: LofterClient, db: LofterDB, send_func: SendFunc):
-    for sub in blog_subs:
-        await _check_blog_sub(sub, client, db, send_func)
-
-
 class SubscriptionScheduler:
     def __init__(
         self,
@@ -237,11 +212,11 @@ class SubscriptionScheduler:
             by_session.setdefault(s.session_id, {"tag": [], "blog": []})
             by_session[s.session_id][s.type].append(s)
 
-        tasks = []
-        for session_id, typed in by_session.items():
+        async def _poll_session(session_id: str, typed: dict):
             if typed["tag"]:
-                tasks.append(_poll_tag_session(session_id, typed["tag"], self._client, self._db, self._send_func))
+                await _check_tag_session(session_id, typed["tag"], self._client, self._db, self._send_func)
             for sub in typed["blog"]:
-                tasks.append(_check_blog_sub(sub, self._client, self._db, self._send_func))
+                await _check_blog_sub(sub, self._client, self._db, self._send_func)
 
+        tasks = [_poll_session(sid, typed) for sid, typed in by_session.items()]
         await asyncio.gather(*tasks, return_exceptions=True)
