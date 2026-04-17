@@ -1,8 +1,15 @@
 import pytest
+import pytest_asyncio
 from unittest.mock import AsyncMock, patch
 
+from core.db import LofterDB
 from core.parser import Post
-from core.scheduler import _enrich_blog_posts, _push_posts
+from core.scheduler import (
+    _check_tag_session,
+    _enrich_blog_posts,
+    _push_posts,
+    _build_tag_rule,
+)
 from core.storage import Subscription
 
 RICH_HTML = """\
@@ -19,6 +26,18 @@ BARE_POST = Post(
 )
 
 
+@pytest_asyncio.fixture
+async def db(tmp_path):
+    d = LofterDB(str(tmp_path / "test.db"))
+    await d.initialize()
+    yield d
+    await d.close()
+
+
+def _make_sub(target: str, role: str = "subscribe", sub_type: str = "tag", session_id: str = "sess1") -> Subscription:
+    return Subscription(id=1, session_id=session_id, type=sub_type, role=role, target=target)
+
+
 @pytest.mark.asyncio
 async def test_enrich_success():
     client = AsyncMock()
@@ -30,7 +49,7 @@ async def test_enrich_success():
     assert result[0].title == "帖子标题"
     assert result[0].author == "作者名"
     assert result[0].summary == "这是摘要"
-    assert result[0].post_id == "abc123"  # 原始 ID 应被保留，不由 URL 重新提取
+    assert result[0].post_id == "abc123"
 
 
 @pytest.mark.asyncio
@@ -40,16 +59,15 @@ async def test_enrich_fallback_on_error():
 
     result = await _enrich_blog_posts([BARE_POST], client)
 
-    # 降级：返回原始 bare post，不抛出异常
     assert len(result) == 1
     assert result[0].post_id == "abc123"
-    assert result[0].title == ""  # bare post 无标题
+    assert result[0].title == ""
 
 
 # ── _push_posts ───────────────────────────────────────────────────────────────
 
-TAG_SUB = Subscription(session_id="sess1", type="tag", target="原创")
-BLOG_SUB = Subscription(session_id="sess1", type="blog", target="someuser")
+TAG_SUB = Subscription(id=1, session_id="sess1", type="tag", role="subscribe", target="原创")
+BLOG_SUB = Subscription(id=2, session_id="sess1", type="blog", role="subscribe", target="someuser")
 
 FULL_POST = Post(
     post_id="p1",
@@ -131,12 +149,8 @@ async def test_push_max_5_posts():
     assert send.call_count == 5
 
 
-# ── _enrich_blog_posts ────────────────────────────────────────────────────────
-
-
 @pytest.mark.asyncio
 async def test_enrich_serial_order():
-    """验证结果顺序与输入顺序一致（串行执行的副作用，非并发性验证）。"""
     posts = [
         Post(post_id="p1", title="", summary="", url="https://u.lofter.com/post/p1"),
         Post(post_id="p2", title="", summary="", url="https://u.lofter.com/post/p2"),
@@ -151,3 +165,126 @@ async def test_enrich_serial_order():
 
     assert result[0].title == "标题1"
     assert result[1].title == "标题2"
+
+
+# ── 聚合标签轮询 ──────────────────────────────────────────────────────────────
+
+def _make_posts(ids: list[str], tags: list[str] | None = None) -> list[Post]:
+    return [
+        Post(post_id=pid, title=f"帖子{pid}", summary="", url=f"https://u.lofter.com/post/{pid}", tags=tags or [])
+        for pid in ids
+    ]
+
+
+@pytest.mark.asyncio
+async def test_build_tag_rule():
+    subs = [
+        _make_sub("原神", "subscribe"),
+        _make_sub("崩铁", "subscribe"),
+        _make_sub("R18", "exclude"),
+    ]
+    rule = _build_tag_rule(subs)
+    assert set(rule.search_tags) == {"原神", "崩铁"}
+    assert rule.exclude_tags == ["R18"]
+
+
+@pytest.mark.asyncio
+async def test_aggregate_tag_session(db):
+    """两个 subscribe + 一个 exclude，合并拉取，exclude 正确过滤"""
+    subs = [
+        _make_sub("原神", "subscribe"),
+        _make_sub("崩铁", "subscribe"),
+        _make_sub("R18", "exclude"),
+    ]
+
+    posts_genshin = _make_posts(["g1", "g2"], tags=["原神"])
+    posts_hsr = _make_posts(["h1"], tags=["崩铁"])
+    posts_r18 = _make_posts(["r1"], tags=["原神", "R18"])
+
+    async def mock_fetch(search_tags, client):
+        result = []
+        for tag in search_tags:
+            if tag == "原神":
+                result.extend(posts_genshin + posts_r18)
+            elif tag == "崩铁":
+                result.extend(posts_hsr)
+        seen = set()
+        deduped = []
+        for p in result:
+            if p.post_id not in seen:
+                seen.add(p.post_id)
+                deduped.append(p)
+        return deduped
+
+    sent: list[str] = []
+
+    async def send_func(session_id, text, images):
+        sent.append(text)
+
+    client = AsyncMock()
+
+    with patch("core.scheduler.fetch_tag_posts", side_effect=mock_fetch):
+        await db.mark_seen_session("sess1", "tag", ["warmup"])
+        await _check_tag_session("sess1", subs, client, db, send_func)
+
+    pushed_ids = await db.filter_unsent("sess1", ["g1", "g2", "h1", "r1"])
+    assert "r1" in pushed_ids
+    assert "g1" not in pushed_ids
+    assert "g2" not in pushed_ids
+    assert "h1" not in pushed_ids
+
+
+@pytest.mark.asyncio
+async def test_warmup_no_push(db):
+    """冷启动（seen_count=0）时 mark_seen 但不推送"""
+    subs = [_make_sub("原神", "subscribe")]
+    posts = _make_posts(["p1", "p2", "p3"])
+
+    async def mock_fetch(search_tags, client):
+        return posts
+
+    sent: list[str] = []
+
+    async def send_func(session_id, text, images):
+        sent.append(text)
+
+    client = AsyncMock()
+
+    with patch("core.scheduler.fetch_tag_posts", side_effect=mock_fetch):
+        await _check_tag_session("sess1", subs, client, db, send_func)
+
+    assert sent == []
+    count = await db.seen_count("sess1", "tag")
+    assert count == 3
+
+
+@pytest.mark.asyncio
+async def test_new_post_pushed_after_warmup(db):
+    """warmup 后新帖应该被推送"""
+    subs = [_make_sub("原神", "subscribe")]
+    old_posts = _make_posts(["p1", "p2"])
+    new_post = Post(post_id="p3", title="新帖", summary="", url="https://u.lofter.com/post/p3")
+
+    async def mock_fetch_old(search_tags, client):
+        return old_posts
+
+    async def mock_fetch_new(search_tags, client):
+        return old_posts + [new_post]
+
+    sent: list[str] = []
+
+    async def send_func(session_id, text, images):
+        sent.append(text)
+
+    client = AsyncMock()
+
+    with patch("core.scheduler.fetch_tag_posts", side_effect=mock_fetch_old):
+        await _check_tag_session("sess1", subs, client, db, send_func)
+
+    assert sent == []
+
+    with patch("core.scheduler.fetch_tag_posts", side_effect=mock_fetch_new):
+        await _check_tag_session("sess1", subs, client, db, send_func)
+
+    assert len(sent) == 1
+    assert "新帖" in sent[0]
