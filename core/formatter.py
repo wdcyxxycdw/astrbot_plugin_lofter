@@ -1,20 +1,13 @@
-from core.parser import Post
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.parser import Post
 
 DIVIDER = "──────────────"
 
 
 def format_post(post: Post, header: str = "", include_time: bool = False, body: str = "") -> str:
-    """格式化帖子为统一的消息文本格式。
-
-    Args:
-        post: Post 数据对象
-        header: 可选的消息头
-        include_time: 是否在作者信息中显示发布时间
-        body: 可选的正文内容覆盖（优先于 post.summary）
-
-    Returns:
-        格式化后的消息文本
-    """
     blocks = []
 
     if header:
