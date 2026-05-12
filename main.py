@@ -26,7 +26,7 @@ POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
     "astrbot_plugin_lofter",
     "user",
     "解析 Lofter 链接，订阅 Lofter 标签/博主，搜索 Lofter 内容，支持标签表达式统计",
-    "v1.3.2",
+    "v1.3.3",
 )
 class LofterPlugin(LofterCountCommandsMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):

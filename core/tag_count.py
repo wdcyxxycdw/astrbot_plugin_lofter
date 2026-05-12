@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -26,6 +27,15 @@ class CountResult:
     candidates: int = 0
     scanned_pages: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TagScanResult:
+    tag: str
+    candidate_ids: set[str]
+    matched_ids: set[str]
+    scanned_pages: int
+    warnings: list[str]
 
 
 @dataclass(frozen=True)
@@ -266,20 +276,23 @@ async def count_posts(
     *,
     parse_posts=parse_dwr_response,
     page_size: int = 20,
+    tag_concurrency: int = 3,
 ) -> CountResult:
     expr = parse_count_expression(expression)
     positive_tags = extract_positive_tags(expr)
     if not positive_tags:
         raise CountExpressionError("至少需要一个正向 tag")
 
+    results = await _scan_positive_tags(positive_tags, client, page_size, parse_posts, expr, tag_concurrency)
     seen_candidates: set[str] = set()
     matched: set[str] = set()
     scanned_pages: dict[str, int] = {}
     warnings: list[str] = []
-    for tag in positive_tags:
-        await _count_tag_pages(
-            tag, client, page_size, parse_posts, expr, seen_candidates, matched, scanned_pages, warnings
-        )
+    for item in results:
+        seen_candidates.update(item.candidate_ids)
+        matched.update(item.matched_ids)
+        scanned_pages[item.tag] = item.scanned_pages
+        warnings.extend(item.warnings)
 
     return CountResult(
         name="",
@@ -294,27 +307,52 @@ async def count_posts(
     )
 
 
-async def _count_tag_pages(
+async def _scan_positive_tags(
+    tags: list[str],
+    client,
+    page_size: int,
+    parse_posts,
+    expr: ExprNode,
+    tag_concurrency: int,
+) -> list[TagScanResult]:
+    semaphore = asyncio.Semaphore(max(1, tag_concurrency))
+    tasks = [_scan_tag_with_limit(tag, semaphore, client, page_size, parse_posts, expr) for tag in tags]
+    return await asyncio.gather(*tasks)
+
+
+async def _scan_tag_with_limit(
+    tag: str,
+    semaphore: asyncio.Semaphore,
+    client,
+    page_size: int,
+    parse_posts,
+    expr: ExprNode,
+) -> TagScanResult:
+    async with semaphore:
+        return await _scan_tag_pages(tag, client, page_size, parse_posts, expr)
+
+
+async def _scan_tag_pages(
     tag: str,
     client,
     page_size: int,
     parse_posts,
     expr: ExprNode,
-    seen_candidates: set[str],
-    matched: set[str],
-    scanned_pages: dict[str, int],
-    warnings: list[str],
-):
+) -> TagScanResult:
     offset = 0
     seen_for_tag: set[str] = set()
+    candidate_ids: set[str] = set()
+    matched_ids: set[str] = set()
+    scanned_pages = 0
+    warnings: list[str] = []
     while True:
         posts = await _fetch_page(tag, client, offset, page_size, parse_posts)
         if not posts:
-            return
-        scanned_pages[tag] = scanned_pages.get(tag, 0) + 1
-        if not _count_new_posts(posts, expr, seen_for_tag, seen_candidates, matched):
+            return TagScanResult(tag, candidate_ids, matched_ids, scanned_pages, warnings)
+        scanned_pages += 1
+        if not _count_new_posts(posts, expr, seen_for_tag, candidate_ids, matched_ids):
             _append_repeat_page_warning(tag, offset, warnings)
-            return
+            return TagScanResult(tag, candidate_ids, matched_ids, scanned_pages, warnings)
         offset += page_size
 
 

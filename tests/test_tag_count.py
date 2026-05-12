@@ -1,7 +1,8 @@
+import asyncio
 import csv
 from io import StringIO
 from pathlib import Path
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -199,7 +200,18 @@ async def test_count_posts_dedupes_candidates_and_matches_expression():
 @pytest.mark.asyncio
 async def test_count_posts_continues_tag_pages_when_page_is_only_global_duplicates():
     client = AsyncMock()
-    client.search_tag.side_effect = ["raw-a-1", "", "raw-b-1", "raw-b-2", ""]
+
+    async def search_tag(tag, *, offset, limit):
+        pages = {
+            ("A", 0): "raw-a-1",
+            ("A", 2): "",
+            ("B", 0): "raw-b-1",
+            ("B", 2): "raw-b-2",
+            ("B", 4): "",
+        }
+        return pages[(tag, offset)]
+
+    client.search_tag.side_effect = search_tag
 
     async def parser(raw):
         if raw == "raw-a-1":
@@ -219,13 +231,32 @@ async def test_count_posts_continues_tag_pages_when_page_is_only_global_duplicat
     result = await count_posts("A|B", client, parse_posts=parser, page_size=2)
 
     assert result.count == 3
-    assert client.search_tag.call_args_list == [
-        call("A", offset=0, limit=2),
-        call("A", offset=2, limit=2),
-        call("B", offset=0, limit=2),
-        call("B", offset=2, limit=2),
-        call("B", offset=4, limit=2),
-    ]
+    offsets_by_tag = {"A": [], "B": []}
+    for item in client.search_tag.call_args_list:
+        offsets_by_tag[item.args[0]].append(item.kwargs["offset"])
+    assert offsets_by_tag == {"A": [0, 2], "B": [0, 2, 4]}
+
+
+@pytest.mark.asyncio
+async def test_count_posts_scans_multiple_positive_tags_concurrently():
+    client = AsyncMock()
+    active_tags: set[str] = set()
+    overlaps: list[set[str]] = []
+
+    async def search_tag(tag, *, offset, limit):
+        active_tags.add(tag)
+        if len(active_tags) > 1:
+            overlaps.append(set(active_tags))
+        await asyncio.sleep(0.01)
+        active_tags.remove(tag)
+        return ""
+
+    client.search_tag.side_effect = search_tag
+
+    result = await count_posts("A|B", client, page_size=20)
+
+    assert result.count == 0
+    assert {"A", "B"} in overlaps
 
 
 @pytest.mark.asyncio
