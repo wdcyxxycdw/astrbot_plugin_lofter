@@ -9,6 +9,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.star import StarTools
 
 from .core.client import LofterClient
+from .core.count_commands import LofterCountCommandsMixin
 from .core.db import LofterDB
 from .core.dwr_parser import parse_dwr_response
 from .core.filter import parse_tag_expr
@@ -25,9 +26,9 @@ POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
     "astrbot_plugin_lofter",
     "user",
     "解析 Lofter 链接，订阅 Lofter 标签/博主，搜索 Lofter 内容",
-    "v1.2.0",
+    "v1.3.0",
 )
-class LofterPlugin(Star):
+class LofterPlugin(LofterCountCommandsMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self._config_cookie: str = config.get("lofter_cookie", "")
@@ -222,6 +223,22 @@ class LofterPlugin(Star):
         await self._db.set_config("lofter_cookie", value)
         self._client.update_cookie(value)
         yield event.plain_result("Cookie 已更新")
+
+    @lofter.command("count")
+    async def count(self, event: AstrMessageEvent):
+        async for result in self.handle_count(event): yield result
+
+    @lofter.command("count-list")
+    async def count_list(self, event: AstrMessageEvent):
+        async for result in self.handle_count_list(event): yield result
+
+    @lofter.command("count-del")
+    async def count_del(self, event: AstrMessageEvent):
+        async for result in self.handle_count_del(event): yield result
+
+    @lofter.command("count-all")
+    async def count_all(self, event: AstrMessageEvent):
+        async for result in self.handle_count_all(event): yield result
 
     @lofter.command("subtag")
     async def sub_tag(self, event: AstrMessageEvent):

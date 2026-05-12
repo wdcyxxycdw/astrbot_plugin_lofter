@@ -1,3 +1,6 @@
+import json
+import sqlite3
+
 import pytest
 import pytest_asyncio
 
@@ -10,6 +13,57 @@ async def db(tmp_path):
     await d.initialize()
     yield d
     await d.close()
+
+
+def _create_v1_db(db_path: str):
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript("""
+        CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            target TEXT NOT NULL,
+            filter_rule TEXT DEFAULT NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            UNIQUE(session_id, type, target)
+        );
+        CREATE TABLE seen_posts (
+            subscription_id INTEGER NOT NULL,
+            post_id TEXT NOT NULL,
+            seen_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            PRIMARY KEY (subscription_id, post_id)
+        );
+        CREATE TABLE sent_posts (
+            session_id TEXT NOT NULL,
+            post_id TEXT NOT NULL,
+            sent_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            PRIMARY KEY (session_id, post_id)
+        );
+    """)
+    _insert_v1_fixture(conn)
+    conn.commit()
+    conn.close()
+
+
+def _insert_v1_fixture(conn: sqlite3.Connection):
+    filter_rule = json.dumps({
+        "search_tags": ["原神"],
+        "include_tags": [],
+        "exclude_tags": ["R18"],
+        "or_tag_groups": [],
+        "raw": "原神 -R18",
+    })
+    conn.execute(
+        "INSERT INTO subscriptions(session_id,type,target,filter_rule) VALUES(?,?,?,?)",
+        ("sess1", "tag", "原神", filter_rule),
+    )
+    sub_id = conn.execute("SELECT id FROM subscriptions WHERE target='原神'").fetchone()[0]
+    conn.execute(
+        "INSERT INTO seen_posts(subscription_id,post_id,seen_at) VALUES(?,?,?)",
+        (sub_id, "post123", 1000000),
+    )
 
 
 @pytest.mark.asyncio
@@ -135,55 +189,8 @@ async def test_remove_subscription_by_id(db):
 @pytest.mark.asyncio
 async def test_migration_from_v1(tmp_path):
     """验证旧 v1 schema 数据迁移到 v2"""
-    import sqlite3
-
     db_path = str(tmp_path / "old.db")
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript("""
-        CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        CREATE TABLE subscriptions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            type TEXT NOT NULL,
-            target TEXT NOT NULL,
-            filter_rule TEXT DEFAULT NULL,
-            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-            UNIQUE(session_id, type, target)
-        );
-        CREATE TABLE seen_posts (
-            subscription_id INTEGER NOT NULL,
-            post_id TEXT NOT NULL,
-            seen_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-            PRIMARY KEY (subscription_id, post_id)
-        );
-        CREATE TABLE sent_posts (
-            session_id TEXT NOT NULL,
-            post_id TEXT NOT NULL,
-            sent_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-            PRIMARY KEY (session_id, post_id)
-        );
-    """)
-    import json as _json
-    filter_rule = _json.dumps({
-        "search_tags": ["原神"],
-        "include_tags": [],
-        "exclude_tags": ["R18"],
-        "or_tag_groups": [],
-        "raw": "原神 -R18",
-    })
-    conn.execute(
-        "INSERT INTO subscriptions(session_id,type,target,filter_rule) VALUES(?,?,?,?)",
-        ("sess1", "tag", "原神", filter_rule),
-    )
-    conn.execute("SELECT last_insert_rowid()")
-    sub_id = conn.execute("SELECT id FROM subscriptions WHERE target='原神'").fetchone()[0]
-    conn.execute(
-        "INSERT INTO seen_posts(subscription_id,post_id,seen_at) VALUES(?,?,?)",
-        (sub_id, "post123", 1000000),
-    )
-    conn.commit()
-    conn.close()
+    _create_v1_db(db_path)
 
     db = LofterDB(db_path)
     await db.initialize()
@@ -196,4 +203,63 @@ async def test_migration_from_v1(tmp_path):
     unseen = await db.filter_unseen_session("sess1", "tag", ["post123"])
     assert unseen == []
 
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_count_condition_crud(db):
+    await db.upsert_count_condition("米哈游相关", "原神 -R18")
+    rows = await db.list_count_conditions()
+    assert rows == [("米哈游相关", "原神 -R18")]
+
+    await db.upsert_count_condition("米哈游相关", "原神 同人")
+    rows = await db.list_count_conditions()
+    assert rows == [("米哈游相关", "原神 同人")]
+
+    deleted = await db.delete_count_condition("米哈游相关")
+    assert deleted is True
+    assert await db.list_count_conditions() == []
+
+
+@pytest.mark.asyncio
+async def test_migration_v2_to_v3_adds_count_conditions(tmp_path):
+    import sqlite3
+
+    db_path = str(tmp_path / "v2.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript("""
+        CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO config(key,value) VALUES('schema_version','2');
+        CREATE TABLE subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            type TEXT NOT NULL CHECK(type IN ('tag','blog')),
+            role TEXT NOT NULL CHECK(role IN ('subscribe','exclude')) DEFAULT 'subscribe',
+            target TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            UNIQUE(session_id, type, role, target)
+        );
+        CREATE TABLE seen_posts (
+            session_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            post_id TEXT NOT NULL,
+            seen_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            PRIMARY KEY (session_id, type, post_id)
+        );
+        CREATE TABLE sent_posts (
+            session_id TEXT NOT NULL,
+            post_id TEXT NOT NULL,
+            sent_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            PRIMARY KEY (session_id, post_id)
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+    db = LofterDB(db_path)
+    await db.initialize()
+    await db.upsert_count_condition("条件", "原神")
+    assert await db.list_count_conditions() == [("条件", "原神")]
+    assert await db.get_config("schema_version") == "3"
     await db.close()
