@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
@@ -24,6 +24,8 @@ class CountResult:
     error: str
     counted_at: str
     candidates: int = 0
+    scanned_pages: dict[str, int] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -272,8 +274,12 @@ async def count_posts(
 
     seen_candidates: set[str] = set()
     matched: set[str] = set()
+    scanned_pages: dict[str, int] = {}
+    warnings: list[str] = []
     for tag in positive_tags:
-        await _count_tag_pages(tag, client, page_size, parse_posts, expr, seen_candidates, matched)
+        await _count_tag_pages(
+            tag, client, page_size, parse_posts, expr, seen_candidates, matched, scanned_pages, warnings
+        )
 
     return CountResult(
         name="",
@@ -283,6 +289,8 @@ async def count_posts(
         error="",
         counted_at=_now_text(),
         candidates=len(seen_candidates),
+        scanned_pages=scanned_pages,
+        warnings=warnings,
     )
 
 
@@ -294,6 +302,8 @@ async def _count_tag_pages(
     expr: ExprNode,
     seen_candidates: set[str],
     matched: set[str],
+    scanned_pages: dict[str, int],
+    warnings: list[str],
 ):
     offset = 0
     seen_for_tag: set[str] = set()
@@ -301,9 +311,17 @@ async def _count_tag_pages(
         posts = await _fetch_page(tag, client, offset, page_size, parse_posts)
         if not posts:
             return
+        scanned_pages[tag] = scanned_pages.get(tag, 0) + 1
         if not _count_new_posts(posts, expr, seen_for_tag, seen_candidates, matched):
+            _append_repeat_page_warning(tag, offset, warnings)
             return
         offset += page_size
+
+
+def _append_repeat_page_warning(tag: str, offset: int, warnings: list[str]):
+    if offset <= 0:
+        return
+    warnings.append(f"标签「{tag}」疑似分页未生效或接口返回重复页")
 
 
 async def _fetch_page(tag: str, client, offset: int, page_size: int, parse_posts) -> list[Post]:
@@ -339,7 +357,8 @@ def build_count_csv_path(base_dir, counted_at: str) -> Path:
 
 def build_count_csv(rows: list[CountResult]) -> str:
     output = StringIO()
-    writer = csv.DictWriter(output, fieldnames=["名称", "条件", "作品数", "状态", "错误信息", "统计时间"])
+    fieldnames = ["名称", "条件", "作品数", "候选作品", "扫描页数", "状态", "错误信息", "统计时间"]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
     for row in rows:
         writer.writerow(_csv_row(row))
@@ -351,10 +370,22 @@ def _csv_row(row: CountResult) -> dict[str, str | int]:
         "名称": row.name,
         "条件": row.expression,
         "作品数": row.count,
+        "候选作品": row.candidates,
+        "扫描页数": format_scanned_pages(row.scanned_pages),
         "状态": row.status,
-        "错误信息": row.error,
+        "错误信息": _format_error_with_warnings(row),
         "统计时间": row.counted_at,
     }
+
+
+def format_scanned_pages(scanned_pages: dict[str, int]) -> str:
+    return "；".join(f"{tag}:{pages}" for tag, pages in scanned_pages.items())
+
+
+def _format_error_with_warnings(row: CountResult) -> str:
+    parts = [row.error] if row.error else []
+    parts.extend(row.warnings)
+    return "；".join(parts)
 
 
 def _now_text() -> str:

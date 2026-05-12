@@ -18,7 +18,7 @@ from core.tag_count import (
     parse_count_command_arg,
     parse_count_expression,
 )
-from core.count_commands import LofterCountCommandsMixin, _try_direct_file, _file_constructor_candidates
+from core.count_commands import LofterCountCommandsMixin, _file_constructor_candidates, _try_direct_file
 
 
 def _post(tags: list[str]) -> Post:
@@ -235,15 +235,62 @@ async def test_count_posts_rejects_expression_without_positive_tag():
         await count_posts("-R18", client)
 
 
+@pytest.mark.asyncio
+async def test_count_posts_reports_scanned_pages():
+    client = AsyncMock()
+    client.search_tag.side_effect = ["raw-a-1", "raw-a-2", ""]
+
+    async def parser(raw):
+        if raw == "raw-a-1":
+            return [Post(post_id="p1", title="", summary="", tags=["A"])]
+        if raw == "raw-a-2":
+            return [Post(post_id="p2", title="", summary="", tags=["A"])]
+        return []
+
+    result = await count_posts("A", client, parse_posts=parser, page_size=1)
+
+    assert result.scanned_pages == {"A": 2}
+    assert result.warnings == []
+
+
+@pytest.mark.asyncio
+async def test_count_posts_warns_when_positive_offset_page_repeats_tag_posts():
+    client = AsyncMock()
+    client.search_tag.side_effect = ["raw-a-1", "raw-a-duplicate"]
+
+    async def parser(raw):
+        if raw == "raw-a-1":
+            return [Post(post_id="p1", title="", summary="", tags=["A"])]
+        if raw == "raw-a-duplicate":
+            return [Post(post_id="p1", title="", summary="", tags=["A"])]
+        return []
+
+    result = await count_posts("A", client, parse_posts=parser, page_size=1)
+
+    assert result.scanned_pages == {"A": 2}
+    assert result.warnings == ["标签「A」疑似分页未生效或接口返回重复页"]
+
+
 def test_build_count_csv():
     rows = [
-        CountResult(name="米哈游相关", expression="原神 -R18", count=12, status="成功", error="", counted_at="2026-05-12 17:30:00"),
+        CountResult(
+            name="米哈游相关",
+            expression="原神 -R18",
+            count=12,
+            status="成功",
+            error="",
+            counted_at="2026-05-12 17:30:00",
+            scanned_pages={"原神": 3},
+            warnings=["标签「原神」疑似分页未生效或接口返回重复页"],
+        ),
         CountResult(name="异常", expression="原神 (", count=0, status="失败", error="括号不匹配", counted_at="2026-05-12 17:30:00"),
     ]
     content = build_count_csv(rows)
     parsed = list(csv.DictReader(StringIO(content)))
     assert parsed[0]["名称"] == "米哈游相关"
     assert parsed[0]["作品数"] == "12"
+    assert parsed[0]["扫描页数"] == "原神:3"
+    assert parsed[0]["错误信息"] == "标签「原神」疑似分页未生效或接口返回重复页"
     assert parsed[1]["状态"] == "失败"
 
 
