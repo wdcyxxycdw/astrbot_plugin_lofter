@@ -276,7 +276,7 @@ async def count_posts(
     *,
     parse_posts=parse_dwr_response,
     page_size: int = 20,
-    tag_concurrency: int = 3,
+    tag_concurrency: int = 5,
 ) -> CountResult:
     expr = parse_count_expression(expression)
     positive_tags = extract_positive_tags(expr)
