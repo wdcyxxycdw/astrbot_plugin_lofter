@@ -11,6 +11,7 @@ from .tag_count import (
     build_count_csv,
     build_count_csv_path,
     count_posts,
+    format_scanned_pages,
     is_admin_event,
     parse_count_command_arg,
 )
@@ -58,12 +59,15 @@ class LofterCountCommandsMixin:
         if not is_admin_event(event):
             yield event.plain_result(ADMIN_ONLY_MESSAGE)
             return
-        name = self._cmd_arg(event.message_str).strip()
-        if not name:
-            yield event.plain_result("请提供统计条件名称，例如：/lofter count-del 米哈游相关")
+        arg = self._cmd_arg(event.message_str).strip()
+        if not arg:
+            yield event.plain_result("请提供统计条件名称或编号，例如：/lofter count-del 米哈游相关")
             return
-        ok = await self._db.delete_count_condition(name)
-        yield event.plain_result(f"已删除统计条件「{name}」" if ok else f"未找到统计条件「{name}」")
+        ok = await self._db.delete_count_condition(arg)
+        if ok:
+            yield event.plain_result(f"已删除统计条件「{arg}」")
+            return
+        yield event.plain_result(await self._delete_count_condition_by_index(arg))
 
     async def handle_count_all(self, event):
         if not is_admin_event(event):
@@ -95,6 +99,17 @@ class LofterCountCommandsMixin:
             logger.exception("Lofter: 统计「%s」失败", name)
             return CountResult(name, expression, 0, "失败", str(e), counted_at)
 
+    async def _delete_count_condition_by_index(self, arg: str) -> str:
+        if not arg.isdigit() or int(arg) < 1:
+            return f"未找到统计条件「{arg}」，可使用名称或 /lofter count-list 编号删除"
+        rows = await self._db.list_count_conditions()
+        idx = int(arg)
+        if idx > len(rows):
+            return f"编号 {idx} 超出范围（当前共 {len(rows)} 条统计条件）"
+        name = rows[idx - 1][0]
+        ok = await self._db.delete_count_condition(name)
+        return f"已删除第 {idx} 条统计条件「{name}」" if ok else f"删除第 {idx} 条统计条件失败，请重新 count-list 确认编号"
+
     def _write_count_csv(self, rows: list[CountResult], counted_at: str) -> Path:
         base_dir = Path(self._db._path).parent
         path = build_count_csv_path(base_dir, counted_at)
@@ -109,17 +124,21 @@ class LofterCountCommandsMixin:
 
 
 def _format_count_result(result: CountResult) -> str:
-    return "\n".join([
+    lines = [
         f"「{result.name}」统计完成：{result.count} 个作品",
         f"候选作品：{result.candidates}",
+        f"扫描页数：{format_scanned_pages(result.scanned_pages) or '无'}",
         f"条件：{result.expression}",
-    ])
+    ]
+    lines.extend(f"提示：{warning}" for warning in result.warnings)
+    return "\n".join(lines)
 
 
 def _format_count_list(rows: list[tuple[str, str]]) -> str:
     lines = ["全局统计条件："]
     for i, (name, expression) in enumerate(rows, 1):
         lines.append(f"{i}. {name} = {expression}")
+    lines.append("\n用 /lofter count-del <名称或编号> 删除统计条件")
     return "\n".join(lines)
 
 

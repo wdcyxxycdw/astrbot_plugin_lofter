@@ -1,7 +1,8 @@
+import asyncio
 import csv
 from io import StringIO
 from pathlib import Path
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,7 +19,7 @@ from core.tag_count import (
     parse_count_command_arg,
     parse_count_expression,
 )
-from core.count_commands import LofterCountCommandsMixin, _try_direct_file, _file_constructor_candidates
+from core.count_commands import LofterCountCommandsMixin, _file_constructor_candidates, _try_direct_file
 
 
 def _post(tags: list[str]) -> Post:
@@ -57,6 +58,51 @@ def test_parse_space_as_and():
     expr = parse_count_expression("原神 同人")
     assert match_expression(expr, _post(["原神", "同人"])) is True
     assert match_expression(expr, _post(["原神"])) is False
+
+
+@pytest.mark.parametrize("expression", ["A&B", "A & B", "A　&　B"])
+def test_parse_ampersand_as_explicit_and(expression):
+    expr = parse_count_expression(expression)
+    assert match_expression(expr, _post(["A", "B"])) is True
+    assert match_expression(expr, _post(["A"])) is False
+
+
+def test_parse_ampersand_before_not():
+    expr = parse_count_expression("A&-R18")
+    assert match_expression(expr, _post(["A"])) is True
+    assert match_expression(expr, _post(["A", "R18"])) is False
+
+
+def test_parse_ampersand_before_parentheses():
+    expr = parse_count_expression("A&(B|C)")
+    assert match_expression(expr, _post(["A", "B"])) is True
+    assert match_expression(expr, _post(["A", "C"])) is True
+    assert match_expression(expr, _post(["B"])) is False
+
+
+def test_and_keyword_is_treated_as_real_tag():
+    expr = parse_count_expression("A AND B")
+    assert match_expression(expr, _post(["A", "B"])) is False
+    assert match_expression(expr, _post(["A", "AND", "B"])) is True
+
+
+def test_lowercase_and_keyword_is_treated_as_real_tag():
+    expr = parse_count_expression("A and B")
+    assert match_expression(expr, _post(["A", "B"])) is False
+    assert match_expression(expr, _post(["A", "and", "B"])) is True
+
+
+def test_parse_full_width_operators():
+    expr = parse_count_expression("原神｜崩铁 －R18")
+    assert match_expression(expr, _post(["原神"])) is True
+    assert match_expression(expr, _post(["崩铁"])) is True
+    assert match_expression(expr, _post(["崩铁", "R18"])) is False
+
+
+def test_parse_count_command_arg_accepts_full_width_equals():
+    name, expr = parse_count_command_arg("米哈游相关＝原神｜崩铁")
+    assert name == "米哈游相关"
+    assert expr == "原神｜崩铁"
 
 
 def test_parse_pipe_as_or():
@@ -199,7 +245,18 @@ async def test_count_posts_dedupes_candidates_and_matches_expression():
 @pytest.mark.asyncio
 async def test_count_posts_continues_tag_pages_when_page_is_only_global_duplicates():
     client = AsyncMock()
-    client.search_tag.side_effect = ["raw-a-1", "", "raw-b-1", "raw-b-2", ""]
+
+    async def search_tag(tag, *, offset, limit):
+        pages = {
+            ("A", 0): "raw-a-1",
+            ("A", 2): "",
+            ("B", 0): "raw-b-1",
+            ("B", 2): "raw-b-2",
+            ("B", 4): "",
+        }
+        return pages[(tag, offset)]
+
+    client.search_tag.side_effect = search_tag
 
     async def parser(raw):
         if raw == "raw-a-1":
@@ -219,13 +276,35 @@ async def test_count_posts_continues_tag_pages_when_page_is_only_global_duplicat
     result = await count_posts("A|B", client, parse_posts=parser, page_size=2)
 
     assert result.count == 3
-    assert client.search_tag.call_args_list == [
-        call("A", offset=0, limit=2),
-        call("A", offset=2, limit=2),
-        call("B", offset=0, limit=2),
-        call("B", offset=2, limit=2),
-        call("B", offset=4, limit=2),
-    ]
+    offsets_by_tag = {"A": [], "B": []}
+    for item in client.search_tag.call_args_list:
+        offsets_by_tag[item.args[0]].append(item.kwargs["offset"])
+    assert offsets_by_tag == {"A": [0, 2], "B": [0, 2, 4]}
+
+
+@pytest.mark.asyncio
+async def test_count_posts_scans_multiple_positive_tags_concurrently():
+    client = AsyncMock()
+    active_tags: set[str] = set()
+    overlaps: list[set[str]] = []
+
+    async def search_tag(tag, *, offset, limit):
+        active_tags.add(tag)
+        if len(active_tags) > 1:
+            overlaps.append(set(active_tags))
+        await asyncio.sleep(0.01)
+        active_tags.remove(tag)
+        return ""
+
+    client.search_tag.side_effect = search_tag
+
+    async def parser(raw):
+        return []
+
+    result = await count_posts("A|B", client, page_size=20, parse_posts=parser)
+
+    assert result.count == 0
+    assert {"A", "B"} in overlaps
 
 
 @pytest.mark.asyncio
@@ -235,15 +314,98 @@ async def test_count_posts_rejects_expression_without_positive_tag():
         await count_posts("-R18", client)
 
 
+@pytest.mark.asyncio
+async def test_count_posts_records_warning_when_one_tag_scan_fails():
+    client = AsyncMock()
+
+    async def search_tag(tag, *, offset, limit):
+        return f"raw-{tag}-{offset}"
+
+    client.search_tag.side_effect = search_tag
+
+    async def parser(raw):
+        if raw == "raw-A-0":
+            return [Post(post_id="p1", title="", summary="", tags=["A"])]
+        if raw == "raw-A-20":
+            return []
+        raise RuntimeError("LOFTER 返回非 DWR 响应：响应片段：{ status: 4009 }")
+
+    result = await count_posts("A|B", client, parse_posts=parser)
+
+    assert result.count == 1
+    assert result.candidates == 1
+    assert result.scanned_pages == {"A": 1, "B": 0}
+    assert result.warnings == ["标签「B」扫描失败：LOFTER 返回非 DWR 响应：响应片段：{ status: 4009 }"]
+
+
+@pytest.mark.asyncio
+async def test_count_posts_propagates_unexpected_scan_errors():
+    client = AsyncMock()
+    client.search_tag.return_value = "raw-a-1"
+
+    async def parser(raw):
+        raise ValueError("parser bug")
+
+    with pytest.raises(ValueError, match="parser bug"):
+        await count_posts("A", client, parse_posts=parser)
+
+
+@pytest.mark.asyncio
+async def test_count_posts_reports_scanned_pages():
+    client = AsyncMock()
+    client.search_tag.side_effect = ["raw-a-1", "raw-a-2", ""]
+
+    async def parser(raw):
+        if raw == "raw-a-1":
+            return [Post(post_id="p1", title="", summary="", tags=["A"])]
+        if raw == "raw-a-2":
+            return [Post(post_id="p2", title="", summary="", tags=["A"])]
+        return []
+
+    result = await count_posts("A", client, parse_posts=parser, page_size=1)
+
+    assert result.scanned_pages == {"A": 2}
+    assert result.warnings == []
+
+
+@pytest.mark.asyncio
+async def test_count_posts_warns_when_positive_offset_page_repeats_tag_posts():
+    client = AsyncMock()
+    client.search_tag.side_effect = ["raw-a-1", "raw-a-duplicate"]
+
+    async def parser(raw):
+        if raw == "raw-a-1":
+            return [Post(post_id="p1", title="", summary="", tags=["A"])]
+        if raw == "raw-a-duplicate":
+            return [Post(post_id="p1", title="", summary="", tags=["A"])]
+        return []
+
+    result = await count_posts("A", client, parse_posts=parser, page_size=1)
+
+    assert result.scanned_pages == {"A": 2}
+    assert result.warnings == ["标签「A」疑似分页未生效或接口返回重复页"]
+
+
 def test_build_count_csv():
     rows = [
-        CountResult(name="米哈游相关", expression="原神 -R18", count=12, status="成功", error="", counted_at="2026-05-12 17:30:00"),
+        CountResult(
+            name="米哈游相关",
+            expression="原神 -R18",
+            count=12,
+            status="成功",
+            error="",
+            counted_at="2026-05-12 17:30:00",
+            scanned_pages={"原神": 3},
+            warnings=["标签「原神」疑似分页未生效或接口返回重复页"],
+        ),
         CountResult(name="异常", expression="原神 (", count=0, status="失败", error="括号不匹配", counted_at="2026-05-12 17:30:00"),
     ]
     content = build_count_csv(rows)
     parsed = list(csv.DictReader(StringIO(content)))
     assert parsed[0]["名称"] == "米哈游相关"
     assert parsed[0]["作品数"] == "12"
+    assert parsed[0]["扫描页数"] == "原神:3"
+    assert parsed[0]["错误信息"] == "标签「原神」疑似分页未生效或接口返回重复页"
     assert parsed[1]["状态"] == "失败"
 
 

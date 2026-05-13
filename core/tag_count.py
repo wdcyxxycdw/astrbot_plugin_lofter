@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
@@ -24,6 +25,17 @@ class CountResult:
     error: str
     counted_at: str
     candidates: int = 0
+    scanned_pages: dict[str, int] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TagScanResult:
+    tag: str
+    candidate_ids: set[str]
+    matched_ids: set[str]
+    scanned_pages: int
+    warnings: list[str]
 
 
 @dataclass(frozen=True)
@@ -49,17 +61,21 @@ ExprNode = TagNode | UnaryNode | BinaryNode
 
 @dataclass(frozen=True)
 class Token:
-    kind: Literal["tag", "or", "not", "lparen", "rparen"]
+    kind: Literal["tag", "and", "or", "not", "lparen", "rparen"]
     value: str
 
 
 def _tokenize(raw: str) -> list[Token]:
-    normalized = raw.replace("（", "(").replace("）", ")")
+    normalized = _normalize_expression(raw)
     tokens: list[Token] = []
     i = 0
     while i < len(normalized):
         i = _append_next_token(normalized, i, tokens)
     return tokens
+
+
+def _normalize_expression(raw: str) -> str:
+    return raw.translate(str.maketrans({"（": "(", "）": ")", "｜": "|", "－": "-"}))
 
 
 def _append_next_token(text: str, i: int, tokens: list[Token]) -> int:
@@ -68,6 +84,9 @@ def _append_next_token(text: str, i: int, tokens: list[Token]) -> int:
         return i + 1
     if ch == "|":
         tokens.append(Token("or", ch))
+        return i + 1
+    if ch == "&":
+        tokens.append(Token("and", ch))
         return i + 1
     if ch == "-":
         tokens.append(Token("not", ch))
@@ -85,7 +104,7 @@ def _append_next_token(text: str, i: int, tokens: list[Token]) -> int:
 
 def _find_tag_end(text: str, start: int) -> int:
     i = start
-    while i < len(text) and not text[i].isspace() and text[i] not in "|-()":
+    while i < len(text) and not text[i].isspace() and text[i] not in "|&-()":
         i += 1
     return i
 
@@ -128,7 +147,9 @@ class _Parser:
 
     def _parse_and(self) -> ExprNode:
         node = self._parse_unary()
-        while self._peek() and self._peek().kind in {"tag", "not", "lparen"}:
+        while self._peek() and self._peek().kind in {"and", "tag", "not", "lparen"}:
+            if self._peek().kind == "and":
+                self._take()
             node = BinaryNode("and", node, self._parse_unary())
         return node
 
@@ -199,9 +220,10 @@ def _truthy_attr(obj, name: str) -> bool:
 
 
 def parse_count_command_arg(raw: str) -> tuple[str, str]:
-    if "=" not in raw:
+    normalized = raw.replace("＝", "=")
+    if "=" not in normalized:
         raise CountExpressionError("请使用：名称 = 表达式")
-    name, expression = (part.strip() for part in raw.split("=", 1))
+    name, expression = (part.strip() for part in normalized.split("=", 1))
     if not name or not expression:
         raise CountExpressionError("请使用：名称 = 表达式")
     return name, expression
@@ -264,16 +286,23 @@ async def count_posts(
     *,
     parse_posts=parse_dwr_response,
     page_size: int = 20,
+    tag_concurrency: int = 5,
 ) -> CountResult:
     expr = parse_count_expression(expression)
     positive_tags = extract_positive_tags(expr)
     if not positive_tags:
         raise CountExpressionError("至少需要一个正向 tag")
 
+    results = await _scan_positive_tags(positive_tags, client, page_size, parse_posts, expr, tag_concurrency)
     seen_candidates: set[str] = set()
     matched: set[str] = set()
-    for tag in positive_tags:
-        await _count_tag_pages(tag, client, page_size, parse_posts, expr, seen_candidates, matched)
+    scanned_pages: dict[str, int] = {}
+    warnings: list[str] = []
+    for item in results:
+        seen_candidates.update(item.candidate_ids)
+        matched.update(item.matched_ids)
+        scanned_pages[item.tag] = item.scanned_pages
+        warnings.extend(item.warnings)
 
     return CountResult(
         name="",
@@ -283,27 +312,68 @@ async def count_posts(
         error="",
         counted_at=_now_text(),
         candidates=len(seen_candidates),
+        scanned_pages=scanned_pages,
+        warnings=warnings,
     )
 
 
-async def _count_tag_pages(
+async def _scan_positive_tags(
+    tags: list[str],
+    client,
+    page_size: int,
+    parse_posts,
+    expr: ExprNode,
+    tag_concurrency: int,
+) -> list[TagScanResult]:
+    semaphore = asyncio.Semaphore(max(1, tag_concurrency))
+    tasks = [_scan_tag_with_limit(tag, semaphore, client, page_size, parse_posts, expr) for tag in tags]
+    return await asyncio.gather(*tasks)
+
+
+async def _scan_tag_with_limit(
+    tag: str,
+    semaphore: asyncio.Semaphore,
+    client,
+    page_size: int,
+    parse_posts,
+    expr: ExprNode,
+) -> TagScanResult:
+    async with semaphore:
+        return await _scan_tag_pages(tag, client, page_size, parse_posts, expr)
+
+
+async def _scan_tag_pages(
     tag: str,
     client,
     page_size: int,
     parse_posts,
     expr: ExprNode,
-    seen_candidates: set[str],
-    matched: set[str],
-):
+) -> TagScanResult:
     offset = 0
     seen_for_tag: set[str] = set()
+    candidate_ids: set[str] = set()
+    matched_ids: set[str] = set()
+    scanned_pages = 0
+    warnings: list[str] = []
     while True:
-        posts = await _fetch_page(tag, client, offset, page_size, parse_posts)
+        try:
+            posts = await _fetch_page(tag, client, offset, page_size, parse_posts)
+        except RuntimeError as e:
+            warnings.append(f"标签「{tag}」扫描失败：{e}")
+            return TagScanResult(tag, candidate_ids, matched_ids, scanned_pages, warnings)
         if not posts:
-            return
-        if not _count_new_posts(posts, expr, seen_for_tag, seen_candidates, matched):
-            return
+            return TagScanResult(tag, candidate_ids, matched_ids, scanned_pages, warnings)
+        scanned_pages += 1
+        if not _count_new_posts(posts, expr, seen_for_tag, candidate_ids, matched_ids):
+            _append_repeat_page_warning(tag, offset, warnings)
+            return TagScanResult(tag, candidate_ids, matched_ids, scanned_pages, warnings)
         offset += page_size
+
+
+def _append_repeat_page_warning(tag: str, offset: int, warnings: list[str]):
+    if offset <= 0:
+        return
+    warnings.append(f"标签「{tag}」疑似分页未生效或接口返回重复页")
 
 
 async def _fetch_page(tag: str, client, offset: int, page_size: int, parse_posts) -> list[Post]:
@@ -339,7 +409,8 @@ def build_count_csv_path(base_dir, counted_at: str) -> Path:
 
 def build_count_csv(rows: list[CountResult]) -> str:
     output = StringIO()
-    writer = csv.DictWriter(output, fieldnames=["名称", "条件", "作品数", "状态", "错误信息", "统计时间"])
+    fieldnames = ["名称", "条件", "作品数", "候选作品", "扫描页数", "状态", "错误信息", "统计时间"]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
     for row in rows:
         writer.writerow(_csv_row(row))
@@ -351,10 +422,22 @@ def _csv_row(row: CountResult) -> dict[str, str | int]:
         "名称": row.name,
         "条件": row.expression,
         "作品数": row.count,
+        "候选作品": row.candidates,
+        "扫描页数": format_scanned_pages(row.scanned_pages),
         "状态": row.status,
-        "错误信息": row.error,
+        "错误信息": _format_error_with_warnings(row),
         "统计时间": row.counted_at,
     }
+
+
+def format_scanned_pages(scanned_pages: dict[str, int]) -> str:
+    return "；".join(f"{tag}:{pages}" for tag, pages in scanned_pages.items())
+
+
+def _format_error_with_warnings(row: CountResult) -> str:
+    parts = [row.error] if row.error else []
+    parts.extend(row.warnings)
+    return "；".join(parts)
 
 
 def _now_text() -> str:

@@ -25,8 +25,8 @@ POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
 @register(
     "astrbot_plugin_lofter",
     "user",
-    "解析 Lofter 链接，订阅 Lofter 标签/博主，搜索 Lofter 内容",
-    "v1.3.0",
+    "解析 Lofter 链接，订阅 Lofter 标签/博主，搜索 Lofter 内容，支持标签表达式统计",
+    "v1.3.5",
 )
 class LofterPlugin(LofterCountCommandsMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -226,18 +226,22 @@ class LofterPlugin(LofterCountCommandsMixin, Star):
 
     @lofter.command("count")
     async def count(self, event: AstrMessageEvent):
+        """保存并执行标签表达式统计。用法：/lofter count <名称> = <表达式>"""
         async for result in self.handle_count(event): yield result
 
     @lofter.command("count-list")
     async def count_list(self, event: AstrMessageEvent):
+        """查看已保存的全局统计条件。用法：/lofter count-list"""
         async for result in self.handle_count_list(event): yield result
 
     @lofter.command("count-del")
     async def count_del(self, event: AstrMessageEvent):
+        """按名称或编号删除统计条件。用法：/lofter count-del <名称或编号>"""
         async for result in self.handle_count_del(event): yield result
 
     @lofter.command("count-all")
     async def count_all(self, event: AstrMessageEvent):
+        """执行所有已保存统计条件并生成 CSV。用法：/lofter count-all"""
         async for result in self.handle_count_all(event): yield result
 
     @lofter.command("subtag")

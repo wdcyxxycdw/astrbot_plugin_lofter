@@ -12,6 +12,27 @@ from .dwr_engine import execute_dwr
 from .parser import Post
 
 
+_DWR_CALLBACK = "dwr.engine._remoteHandleCallback"
+_DWR_HINT = "可能 Cookie 失效、未登录、触发风控，或 LOFTER 返回非 DWR 响应"
+
+
+def _validate_dwr_response(body: str):
+    text = body.strip()
+    if not text:
+        raise RuntimeError(f"DWR 响应为空：{_DWR_HINT}")
+    if _looks_like_html(text) or _DWR_CALLBACK not in text:
+        raise RuntimeError(f"LOFTER 返回非 DWR 响应：{_DWR_HINT}。响应片段：{_response_preview(text)}")
+
+
+def _looks_like_html(text: str) -> bool:
+    lowered = text[:200].lower()
+    return lowered.startswith("<!doctype") or lowered.startswith("<html") or "<html" in lowered
+
+
+def _response_preview(text: str) -> str:
+    return " ".join(text.split())[:120]
+
+
 def _extract_post_id(url: str) -> str:
     m = re.search(r"/post/([a-zA-Z0-9_-]+)", url)
     return m.group(1) if m else ""
@@ -61,7 +82,10 @@ def _extract_images(value) -> list[str]:
     return []
 
 
-def _map_post(item: dict) -> Optional[Post]:
+def _map_post(item: object) -> Optional[Post]:
+    if not isinstance(item, dict):
+        return None
+
     post = item.get("post")
     if not isinstance(post, dict):
         return None
@@ -91,6 +115,7 @@ def _map_post(item: dict) -> Optional[Post]:
 
 async def parse_dwr_response(body: str) -> list[Post]:
     """执行 DWR 响应，返回 Post 列表，按发布时间倒序。"""
+    _validate_dwr_response(body)
     items = await execute_dwr(body)
     posts = []
     for item in items:
