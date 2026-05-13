@@ -356,7 +356,11 @@ async def _scan_tag_pages(
     scanned_pages = 0
     warnings: list[str] = []
     while True:
-        posts = await _fetch_page(tag, client, offset, page_size, parse_posts)
+        try:
+            posts = await _fetch_page(tag, client, offset, page_size, parse_posts)
+        except RuntimeError as e:
+            warnings.append(f"标签「{tag}」扫描失败：{e}")
+            return TagScanResult(tag, candidate_ids, matched_ids, scanned_pages, warnings)
         if not posts:
             return TagScanResult(tag, candidate_ids, matched_ids, scanned_pages, warnings)
         scanned_pages += 1

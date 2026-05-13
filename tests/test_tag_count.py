@@ -315,6 +315,42 @@ async def test_count_posts_rejects_expression_without_positive_tag():
 
 
 @pytest.mark.asyncio
+async def test_count_posts_records_warning_when_one_tag_scan_fails():
+    client = AsyncMock()
+
+    async def search_tag(tag, *, offset, limit):
+        return f"raw-{tag}-{offset}"
+
+    client.search_tag.side_effect = search_tag
+
+    async def parser(raw):
+        if raw == "raw-A-0":
+            return [Post(post_id="p1", title="", summary="", tags=["A"])]
+        if raw == "raw-A-20":
+            return []
+        raise RuntimeError("LOFTER 返回非 DWR 响应：响应片段：{ status: 4009 }")
+
+    result = await count_posts("A|B", client, parse_posts=parser)
+
+    assert result.count == 1
+    assert result.candidates == 1
+    assert result.scanned_pages == {"A": 1, "B": 0}
+    assert result.warnings == ["标签「B」扫描失败：LOFTER 返回非 DWR 响应：响应片段：{ status: 4009 }"]
+
+
+@pytest.mark.asyncio
+async def test_count_posts_propagates_unexpected_scan_errors():
+    client = AsyncMock()
+    client.search_tag.return_value = "raw-a-1"
+
+    async def parser(raw):
+        raise ValueError("parser bug")
+
+    with pytest.raises(ValueError, match="parser bug"):
+        await count_posts("A", client, parse_posts=parser)
+
+
+@pytest.mark.asyncio
 async def test_count_posts_reports_scanned_pages():
     client = AsyncMock()
     client.search_tag.side_effect = ["raw-a-1", "raw-a-2", ""]
