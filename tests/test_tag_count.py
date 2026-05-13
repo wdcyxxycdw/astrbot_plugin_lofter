@@ -60,6 +60,51 @@ def test_parse_space_as_and():
     assert match_expression(expr, _post(["原神"])) is False
 
 
+@pytest.mark.parametrize("expression", ["A&B", "A & B", "A　&　B"])
+def test_parse_ampersand_as_explicit_and(expression):
+    expr = parse_count_expression(expression)
+    assert match_expression(expr, _post(["A", "B"])) is True
+    assert match_expression(expr, _post(["A"])) is False
+
+
+def test_parse_ampersand_before_not():
+    expr = parse_count_expression("A&-R18")
+    assert match_expression(expr, _post(["A"])) is True
+    assert match_expression(expr, _post(["A", "R18"])) is False
+
+
+def test_parse_ampersand_before_parentheses():
+    expr = parse_count_expression("A&(B|C)")
+    assert match_expression(expr, _post(["A", "B"])) is True
+    assert match_expression(expr, _post(["A", "C"])) is True
+    assert match_expression(expr, _post(["B"])) is False
+
+
+def test_and_keyword_is_treated_as_real_tag():
+    expr = parse_count_expression("A AND B")
+    assert match_expression(expr, _post(["A", "B"])) is False
+    assert match_expression(expr, _post(["A", "AND", "B"])) is True
+
+
+def test_lowercase_and_keyword_is_treated_as_real_tag():
+    expr = parse_count_expression("A and B")
+    assert match_expression(expr, _post(["A", "B"])) is False
+    assert match_expression(expr, _post(["A", "and", "B"])) is True
+
+
+def test_parse_full_width_operators():
+    expr = parse_count_expression("原神｜崩铁 －R18")
+    assert match_expression(expr, _post(["原神"])) is True
+    assert match_expression(expr, _post(["崩铁"])) is True
+    assert match_expression(expr, _post(["崩铁", "R18"])) is False
+
+
+def test_parse_count_command_arg_accepts_full_width_equals():
+    name, expr = parse_count_command_arg("米哈游相关＝原神｜崩铁")
+    assert name == "米哈游相关"
+    assert expr == "原神｜崩铁"
+
+
 def test_parse_pipe_as_or():
     expr = parse_count_expression("原神|崩铁")
     assert match_expression(expr, _post(["原神"])) is True
@@ -253,7 +298,10 @@ async def test_count_posts_scans_multiple_positive_tags_concurrently():
 
     client.search_tag.side_effect = search_tag
 
-    result = await count_posts("A|B", client, page_size=20)
+    async def parser(raw):
+        return []
+
+    result = await count_posts("A|B", client, page_size=20, parse_posts=parser)
 
     assert result.count == 0
     assert {"A", "B"} in overlaps

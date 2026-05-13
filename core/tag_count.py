@@ -61,17 +61,21 @@ ExprNode = TagNode | UnaryNode | BinaryNode
 
 @dataclass(frozen=True)
 class Token:
-    kind: Literal["tag", "or", "not", "lparen", "rparen"]
+    kind: Literal["tag", "and", "or", "not", "lparen", "rparen"]
     value: str
 
 
 def _tokenize(raw: str) -> list[Token]:
-    normalized = raw.replace("（", "(").replace("）", ")")
+    normalized = _normalize_expression(raw)
     tokens: list[Token] = []
     i = 0
     while i < len(normalized):
         i = _append_next_token(normalized, i, tokens)
     return tokens
+
+
+def _normalize_expression(raw: str) -> str:
+    return raw.translate(str.maketrans({"（": "(", "）": ")", "｜": "|", "－": "-"}))
 
 
 def _append_next_token(text: str, i: int, tokens: list[Token]) -> int:
@@ -80,6 +84,9 @@ def _append_next_token(text: str, i: int, tokens: list[Token]) -> int:
         return i + 1
     if ch == "|":
         tokens.append(Token("or", ch))
+        return i + 1
+    if ch == "&":
+        tokens.append(Token("and", ch))
         return i + 1
     if ch == "-":
         tokens.append(Token("not", ch))
@@ -97,7 +104,7 @@ def _append_next_token(text: str, i: int, tokens: list[Token]) -> int:
 
 def _find_tag_end(text: str, start: int) -> int:
     i = start
-    while i < len(text) and not text[i].isspace() and text[i] not in "|-()":
+    while i < len(text) and not text[i].isspace() and text[i] not in "|&-()":
         i += 1
     return i
 
@@ -140,7 +147,9 @@ class _Parser:
 
     def _parse_and(self) -> ExprNode:
         node = self._parse_unary()
-        while self._peek() and self._peek().kind in {"tag", "not", "lparen"}:
+        while self._peek() and self._peek().kind in {"and", "tag", "not", "lparen"}:
+            if self._peek().kind == "and":
+                self._take()
             node = BinaryNode("and", node, self._parse_unary())
         return node
 
@@ -211,9 +220,10 @@ def _truthy_attr(obj, name: str) -> bool:
 
 
 def parse_count_command_arg(raw: str) -> tuple[str, str]:
-    if "=" not in raw:
+    normalized = raw.replace("＝", "=")
+    if "=" not in normalized:
         raise CountExpressionError("请使用：名称 = 表达式")
-    name, expression = (part.strip() for part in raw.split("=", 1))
+    name, expression = (part.strip() for part in normalized.split("=", 1))
     if not name or not expression:
         raise CountExpressionError("请使用：名称 = 表达式")
     return name, expression
