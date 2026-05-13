@@ -17,7 +17,7 @@ from .core.formatter import format_post
 from .core.parser import parse_post_page
 from .core.scheduler import SubscriptionScheduler, fetch_tag_posts
 from .core.storage import SubscriptionStorage
-from .core.utils import _split_text
+from .core.utils import _split_text, extract_message_body_text
 
 POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
 
@@ -116,7 +116,7 @@ class LofterPlugin(LofterCountCommandsMixin, Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
     async def auto_parse(self, event: AstrMessageEvent):
-        msg = str(event.message_obj) or event.message_str
+        msg = extract_message_body_text(event.message_obj, event.message_str)
         match = POST_PATTERN.search(msg)
         if not match:
             return
