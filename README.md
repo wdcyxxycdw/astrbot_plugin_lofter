@@ -37,7 +37,7 @@ AstrBot 插件，用于解析 Lofter 链接、订阅 Lofter 标签/博主、搜�
 
 ### 自动解析链接
 
-直接在聊天中发送 Lofter 帖子链接，插件会自动解析并返回内容：
+直接在聊天正文中发送 Lofter 帖子链接，插件会自动解析并返回内容；回复/引用消息中包含的历史链接不会触发解析：
 
 ```
 https://username.lofter.com/post/xxxxxx
