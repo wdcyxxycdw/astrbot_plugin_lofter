@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from .db_migrations import DDL, SCHEMA_VERSION, get_schema_version, migrate
@@ -9,10 +10,11 @@ class LofterDB:
     def __init__(self, db_path: str):
         self._path = db_path
         self._conn: Optional[sqlite3.Connection] = None
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lofter-db")
 
     def _run(self, fn):
-        loop = asyncio.get_event_loop()
-        return loop.run_in_executor(None, fn)
+        loop = asyncio.get_running_loop()
+        return loop.run_in_executor(self._executor, fn)
 
     async def initialize(self):
         def _init():
@@ -33,6 +35,7 @@ class LofterDB:
             conn = self._conn
             await self._run(conn.close)
             self._conn = None
+        self._executor.shutdown(wait=True)
 
     async def get_config(self, key: str) -> Optional[str]:
         conn = self._conn

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 
@@ -93,6 +94,18 @@ async def test_add_remove_subscription(db):
     assert removed is True
 
     assert await db.get_subscription_id("sess1", "tag", "原创", "subscribe") is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_subscription_writes_do_not_share_connection_unsafely(db):
+    async def add(i: int):
+        return await db.add_subscription(f"sess{i % 20}", "tag", f"tag{i % 50}", "subscribe")
+
+    results = await asyncio.gather(*(add(i) for i in range(1000)), return_exceptions=True)
+    errors = [item for item in results if isinstance(item, Exception)]
+
+    assert errors == []
+    assert len(await db.list_subscriptions()) == 100
 
 
 @pytest.mark.asyncio
