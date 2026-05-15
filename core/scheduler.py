@@ -15,6 +15,7 @@ from .storage import Subscription, SubscriptionStorage
 SendFunc = Callable[[str, str, list], Awaitable[None]]
 
 BLOG_URL = "https://{username}.lofter.com"
+MAX_PUSH_POSTS = 5
 
 
 async def fetch_tag_posts(search_tags: list[str], client: LofterClient) -> list[Post]:
@@ -48,7 +49,7 @@ def _pick_display_tag(post: Post, search_tags: list[str]) -> str:
 
 
 async def _push_tag_posts(session_id: str, posts: list[Post], rule: FilterRule, send_func: SendFunc):
-    for post in reversed(posts[:5]):
+    for post in reversed(posts[:MAX_PUSH_POSTS]):
         display_tag = _pick_display_tag(post, rule.search_tags)
         header = f"【标签「{display_tag}」有新内容】"
         text = format_post(post, header=header)
@@ -103,25 +104,32 @@ async def _check_tag_session(
         return
 
     is_cold = await db.seen_count(session_id, "tag") == 0
-    await db.mark_seen_session(session_id, "tag", unseen_ids)
     if is_cold:
+        await db.mark_seen_session(session_id, "tag", unseen_ids)
         return
 
     unseen_set = set(unseen_ids)
     new_posts = [p for p in posts if p.post_id in unseen_set]
     blocks = await block_storage.list_by_session(session_id)
-    new_posts, _ = filter_blocked_posts(new_posts, blocks)
-    if not new_posts:
+    visible_posts, blocked_posts = filter_blocked_posts(new_posts, blocks)
+    blocked_ids = [p.post_id for p in blocked_posts]
+    if not visible_posts:
+        await db.mark_seen_session(session_id, "tag", blocked_ids)
         return
 
-    actually_new_ids = await db.filter_unsent(session_id, [p.post_id for p in new_posts])
-    if not actually_new_ids:
-        return
-
+    visible_ids = [p.post_id for p in visible_posts]
+    actually_new_ids = await db.filter_unsent(session_id, visible_ids)
     actually_new_set = set(actually_new_ids)
-    to_push = [p for p in new_posts if p.post_id in actually_new_set]
+    already_sent_ids = [pid for pid in visible_ids if pid not in actually_new_set]
+    if not actually_new_ids:
+        await db.mark_seen_session(session_id, "tag", blocked_ids + already_sent_ids)
+        return
+
+    to_push = [p for p in visible_posts if p.post_id in actually_new_set][:MAX_PUSH_POSTS]
+    pushed_ids = [p.post_id for p in to_push]
     await _push_tag_posts(session_id, to_push, rule, send_func)
-    await db.mark_sent(session_id, actually_new_ids)
+    await db.mark_seen_session(session_id, "tag", blocked_ids + already_sent_ids + pushed_ids)
+    await db.mark_sent(session_id, pushed_ids)
 
 
 async def _check_blog_sub(
@@ -146,31 +154,53 @@ async def _check_blog_sub(
         return
 
     is_cold = await db.seen_count(sub.session_id, "blog") == 0
-    await db.mark_seen_session(sub.session_id, "blog", unseen_ids)
     if is_cold:
+        await db.mark_seen_session(sub.session_id, "blog", unseen_ids)
         return
 
     unseen_set = set(unseen_ids)
     new_posts = [p for p in posts if p.post_id in unseen_set]
     blocks = await block_storage.list_by_session(sub.session_id)
-    new_posts, _ = filter_blocked_posts(new_posts, blocks)
-    if not new_posts:
+    visible_posts, blocked_before_enrich = filter_blocked_posts(new_posts, blocks)
+    blocked_before_ids = [p.post_id for p in blocked_before_enrich]
+    if not visible_posts:
+        await db.mark_seen_session(sub.session_id, "blog", blocked_before_ids)
         return
 
-    actually_new_ids = await db.filter_unsent(sub.session_id, [p.post_id for p in new_posts])
-    if not actually_new_ids:
-        return
-
+    visible_ids = [p.post_id for p in visible_posts]
+    actually_new_ids = await db.filter_unsent(sub.session_id, visible_ids)
     actually_new_set = set(actually_new_ids)
-    to_push = [p for p in new_posts if p.post_id in actually_new_set]
-    to_push = await _enrich_blog_posts(to_push, client)
-    to_push, _ = filter_blocked_posts(to_push, blocks)
-    if not to_push:
+    already_sent_ids = [pid for pid in visible_ids if pid not in actually_new_set]
+    if not actually_new_ids:
+        await db.mark_seen_session(sub.session_id, "blog", blocked_before_ids + already_sent_ids)
         return
 
-    for post in reversed(to_push[:5]):
+    push_candidates = [p for p in visible_posts if p.post_id in actually_new_set]
+    to_push: list[Post] = []
+    blocked_after_ids: list[str] = []
+    cursor = 0
+    while len(to_push) < MAX_PUSH_POSTS and cursor < len(push_candidates):
+        missing = MAX_PUSH_POSTS - len(to_push)
+        batch = push_candidates[cursor : cursor + missing]
+        cursor += len(batch)
+        enriched = await _enrich_blog_posts(batch, client)
+        visible_enriched, blocked_after_enrich = filter_blocked_posts(enriched, blocks)
+        to_push.extend(visible_enriched)
+        blocked_after_ids.extend(p.post_id for p in blocked_after_enrich)
+
+    if not to_push:
+        await db.mark_seen_session(sub.session_id, "blog", blocked_before_ids + already_sent_ids + blocked_after_ids)
+        return
+
+    pushed_ids = [p.post_id for p in to_push]
+    for post in reversed(to_push[:MAX_PUSH_POSTS]):
         await _push_blog_post(sub.session_id, post, sub.target, send_func)
-    await db.mark_sent(sub.session_id, [p.post_id for p in to_push])
+    await db.mark_seen_session(
+        sub.session_id,
+        "blog",
+        blocked_before_ids + already_sent_ids + blocked_after_ids + pushed_ids,
+    )
+    await db.mark_sent(sub.session_id, pushed_ids)
 
 
 class SubscriptionScheduler:

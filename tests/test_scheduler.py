@@ -341,6 +341,32 @@ async def test_tag_session_blocks_author_but_marks_seen(db):
 
 
 @pytest.mark.asyncio
+async def test_tag_session_overflow_posts_remain_pending_until_next_poll(db):
+    subs = [_make_sub("原神", "subscribe")]
+    posts = _make_posts([f"p{i}" for i in range(8)])
+    sent: list[str] = []
+
+    async def send_func(session_id, text, images):
+        sent.append(text)
+
+    blocks = AuthorBlockStorage(db)
+
+    with patch("core.scheduler.fetch_tag_posts", return_value=posts):
+        await db.mark_seen_session("sess1", "tag", ["warmup"])
+        await _check_tag_session("sess1", subs, AsyncMock(), db, send_func, blocks)
+
+        assert len(sent) == 5
+        assert await db.filter_unseen_session("sess1", "tag", [p.post_id for p in posts]) == ["p5", "p6", "p7"]
+        assert await db.filter_unsent("sess1", [p.post_id for p in posts]) == ["p5", "p6", "p7"]
+
+        await _check_tag_session("sess1", subs, AsyncMock(), db, send_func, blocks)
+
+    assert len(sent) == 8
+    assert await db.filter_unseen_session("sess1", "tag", [p.post_id for p in posts]) == []
+    assert await db.filter_unsent("sess1", [p.post_id for p in posts]) == []
+
+
+@pytest.mark.asyncio
 async def test_blog_session_blocks_username_before_push(db):
     await db.add_author_block("sess1", "username", "blockeduser", "blockeduser")
     blocks = AuthorBlockStorage(db)
@@ -366,3 +392,80 @@ async def test_blog_session_blocks_username_before_push(db):
     assert sent == []
     assert await db.filter_unseen_session("sess1", "blog", ["p1"]) == []
     assert await db.filter_unsent("sess1", ["p1"]) == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_blog_session_overflow_posts_remain_pending_until_next_poll(db):
+    sub = _make_sub("someuser", sub_type="blog", session_id="sess1")
+    posts = _make_posts([f"p{i}" for i in range(8)])
+    sent: list[str] = []
+
+    async def send_func(session_id, text, images):
+        sent.append(text)
+
+    blocks = AuthorBlockStorage(db)
+
+    with (
+        patch("core.scheduler.fetch_blog_posts", return_value=posts),
+        patch("core.scheduler._enrich_blog_posts", side_effect=lambda posts, client: posts),
+    ):
+        await db.mark_seen_session("sess1", "blog", ["warmup"])
+        await _check_blog_sub(sub, AsyncMock(), db, send_func, blocks)
+
+        assert len(sent) == 5
+        assert await db.filter_unseen_session("sess1", "blog", [p.post_id for p in posts]) == ["p5", "p6", "p7"]
+        assert await db.filter_unsent("sess1", [p.post_id for p in posts]) == ["p5", "p6", "p7"]
+
+        await _check_blog_sub(sub, AsyncMock(), db, send_func, blocks)
+
+    assert len(sent) == 8
+    assert await db.filter_unseen_session("sess1", "blog", [p.post_id for p in posts]) == []
+    assert await db.filter_unsent("sess1", [p.post_id for p in posts]) == []
+
+
+@pytest.mark.asyncio
+async def test_blog_session_fills_push_slots_when_enriched_post_is_blocked(db):
+    await db.add_author_block("sess1", "username", "blockeduser", "blockeduser")
+    blocks = AuthorBlockStorage(db)
+    sub = _make_sub("someuser", sub_type="blog", session_id="sess1")
+    posts = _make_posts([f"p{i}" for i in range(8)])
+    sent: list[str] = []
+
+    async def send_func(session_id, text, images):
+        sent.append(text)
+
+    async def enrich(enrich_posts, client):
+        enriched = []
+        for post in enrich_posts:
+            author_username = "blockeduser" if post.post_id == "p2" else ""
+            enriched.append(
+                Post(
+                    post_id=post.post_id,
+                    title=post.title,
+                    summary=post.summary,
+                    url=post.url,
+                    author_username=author_username,
+                )
+            )
+        return enriched
+
+    post_ids = [p.post_id for p in posts]
+
+    with (
+        patch("core.scheduler.fetch_blog_posts", return_value=posts),
+        patch("core.scheduler._enrich_blog_posts", side_effect=enrich),
+    ):
+        await db.mark_seen_session("sess1", "blog", ["warmup"])
+        await _check_blog_sub(sub, AsyncMock(), db, send_func, blocks)
+
+        assert len(sent) == 5
+        assert "帖子p2" not in "\n".join(sent)
+        assert "帖子p5" in "\n".join(sent)
+        assert await db.filter_unseen_session("sess1", "blog", post_ids) == ["p6", "p7"]
+        assert await db.filter_unsent("sess1", post_ids) == ["p2", "p6", "p7"]
+
+        await _check_blog_sub(sub, AsyncMock(), db, send_func, blocks)
+
+    assert len(sent) == 7
+    assert await db.filter_unseen_session("sess1", "blog", post_ids) == []
+    assert await db.filter_unsent("sess1", post_ids) == ["p2"]
