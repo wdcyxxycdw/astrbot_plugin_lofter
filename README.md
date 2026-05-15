@@ -10,6 +10,7 @@ AstrBot 插件，用于解析 Lofter 链接、订阅 Lofter 标签/博主、搜�
 - **标签统计**：按标签表达式统计作品数量，支持保存多组条件并导出 CSV
 - **订阅标签**：订阅指定标签，有新内容时自动推送；支持同时添加排除规则
 - **订阅博主**：订阅指定博主，发布新文章时自动推送（含标题、作者、摘要、标签和图片）
+- **屏蔽作者**：按当前会话屏蔽作者昵称或 Lofter 用户名，屏蔽后自动解析、搜索和订阅推送都不显示该作者作品
 
 ## 安装
 
@@ -77,6 +78,9 @@ https://...
 | `/lofter unexcludetag <标签名>` | 取消指定标签的排除规则 |
 | `/lofter unsubblog <用户名>` | 取消订阅博主 |
 | `/lofter cookie <值>` | 运行时更新 Lofter Cookie，立即生效 |
+| `/lofter block-author <昵称或用户名>` | 屏蔽当前会话中的指定作者 |
+| `/lofter unblock-author <昵称或用户名>` | 解除作者屏蔽 |
+| `/lofter block-list` | 查看当前会话屏蔽作者列表 |
 
 ### 订阅标签与排除规则
 
@@ -97,6 +101,20 @@ https://...
 ```
 
 用 `/lofter unsub 2` 可直接按编号删除某条记录。
+
+### 屏蔽作者
+
+屏蔽名单按群聊/私聊隔离，可使用作者昵称或 Lofter 用户名：
+
+```text
+/lofter block-author 作者昵称
+/lofter block-author username
+/lofter block-author https://username.lofter.com
+/lofter block-list
+/lofter unblock-author username
+```
+
+屏蔽后，该作者作品不会出现在自动解析、搜索结果、订阅预览和订阅推送中。订阅轮询期间被屏蔽的作品会记录为已处理，解除屏蔽后不会补推旧内容。
 
 ### 标签统计命令
 

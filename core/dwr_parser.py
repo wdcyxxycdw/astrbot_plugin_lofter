@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Optional
 
 from .dwr_engine import execute_dwr
-from .parser import Post
+from .parser import Post, extract_lofter_username
 
 
 _DWR_CALLBACK = "dwr.engine._remoteHandleCallback"
@@ -97,6 +97,9 @@ def _map_post(item: object) -> Optional[Post]:
 
     blog = post.get("blogInfo") or {}
     author = blog.get("blogNickName") or blog.get("blogName") or "" if isinstance(blog, dict) else ""
+    username = extract_lofter_username(url)
+    if not username and isinstance(blog, dict):
+        username = blog.get("blogName") or ""
 
     raw_tags = post.get("tag") or ""
     tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
@@ -107,6 +110,7 @@ def _map_post(item: object) -> Optional[Post]:
         title=post.get("title") or "",
         summary=_extract_summary(post.get("dirContent") or post.get("content") or ""),
         author=author,
+        author_username=username,
         tags=tags,
         publish_time=_fmt_time(post.get("publishTime") or 0),
         images=_extract_images(post.get("firstImageUrl")),

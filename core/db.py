@@ -218,6 +218,46 @@ class LofterDB:
 
         await self._run(_del)
 
+    async def add_author_block(self, session_id: str, kind: str, value: str, display: str) -> bool:
+        conn = self._conn
+
+        def _add():
+            try:
+                conn.execute(
+                    "INSERT INTO author_blocks(session_id,kind,value,display) VALUES(?,?,?,?)",
+                    (session_id, kind, value, display),
+                )
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+        return await self._run(_add)
+
+    async def remove_author_block(self, session_id: str, kind: str, value: str) -> bool:
+        conn = self._conn
+
+        def _remove():
+            cur = conn.execute(
+                "DELETE FROM author_blocks WHERE session_id=? AND kind=? AND value=?",
+                (session_id, kind, value),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+        return await self._run(_remove)
+
+    async def list_author_blocks(self, session_id: str) -> list[tuple]:
+        conn = self._conn
+
+        def _list():
+            return conn.execute(
+                "SELECT session_id,kind,value,display,created_at FROM author_blocks WHERE session_id=? ORDER BY created_at ASC, display ASC",
+                (session_id,),
+            ).fetchall()
+
+        return await self._run(_list)
+
     async def upsert_count_condition(self, name: str, expression: str):
         conn = self._conn
 

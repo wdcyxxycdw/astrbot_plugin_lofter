@@ -1,5 +1,5 @@
 import pytest
-from core.parser import parse_post_page, parse_blog_posts
+from core.parser import extract_lofter_username, parse_post_page, parse_blog_posts
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -69,6 +69,22 @@ POST_URL = "https://test.lofter.com/post/abc_123def"
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://someuser.lofter.com/post/abc", "someuser"),
+        ("https://lofter.com/post/abc", ""),
+        ("https://www.lofter.com/post/abc", ""),
+        ("https://someuser.lofter.com.evil.com/post/abc", ""),
+        ("https://evil.com/redirect?u=https://someuser.lofter.com/post/abc", ""),
+        ("not a url https://someuser.lofter.com/post/abc", ""),
+    ],
+)
+def test_extract_lofter_username_requires_strict_lofter_hostname(url, expected):
+    assert extract_lofter_username(url) == expected
+
+
 @pytest.mark.asyncio
 async def test_text_post_title_and_author():
     post = await parse_post_page(TEXT_POST_HTML, POST_URL)
@@ -121,6 +137,12 @@ async def test_post_id_extracted_from_url():
 
 
 @pytest.mark.asyncio
+async def test_parse_post_page_extracts_author_username_from_url():
+    post = await parse_post_page(TEXT_POST_HTML, "https://SomeUser.lofter.com/post/abc123")
+    assert post.author_username == "SomeUser"
+
+
+@pytest.mark.asyncio
 async def test_summary_truncated_at_300_chars():
     post = await parse_post_page(LONG_DESC_HTML, POST_URL)
     assert len(post.summary) == 301  # 300 chars + "…"
@@ -162,6 +184,13 @@ async def test_blog_posts_have_url():
     posts = await parse_blog_posts(BLOG_HOME_HTML)
     for p in posts:
         assert p.url.startswith("https://")
+
+
+@pytest.mark.asyncio
+async def test_parse_blog_posts_extracts_author_username():
+    html = '<a href="https://SomeUser.lofter.com/post/abc123">标题</a>'
+    posts = await parse_blog_posts(html)
+    assert posts[0].author_username == "SomeUser"
 
 
 @pytest.mark.asyncio

@@ -19,10 +19,10 @@ async def test_parse_dwr_response_skips_non_dict_items_and_keeps_valid_post():
         1,
         {
             post: {
-                blogPageUrl: "https://demo.lofter.com/post/abc_123",
+                blogPageUrl: "https://someuser.lofter.com/post/abc_123",
                 title: "有效帖子",
                 dirContent: "<p>正文</p>",
-                blogInfo: {blogNickName: "作者"},
+                blogInfo: {blogNickName: "作者", blogName: "fallbackuser"},
                 tag: "tag-a, tag-b",
                 publishTime: 1710000000000,
                 firstImageUrl: '["https://img.example/a.jpg?x=1"]'
@@ -38,8 +38,30 @@ async def test_parse_dwr_response_skips_non_dict_items_and_keeps_valid_post():
     assert posts[0].title == "有效帖子"
     assert posts[0].summary == "正文"
     assert posts[0].author == "作者"
+    assert posts[0].author_username == "someuser"
     assert posts[0].tags == ["tag-a", "tag-b"]
     assert posts[0].images == ["https://img.example/a.jpg"]
+
+
+@pytest.mark.asyncio
+async def test_parse_dwr_response_uses_blog_name_when_url_has_no_lofter_username():
+    body = """
+    dwr.engine._remoteHandleCallback("0", "0", [
+        {
+            post: {
+                blogPageUrl: "https://evil.com/redirect?u=https://someuser.lofter.com/post/abc_123",
+                title: "有效帖子",
+                blogInfo: {blogNickName: "作者", blogName: "fallbackuser"},
+                publishTime: 1710000000000
+            }
+        }
+    ]);
+    """
+
+    posts = await parse_dwr_response(body)
+
+    assert len(posts) == 1
+    assert posts[0].author_username == "fallbackuser"
 
 
 @pytest.mark.asyncio

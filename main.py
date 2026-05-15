@@ -8,6 +8,7 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.star import StarTools
 
+from .core.author_block import AuthorBlockStorage, filter_blocked_posts, is_author_blocked
 from .core.client import LofterClient
 from .core.count_commands import LofterCountCommandsMixin
 from .core.db import LofterDB
@@ -26,7 +27,7 @@ POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
     "astrbot_plugin_lofter",
     "user",
     "解析 Lofter 链接，订阅 Lofter 标签/博主，搜索 Lofter 内容，支持标签表达式统计",
-    "v1.3.5",
+    "v1.3.6",
 )
 class LofterPlugin(LofterCountCommandsMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -39,8 +40,14 @@ class LofterPlugin(LofterCountCommandsMixin, Star):
         self._db = LofterDB(db_path)
         self._client = LofterClient("")
         self._storage = SubscriptionStorage(self._db)
+        self._author_blocks = AuthorBlockStorage(self._db)
         self._scheduler = SubscriptionScheduler(
-            self._storage, self._client, self._db, self._send_push, self._interval
+            self._storage,
+            self._client,
+            self._db,
+            self._send_push,
+            block_storage=self._author_blocks,
+            interval_minutes=self._interval,
         )
 
     async def initialize(self):
@@ -128,6 +135,9 @@ class LofterPlugin(LofterCountCommandsMixin, Star):
             return
 
         post = await parse_post_page(html, url)
+        blocks = await self._author_blocks.list_by_session(event.unified_msg_origin)
+        if is_author_blocked(post, blocks):
+            return
         if not post.summary and not post.images and not post.content:
             return
 
@@ -187,8 +197,10 @@ class LofterPlugin(LofterCountCommandsMixin, Star):
         except Exception as e:
             yield event.plain_result(f"搜索失败：{e}")
             return
+        blocks = await self._author_blocks.list_by_session(event.unified_msg_origin)
+        posts, _ = filter_blocked_posts(posts, blocks)
         if not posts:
-            yield event.plain_result("没有找到相关内容")
+            yield event.plain_result("没有找到未屏蔽作者的相关内容")
             return
         yield event.plain_result(f"「{keyword}」标签搜索结果，共 {len(posts)} 条：")
         for p in posts[:self._search_limit]:
@@ -223,6 +235,39 @@ class LofterPlugin(LofterCountCommandsMixin, Star):
         await self._db.set_config("lofter_cookie", value)
         self._client.update_cookie(value)
         yield event.plain_result("Cookie 已更新")
+
+    @lofter.command("block-author")
+    async def block_author(self, event: AstrMessageEvent):
+        """屏蔽作者。用法：/lofter block-author <昵称或用户名>"""
+        raw = self._cmd_arg(event.message_str).strip()
+        if not raw:
+            yield event.plain_result("请提供作者昵称或用户名，例如：/lofter block-author username")
+            return
+        ok = await self._author_blocks.add(event.unified_msg_origin, raw)
+        yield event.plain_result(f"已屏蔽作者「{raw}」" if ok else f"作者「{raw}」已在屏蔽列表中")
+
+    @lofter.command("unblock-author")
+    async def unblock_author(self, event: AstrMessageEvent):
+        """解除作者屏蔽。用法：/lofter unblock-author <昵称或用户名>"""
+        raw = self._cmd_arg(event.message_str).strip()
+        if not raw:
+            yield event.plain_result("请提供作者昵称或用户名")
+            return
+        ok = await self._author_blocks.remove(event.unified_msg_origin, raw)
+        yield event.plain_result(f"已解除屏蔽作者「{raw}」" if ok else f"未找到作者「{raw}」的屏蔽记录")
+
+    @lofter.command("block-list")
+    async def block_list(self, event: AstrMessageEvent):
+        """查看当前会话屏蔽作者列表"""
+        blocks = await self._author_blocks.list_by_session(event.unified_msg_origin)
+        if not blocks:
+            yield event.plain_result("当前没有屏蔽作者")
+            return
+        lines = ["当前屏蔽作者列表："]
+        for i, block in enumerate(blocks, 1):
+            label = "用户名" if block.kind == "username" else "昵称"
+            lines.append(f"{i}. [{label}] {block.display}")
+        yield event.plain_result("\n".join(lines))
 
     @lofter.command("count")
     async def count(self, event: AstrMessageEvent):
@@ -295,9 +340,11 @@ class LofterPlugin(LofterCountCommandsMixin, Star):
 
         posts = apply_filter(posts, rule)
         await self._db.mark_seen_session(session_id, "tag", [p.post_id for p in posts])
+        blocks = await self._author_blocks.list_by_session(session_id)
+        posts, _ = filter_blocked_posts(posts, blocks)
 
         if not posts:
-            yield event.plain_result(f"已订阅标签「{subscribes[0]}」，暂无匹配内容")
+            yield event.plain_result(f"已订阅标签「{subscribes[0]}」，暂无未屏蔽作者的匹配内容")
             return
 
         msg = f"已订阅标签「{subscribes[0]}」，以下是最新 {min(3, len(posts))} 条内容："

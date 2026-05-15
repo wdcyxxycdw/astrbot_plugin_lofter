@@ -2,6 +2,7 @@ import asyncio
 import html as html_module
 import re
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup, Tag
 
@@ -13,6 +14,7 @@ class Post:
     summary: str
     images: list[str] = field(default_factory=list)
     author: str = ""
+    author_username: str = ""
     url: str = ""
     tags: list[str] = field(default_factory=list)
     publish_time: str = ""
@@ -52,6 +54,27 @@ def _extract_post_id_from_url(url: str) -> str:
     return m.group(1) if m else ""
 
 
+def extract_lofter_username(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return ""
+
+    host = parsed.netloc
+    if not host or "@" in host or host.startswith("["):
+        return ""
+    if ":" in host:
+        host = host.rsplit(":", 1)[0]
+
+    suffix = ".lofter.com"
+    if not host.lower().endswith(suffix):
+        return ""
+
+    username = host[:-len(suffix)]
+    if not username or "." in username or username.lower() == "www":
+        return ""
+    return username
+
+
 async def parse_blog_posts(html: str) -> list[Post]:
     """解析博主主页的帖子列表。"""
     def _parse():
@@ -66,7 +89,13 @@ async def parse_blog_posts(html: str) -> list[Post]:
             if not post_id or post_id in seen:
                 continue
             seen.add(post_id)
-            posts.append(Post(post_id=post_id, title=a.get_text(strip=True), summary="", url=href))
+            posts.append(Post(
+                post_id=post_id,
+                title=a.get_text(strip=True),
+                summary="",
+                url=href,
+                author_username=extract_lofter_username(href),
+            ))
         return posts
 
     return await asyncio.get_running_loop().run_in_executor(None, _parse)
@@ -112,6 +141,7 @@ async def parse_post_page(html: str, url: str) -> Post:
             tags=tags,
             images=images,
             url=url,
+            author_username=extract_lofter_username(url),
             content=content,
         )
 

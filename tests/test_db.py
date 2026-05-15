@@ -261,5 +261,66 @@ async def test_migration_v2_to_v3_adds_count_conditions(tmp_path):
     await db.initialize()
     await db.upsert_count_condition("条件", "原神")
     assert await db.list_count_conditions() == [("条件", "原神")]
-    assert await db.get_config("schema_version") == "3"
+    assert await db.get_config("schema_version") == "4"
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_author_block_crud_is_session_scoped(db):
+    ok = await db.add_author_block("sess1", "name", "作者a", "作者A")
+    assert ok is True
+    assert await db.add_author_block("sess1", "name", "作者a", "作者A") is False
+    assert await db.add_author_block("sess2", "name", "作者a", "作者A") is True
+
+    rows = await db.list_author_blocks("sess1")
+    assert [(r[1], r[2], r[3]) for r in rows] == [("name", "作者a", "作者A")]
+
+    removed = await db.remove_author_block("sess1", "name", "作者a")
+    assert removed is True
+    assert await db.list_author_blocks("sess1") == []
+
+
+@pytest.mark.asyncio
+async def test_migration_v3_to_v4_adds_author_blocks(tmp_path):
+    db_path = str(tmp_path / "v3.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript("""
+        CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO config(key,value) VALUES('schema_version','3');
+        CREATE TABLE subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            type TEXT NOT NULL CHECK(type IN ('tag','blog')),
+            role TEXT NOT NULL CHECK(role IN ('subscribe','exclude')) DEFAULT 'subscribe',
+            target TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            UNIQUE(session_id, type, role, target)
+        );
+        CREATE TABLE seen_posts (
+            session_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            post_id TEXT NOT NULL,
+            seen_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            PRIMARY KEY (session_id, type, post_id)
+        );
+        CREATE TABLE sent_posts (
+            session_id TEXT NOT NULL,
+            post_id TEXT NOT NULL,
+            sent_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            PRIMARY KEY (session_id, post_id)
+        );
+        CREATE TABLE count_conditions (
+            name TEXT PRIMARY KEY,
+            expression TEXT NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+    migrated = LofterDB(db_path)
+    await migrated.initialize()
+    assert await migrated.add_author_block("sess1", "username", "someuser", "someuser") is True
+    assert await migrated.get_config("schema_version") == "4"
+    await migrated.close()

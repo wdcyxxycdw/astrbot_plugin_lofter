@@ -5,12 +5,15 @@ from unittest.mock import AsyncMock, patch
 from core.db import LofterDB
 from core.parser import Post
 from core.scheduler import (
+    SubscriptionScheduler,
     _check_tag_session,
+    _check_blog_sub,
     _enrich_blog_posts,
     _push_tag_posts,
     _push_blog_post,
     _build_tag_rule,
 )
+from core.author_block import AuthorBlockStorage
 from core.filter import FilterRule
 from core.storage import Subscription
 
@@ -38,6 +41,28 @@ async def db(tmp_path):
 
 def _make_sub(target: str, role: str = "subscribe", sub_type: str = "tag", session_id: str = "sess1") -> Subscription:
     return Subscription(id=1, session_id=session_id, type=sub_type, role=role, target=target)
+
+
+def test_scheduler_requires_explicit_block_storage(db):
+    storage = AsyncMock()
+    client = AsyncMock()
+    send_func = AsyncMock()
+
+    with pytest.raises(TypeError):
+        SubscriptionScheduler(storage, client, db, send_func)
+
+    with pytest.raises(TypeError):
+        SubscriptionScheduler(storage, client, db, send_func, 5)
+
+    scheduler = SubscriptionScheduler(
+        storage,
+        client,
+        db,
+        send_func,
+        block_storage=AuthorBlockStorage(db),
+        interval_minutes=5,
+    )
+    assert scheduler._block_storage is not None
 
 
 @pytest.mark.asyncio
@@ -226,7 +251,7 @@ async def test_aggregate_tag_session(db):
 
     with patch("core.scheduler.fetch_tag_posts", side_effect=mock_fetch):
         await db.mark_seen_session("sess1", "tag", ["warmup"])
-        await _check_tag_session("sess1", subs, client, db, send_func)
+        await _check_tag_session("sess1", subs, client, db, send_func, AuthorBlockStorage(db))
 
     pushed_ids = await db.filter_unsent("sess1", ["g1", "g2", "h1", "r1"])
     assert "r1" in pushed_ids
@@ -252,7 +277,7 @@ async def test_warmup_no_push(db):
     client = AsyncMock()
 
     with patch("core.scheduler.fetch_tag_posts", side_effect=mock_fetch):
-        await _check_tag_session("sess1", subs, client, db, send_func)
+        await _check_tag_session("sess1", subs, client, db, send_func, AuthorBlockStorage(db))
 
     assert sent == []
     count = await db.seen_count("sess1", "tag")
@@ -280,12 +305,64 @@ async def test_new_post_pushed_after_warmup(db):
     client = AsyncMock()
 
     with patch("core.scheduler.fetch_tag_posts", side_effect=mock_fetch_old):
-        await _check_tag_session("sess1", subs, client, db, send_func)
+        await _check_tag_session("sess1", subs, client, db, send_func, AuthorBlockStorage(db))
 
     assert sent == []
 
     with patch("core.scheduler.fetch_tag_posts", side_effect=mock_fetch_new):
-        await _check_tag_session("sess1", subs, client, db, send_func)
+        await _check_tag_session("sess1", subs, client, db, send_func, AuthorBlockStorage(db))
 
     assert len(sent) == 1
     assert "新帖" in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_tag_session_blocks_author_but_marks_seen(db):
+    await db.add_author_block("sess1", "name", "屏蔽作者", "屏蔽作者")
+    blocks = AuthorBlockStorage(db)
+    subs = [_make_sub("原神", "subscribe")]
+    posts = [
+        Post(post_id="p1", title="可见", summary="", author="可见作者", url="https://a.lofter.com/post/p1"),
+        Post(post_id="p2", title="屏蔽", summary="", author="屏蔽作者", url="https://b.lofter.com/post/p2"),
+    ]
+    sent: list[str] = []
+
+    async def send_func(session_id, text, images):
+        sent.append(text)
+
+    with patch("core.scheduler.fetch_tag_posts", return_value=posts):
+        await db.mark_seen_session("sess1", "tag", ["warmup"])
+        await _check_tag_session("sess1", subs, AsyncMock(), db, send_func, blocks)
+
+    assert len(sent) == 1
+    assert "可见" in sent[0]
+    assert await db.filter_unseen_session("sess1", "tag", ["p1", "p2"]) == []
+    assert await db.filter_unsent("sess1", ["p1", "p2"]) == ["p2"]
+
+
+@pytest.mark.asyncio
+async def test_blog_session_blocks_username_before_push(db):
+    await db.add_author_block("sess1", "username", "blockeduser", "blockeduser")
+    blocks = AuthorBlockStorage(db)
+    sub = _make_sub("blockeduser", sub_type="blog", session_id="sess1")
+    posts = [
+        Post(
+            post_id="p1",
+            title="屏蔽",
+            summary="",
+            author_username="blockeduser",
+            url="https://blockeduser.lofter.com/post/p1",
+        )
+    ]
+    sent: list[str] = []
+
+    async def send_func(session_id, text, images):
+        sent.append(text)
+
+    with patch("core.scheduler.fetch_blog_posts", return_value=posts):
+        await db.mark_seen_session("sess1", "blog", ["warmup"])
+        await _check_blog_sub(sub, AsyncMock(), db, send_func, blocks)
+
+    assert sent == []
+    assert await db.filter_unseen_session("sess1", "blog", ["p1"]) == []
+    assert await db.filter_unsent("sess1", ["p1"]) == ["p1"]

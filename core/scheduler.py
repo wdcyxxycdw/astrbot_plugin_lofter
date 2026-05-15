@@ -3,6 +3,7 @@ from typing import Callable, Awaitable
 
 from astrbot.api import logger
 
+from .author_block import AuthorBlockStorage, filter_blocked_posts
 from .client import LofterClient
 from .db import LofterDB
 from .dwr_parser import parse_dwr_response
@@ -80,6 +81,7 @@ async def _check_tag_session(
     client: LofterClient,
     db: LofterDB,
     send_func: SendFunc,
+    block_storage: AuthorBlockStorage,
 ):
     rule = _build_tag_rule(subs)
     if not rule.search_tags:
@@ -107,6 +109,11 @@ async def _check_tag_session(
 
     unseen_set = set(unseen_ids)
     new_posts = [p for p in posts if p.post_id in unseen_set]
+    blocks = await block_storage.list_by_session(session_id)
+    new_posts, _ = filter_blocked_posts(new_posts, blocks)
+    if not new_posts:
+        return
+
     actually_new_ids = await db.filter_unsent(session_id, [p.post_id for p in new_posts])
     if not actually_new_ids:
         return
@@ -122,6 +129,7 @@ async def _check_blog_sub(
     client: LofterClient,
     db: LofterDB,
     send_func: SendFunc,
+    block_storage: AuthorBlockStorage,
 ):
     try:
         posts = await fetch_blog_posts(sub, client)
@@ -144,6 +152,11 @@ async def _check_blog_sub(
 
     unseen_set = set(unseen_ids)
     new_posts = [p for p in posts if p.post_id in unseen_set]
+    blocks = await block_storage.list_by_session(sub.session_id)
+    new_posts, _ = filter_blocked_posts(new_posts, blocks)
+    if not new_posts:
+        return
+
     actually_new_ids = await db.filter_unsent(sub.session_id, [p.post_id for p in new_posts])
     if not actually_new_ids:
         return
@@ -151,9 +164,13 @@ async def _check_blog_sub(
     actually_new_set = set(actually_new_ids)
     to_push = [p for p in new_posts if p.post_id in actually_new_set]
     to_push = await _enrich_blog_posts(to_push, client)
+    to_push, _ = filter_blocked_posts(to_push, blocks)
+    if not to_push:
+        return
+
     for post in reversed(to_push[:5]):
         await _push_blog_post(sub.session_id, post, sub.target, send_func)
-    await db.mark_sent(sub.session_id, actually_new_ids)
+    await db.mark_sent(sub.session_id, [p.post_id for p in to_push])
 
 
 class SubscriptionScheduler:
@@ -163,12 +180,15 @@ class SubscriptionScheduler:
         client: LofterClient,
         db: LofterDB,
         send_func: SendFunc,
+        *,
+        block_storage: AuthorBlockStorage,
         interval_minutes: int = 30,
     ):
         self._storage = storage
         self._client = client
         self._db = db
         self._send_func = send_func
+        self._block_storage = block_storage
         self._interval = interval_minutes * 60
         self._task: asyncio.Task | None = None
 
@@ -199,9 +219,11 @@ class SubscriptionScheduler:
 
         async def _poll_session(session_id: str, typed: dict):
             if typed["tag"]:
-                await _check_tag_session(session_id, typed["tag"], self._client, self._db, self._send_func)
+                await _check_tag_session(
+                    session_id, typed["tag"], self._client, self._db, self._send_func, self._block_storage
+                )
             for sub in typed["blog"]:
-                await _check_blog_sub(sub, self._client, self._db, self._send_func)
+                await _check_blog_sub(sub, self._client, self._db, self._send_func, self._block_storage)
 
         tasks = [_poll_session(sid, typed) for sid, typed in by_session.items()]
         await asyncio.gather(*tasks, return_exceptions=True)

@@ -1,7 +1,7 @@
 import json
 import sqlite3
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 DDL = """
 CREATE TABLE IF NOT EXISTS config (
@@ -39,6 +39,15 @@ CREATE TABLE IF NOT EXISTS count_conditions (
     expression TEXT NOT NULL,
     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
+
+CREATE TABLE IF NOT EXISTS author_blocks (
+    session_id TEXT NOT NULL,
+    kind       TEXT NOT NULL CHECK(kind IN ('name','username')),
+    value      TEXT NOT NULL,
+    display    TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    PRIMARY KEY (session_id, kind, value)
+);
 """
 
 
@@ -52,6 +61,8 @@ def migrate(conn: sqlite3.Connection, from_ver: int):
         _migrate_v1_to_v2(conn)
     if from_ver < 3:
         _migrate_v2_to_v3(conn)
+    if from_ver < 4:
+        _migrate_v3_to_v4(conn)
     conn.execute(
         "INSERT INTO config(key,value) VALUES('schema_version',?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -66,6 +77,19 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection):
             name       TEXT PRIMARY KEY,
             expression TEXT NOT NULL,
             updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
+    """)
+
+
+def _migrate_v3_to_v4(conn: sqlite3.Connection):
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS author_blocks (
+            session_id TEXT NOT NULL,
+            kind       TEXT NOT NULL CHECK(kind IN ('name','username')),
+            value      TEXT NOT NULL,
+            display    TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            PRIMARY KEY (session_id, kind, value)
         );
     """)
 
