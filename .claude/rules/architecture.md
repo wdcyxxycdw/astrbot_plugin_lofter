@@ -18,6 +18,8 @@ core/
   db_migrations.py # 数据库 schema 迁移定义和执行
   storage.py       # Subscription dataclass + SubscriptionStorage
   scheduler.py     # 订阅轮询调度器
+  llm_tools.py     # AstrBot LLM 工具 mixin：搜索、订阅管理、作者屏蔽和统计工具调用
+  llm_tool_formatters.py # LLM 工具文本结果格式化辅助函数
   author_block.py  # 会话级作者屏蔽：输入归一化、名单存储和 Post 过滤
   tag_count.py     # 标签统计表达式解析、求值、分页统计和 CSV 生成
   count_commands.py # /lofter count 系列统计命令 mixin
@@ -90,3 +92,4 @@ _poll_all → 按 (session_id, type) 分组 → 不同 session 并发
 - 统计按 `post_id` 去重；分页统计无人工页数上限，仅以空页或无新候选自然停止，保证精准统计
 - `subtagpreview` 只写 `mark_seen`，不写 `mark_sent`：用户主动预览，不污染推送去重状态
 - E2E 测试用隔离 session（`__lofter_e2e_test__`）跑真实网络，20 步失败不中断，测完强制清理；`db.clear_session` 和 `db.delete_config` 专为清理新增
+- LLM 工具按场景合并为 `lofter_content`、`lofter_subscription`、`lofter_author_block`、`lofter_count`；不暴露 Cookie 更新、真实 E2E 测试和链接 parse，避免敏感凭据或重副作用被模型主动调用
