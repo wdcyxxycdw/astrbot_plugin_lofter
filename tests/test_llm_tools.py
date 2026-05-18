@@ -9,6 +9,21 @@ from core.llm_tools import LofterLLMToolsMixin
 from core.storage import Subscription
 
 
+def test_llm_tool_parameter_annotations_are_runtime_types():
+    expected = {
+        "lofter_subscription": {"action": str, "target": str, "index": int},
+        "lofter_author_block": {"action": str, "author": str},
+        "lofter_content": {"action": str, "query": str, "limit": int},
+        "lofter_count": {"action": str, "name": str, "expression": str, "target": str},
+    }
+
+    for method_name, annotations in expected.items():
+        actual = getattr(LofterLLMToolsMixin, method_name).__annotations__
+        for param_name, param_type in annotations.items():
+            assert actual[param_name] is param_type
+            assert not isinstance(actual[param_name], str)
+
+
 def test_llm_tools_does_not_swallow_astrbot_import_chain_errors():
     import core.llm_tools as llm_tools
 
