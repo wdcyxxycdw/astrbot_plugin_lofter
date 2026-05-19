@@ -102,10 +102,10 @@ class LofterLLMToolsMixin:
         并触发既有 warmup，避免历史内容被当作新内容推送。
 
         Args:
-            action: list、subscribe_tag、preview_tag、subscribe_blog、unsubscribe_tag、
+            action(string): list、subscribe_tag、preview_tag、subscribe_blog、unsubscribe_tag、
                 unexclude_tag、unsubscribe_blog 或 unsubscribe_index。
-            target: 标签表达式、标签名或博主用户名。
-            index: unsubscribe_index 使用的编号，来自 list 返回结果。
+            target(string): 标签表达式、标签名或博主用户名。
+            index(number): unsubscribe_index 使用的编号，来自 list 返回结果。
         """
         action = action.strip().lower()
         session_id = event.unified_msg_origin
@@ -138,8 +138,8 @@ class LofterLLMToolsMixin:
         解除屏蔽后不会补推屏蔽期间已处理的旧内容。
 
         Args:
-            action: list、block 或 unblock。
-            author: 作者昵称、用户名或 Lofter 主页 URL。
+            action(string): list、block 或 unblock。
+            author(string): 作者昵称、用户名或 Lofter 主页 URL。
         """
         action = action.strip().lower()
         session_id = event.unified_msg_origin
@@ -166,9 +166,9 @@ class LofterLLMToolsMixin:
         并应用当前会话的作者屏蔽规则。
 
         Args:
-            action: search。
-            query: 要搜索的标签名。
-            limit: 返回数量上限，最大 100；不传或小于等于 0 时使用默认搜索上限。
+            action(string): search。
+            query(string): 要搜索的标签名。
+            limit(number): 返回数量上限，最大 100；不传或小于等于 0 时使用默认搜索上限。
         """
         action = action.strip().lower()
         if action != "search":
@@ -205,10 +205,10 @@ class LofterLLMToolsMixin:
         运行全部统计并生成 CSV -> run_all。cookie、test 和 parse 不通过 LLM tool 暴露。
 
         Args:
-            action: run、list、delete 或 run_all。
-            name: run 使用的统计名称。
-            expression: run 使用的标签统计表达式，支持 AND/OR/NOT/括号。
-            target: delete 使用的统计条件名称或 list 编号。
+            action(string): run、list、delete 或 run_all。
+            name(string): run 使用的统计名称。
+            expression(string): run 使用的标签统计表达式，支持 AND/OR/NOT/括号。
+            target(string): delete 使用的统计条件名称或 list 编号。
         """
         if not is_admin_event(event):
             return ADMIN_ONLY_MESSAGE

@@ -24,6 +24,20 @@ def test_llm_tool_parameter_annotations_are_runtime_types():
             assert not isinstance(actual[param_name], str)
 
 
+def test_llm_tool_docstrings_use_astrbot_arg_type_format():
+    expected = {
+        "lofter_subscription": ("action(string):", "target(string):", "index(number):"),
+        "lofter_author_block": ("action(string):", "author(string):"),
+        "lofter_content": ("action(string):", "query(string):", "limit(number):"),
+        "lofter_count": ("action(string):", "name(string):", "expression(string):", "target(string):"),
+    }
+
+    for method_name, declarations in expected.items():
+        doc = getattr(LofterLLMToolsMixin, method_name).__doc__ or ""
+        for declaration in declarations:
+            assert declaration in doc
+
+
 def test_llm_tools_does_not_swallow_astrbot_import_chain_errors():
     import core.llm_tools as llm_tools
 
