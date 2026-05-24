@@ -1,6 +1,6 @@
 [project]
 name = "astrbot-plugin-lofter"
-version = "1.4.2"
+version = "1.4.3"
 description = "AstrBot 插件：解析/订阅 Lofter 内容"
 requires-python = ">=3.10"
 dependencies = [

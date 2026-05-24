@@ -79,8 +79,25 @@ CONTENT_ACTIONS = ("search",)
 COUNT_ACTIONS = ("run", "list", "delete", "run_all")
 
 
+def _plugin_main_module_path(module_path: str) -> str:
+    if module_path == "core.llm_tools":
+        return "main"
+    suffix = ".core.llm_tools"
+    if module_path.endswith(suffix):
+        return f"{module_path[:-len(suffix)]}.main"
+    return module_path
+
+
+def _lofter_llm_tool(*args: Any, **kwargs: Any):
+    def decorator(func: Any):
+        func.__module__ = _plugin_main_module_path(func.__module__)
+        return filter.llm_tool(*args, **kwargs)(func)
+
+    return decorator
+
+
 class LofterLLMToolsMixin:
-    @filter.llm_tool(name="lofter_subscription")
+    @_lofter_llm_tool(name="lofter_subscription")
     async def lofter_subscription(
         self,
         event: AstrMessageEvent,
@@ -125,7 +142,7 @@ class LofterLLMToolsMixin:
             return await self._llm_unsubscribe_index(session_id, index)
         return _unknown_action("lofter_subscription", SUBSCRIPTION_ACTIONS)
 
-    @filter.llm_tool(name="lofter_author_block")
+    @_lofter_llm_tool(name="lofter_author_block")
     async def lofter_author_block(self, event: AstrMessageEvent, action: str, author: str = "") -> str:
         """管理当前会话的 Lofter 作者屏蔽名单。
 
@@ -151,7 +168,7 @@ class LofterLLMToolsMixin:
             return await self._llm_unblock_author(session_id, author)
         return _unknown_action("lofter_author_block", AUTHOR_BLOCK_ACTIONS)
 
-    @filter.llm_tool(name="lofter_content")
+    @_lofter_llm_tool(name="lofter_content")
     async def lofter_content(
         self,
         event: AstrMessageEvent,
@@ -189,7 +206,7 @@ class LofterLLMToolsMixin:
             logger.exception("lofter_content search failed")
             return f"搜索失败：{e}"
 
-    @filter.llm_tool(name="lofter_count")
+    @_lofter_llm_tool(name="lofter_count")
     async def lofter_count(
         self,
         event: AstrMessageEvent,

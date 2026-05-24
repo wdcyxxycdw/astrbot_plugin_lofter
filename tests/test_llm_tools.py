@@ -38,6 +38,19 @@ def test_llm_tool_docstrings_use_astrbot_arg_type_format():
             assert declaration in doc
 
 
+def test_llm_tool_handler_modules_map_to_plugin_main_module():
+    import core.llm_tools as llm_tools
+
+    assert llm_tools._plugin_main_module_path("core.llm_tools") == "main"
+    assert (
+        llm_tools._plugin_main_module_path("data.plugins.astrbot_plugin_lofter.core.llm_tools")
+        == "data.plugins.astrbot_plugin_lofter.main"
+    )
+
+    for method_name in ("lofter_subscription", "lofter_author_block", "lofter_content", "lofter_count"):
+        assert getattr(LofterLLMToolsMixin, method_name).__module__ == "main"
+
+
 def test_llm_tools_does_not_swallow_astrbot_import_chain_errors():
     import core.llm_tools as llm_tools
 
