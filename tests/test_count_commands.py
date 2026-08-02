@@ -4,10 +4,12 @@ from core.count_commands import LofterCountCommandsMixin, _format_count_list
 
 
 class CountCommandEvent:
-    is_admin = True
-
-    def __init__(self, message_str: str):
+    def __init__(self, message_str: str, is_admin=True):
         self.message_str = message_str
+        self._is_admin = is_admin
+
+    def is_admin(self):
+        return self._is_admin
 
     def plain_result(self, text: str):
         return text
@@ -43,6 +45,20 @@ def test_count_list_includes_delete_hint():
 
     assert "1. 米哈游 = 原神" in text
     assert "用 /lofter count-del <名称或编号> 删除统计条件" in text
+
+
+@pytest.mark.asyncio
+async def test_handle_count_list_is_public():
+    db = CountCommandDB()
+    runner = CountCommandRunner(db)
+
+    results = [
+        item async for item in runner.handle_count_list(
+            CountCommandEvent("/lofter count-list", is_admin=False)
+        )
+    ]
+
+    assert results == [_format_count_list(db.rows)]
 
 
 @pytest.mark.asyncio

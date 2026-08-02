@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from .dwr_parser import parse_dwr_response
+from .content_source import collect_pages
 from .filter import FilterRule, apply_filter, parse_tag_expr
-from .formatter import format_post
+from .formatter import format_post, visible_images
 from .parser import Post
 from .scheduler import fetch_blog_posts, fetch_tag_posts
 
@@ -14,19 +14,16 @@ class FlowStepsMixin:
         t0 = self._timed_start()
         details: list[str] = []
         try:
-            pages = await self._client.search_tag_paged(self.TEST_TAG, total=25)
-            details.append(f"search_tag_paged → {len(pages)} 页")
-
-            seen_ids: set[str] = set()
-            all_posts: list[Post] = []
-            for raw in pages:
-                for p in await parse_dwr_response(raw):
-                    all_posts.append(p)
-                    seen_ids.add(p.post_id)
-
-            details.append(f"合计 {len(all_posts)} 条，去重后 {len(seen_ids)} 个 ID")
-            assert len(seen_ids) > 0, "搜索结果为空"
-            assert len(seen_ids) <= len(all_posts), "去重后数量异常"
+            page = await collect_pages(
+                lambda cursor: self._source.list_tag(
+                    self.TEST_TAG, cursor, 25, "new"
+                ),
+                limit=25,
+            )
+            posts = page.items
+            details.append(f"source={page.source}，合计 {len(posts)} 条")
+            assert posts, "搜索结果为空"
+            assert len({post.post_id for post in posts}) == len(posts), "搜索结果未去重"
             return self._pass(name, self._timed_end(t0), details)
         except Exception as e:
             return self._fail(name, self._timed_end(t0), e, details)
@@ -96,7 +93,7 @@ class FlowStepsMixin:
             details.append(f"添加订阅 {subs}，排除 {excls}")
 
             for tag in subs:
-                posts = await fetch_tag_posts([tag], self._client)
+                posts = await fetch_tag_posts([tag], self._source)
                 if posts:
                     await self._db.mark_seen_session(s, "tag", [p.post_id for p in posts])
             details.append("warmup tag 完成")
@@ -126,7 +123,7 @@ class FlowStepsMixin:
             details.append(f"add blog {self.TEST_BLOG} OK")
 
             sub = Subscription(id=0, session_id=s, type="blog", role="subscribe", target=self.TEST_BLOG)
-            posts = await fetch_blog_posts(sub, self._client)
+            posts = await fetch_blog_posts(sub, self._source)
             if posts:
                 await self._db.mark_seen_session(s, "blog", [p.post_id for p in posts])
             details.append(f"warmup blog 抓到 {len(posts)} 条")
@@ -144,7 +141,7 @@ class FlowStepsMixin:
         details: list[str] = []
         s = self.TEST_SESSION
         try:
-            posts = await fetch_tag_posts([self.TEST_TAG], self._client)
+            posts = await fetch_tag_posts([self.TEST_TAG], self._source)
             details.append(f"fetch_tag_posts 得 {len(posts)} 条")
 
             rule = FilterRule(search_tags=[self.TEST_TAG], exclude_tags=[])
@@ -161,8 +158,9 @@ class FlowStepsMixin:
             post = posts[0]
             header = f"【标签「{self.TEST_TAG}」有新内容】"
             text = format_post(post, header=header)
-            await self._send_push(real_session_id, text, post.images)
-            details.append(f"推送首条到 real_session，含 {len(post.images)} 张图")
+            images = visible_images(post)
+            await self._send_push(real_session_id, text, images)
+            details.append(f"推送首条到 real_session，含 {len(images)} 张图")
             return self._pass(name, self._timed_end(t0), details)
         except Exception as e:
             return self._fail(name, self._timed_end(t0), e, details)
@@ -185,12 +183,16 @@ class FlowStepsMixin:
             assert unsent == [], f"sent 后 filter_unsent 应返回空，实际 {unsent}"
             details.append("mark_sent + filter_unsent OK")
 
-            conn = self._db._conn
-            loop = __import__("asyncio").get_event_loop()
-            await loop.run_in_executor(None, lambda: (
-                conn.execute("DELETE FROM seen_posts WHERE session_id=? AND post_id IN (?,?)", (s, *fake_ids)),
-                conn.execute("DELETE FROM sent_posts WHERE session_id=? AND post_id IN (?,?)", (s, *fake_ids)),
-                conn.commit(),
+            await self._db.transaction(lambda conn: (
+                conn.execute(
+                    "DELETE FROM seen_posts WHERE subscription_id IN "
+                    "(SELECT id FROM subscriptions WHERE session_id=?) AND post_id IN (?,?)",
+                    (s, *fake_ids),
+                ),
+                conn.execute(
+                    "DELETE FROM deliveries WHERE session_id=? AND post_id IN (?,?)",
+                    (s, *fake_ids),
+                ),
             ))
             details.append("fake ids 已清理")
             return self._pass(name, self._timed_end(t0), details)
@@ -222,7 +224,7 @@ class FlowStepsMixin:
             before = await self._db.seen_count(s, "tag")
             await self._scheduler._poll_all()
             after = await self._db.seen_count(s, "tag")
-            details.append(f"_poll_all 完成，sent_posts 变化: before={before}, after={after}")
+            details.append(f"_poll_all 完成，seen 变化: before={before}, after={after}")
             details.append("无新帖（符合 warmup 后预期）" if after == before else f"新增 {after - before} 条 seen（有新帖）")
             return self._pass(name, self._timed_end(t0), details)
         except Exception as e:
@@ -239,8 +241,9 @@ class FlowStepsMixin:
             post = blog_posts[0]
             header = f"【博主「{self.TEST_BLOG}」有新内容】"
             text = format_post(post, header=header)
-            await self._send_push(real_session_id, text, post.images)
-            details.append(f"推送首条到 real_session，含 {len(post.images)} 张图")
+            images = visible_images(post)
+            await self._send_push(real_session_id, text, images)
+            details.append(f"推送首条到 real_session，含 {len(images)} 张图")
             return self._pass(name, self._timed_end(t0), details)
         except Exception as e:
             return self._fail(name, self._timed_end(t0), e, details)

@@ -37,7 +37,11 @@ def test_filter_by_author_username_case_insensitive():
 
 
 def test_missing_author_does_not_match():
-    post = make_post(author="", author_username="")
+    post = make_post(
+        author="",
+        author_username="",
+        completeness=frozenset({"title", "url", "author", "author_username"}),
+    )
     visible, blocked = filter_blocked_posts([post], [AuthorBlock("sess", "name", "作者A", "作者A")])
     assert visible == [post]
     assert blocked == []
@@ -60,5 +64,37 @@ async def test_storage_add_remove_list(db):
     assert await storage.add("sess1", "SomeUser") is False
     rows = await storage.list_by_session("sess1")
     assert {r.kind for r in rows} == {"name", "username"}
+    snapshot = await db.capture_session_snapshot("sess1")
+    assert snapshot[2] == 1
     assert await storage.remove("sess1", "SomeUser") is True
+    assert await storage.remove("sess1", "SomeUser") is False
     assert await storage.list_by_session("sess1") == []
+    snapshot = await db.capture_session_snapshot("sess1")
+    assert snapshot[2] == 2
+
+
+@pytest.mark.asyncio
+async def test_author_block_batch_rolls_back_on_invalid_second_key(db):
+    from core.author_block import AuthorBlockStorage, normalize_author_query
+
+    storage = AuthorBlockStorage(db)
+    original = normalize_author_query
+
+    def invalid_keys(raw):
+        return [
+            ("name", "test", "Test"),
+            ("invalid", "test", "Test"),
+        ]
+
+    import core.author_block as module
+
+    module.normalize_author_query = invalid_keys
+    try:
+        with pytest.raises(Exception):
+            await storage.add("sess1", "Test")
+    finally:
+        module.normalize_author_query = original
+
+    assert await storage.list_by_session("sess1") == []
+    snapshot = await db.capture_session_snapshot("sess1")
+    assert snapshot[2] == 0

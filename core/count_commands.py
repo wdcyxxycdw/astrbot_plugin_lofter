@@ -5,14 +5,13 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
+from .count_formatters import format_count_result
 from .tag_count import (
     CountExpressionError,
     CountResult,
     build_count_csv,
     build_count_csv_path,
     count_posts,
-    format_scanned_pages,
-    is_admin_event,
     parse_count_command_arg,
 )
 
@@ -22,18 +21,12 @@ except Exception:
     logger = logging.getLogger(__name__)
 
 
-ADMIN_ONLY_MESSAGE = "只有管理员可以使用统计命令"
-
-
 class LofterCountCommandsMixin:
     async def handle_count(self, event):
-        if not is_admin_event(event):
-            yield event.plain_result(ADMIN_ONLY_MESSAGE)
-            return
         raw = self._cmd_arg(event.message_str)
         try:
             name, expression = parse_count_command_arg(raw)
-            result = await count_posts(expression, self._client)
+            result = await count_posts(expression, self._source)
         except CountExpressionError as e:
             yield event.plain_result(f"统计条件错误：{e}")
             return
@@ -43,12 +36,9 @@ class LofterCountCommandsMixin:
             return
         await self._db.upsert_count_condition(name, expression)
         result = replace(result, name=name)
-        yield event.plain_result(_format_count_result(result))
+        yield event.plain_result(format_count_result(result))
 
     async def handle_count_list(self, event):
-        if not is_admin_event(event):
-            yield event.plain_result(ADMIN_ONLY_MESSAGE)
-            return
         rows = await self._db.list_count_conditions()
         if not rows:
             yield event.plain_result("当前没有统计条件")
@@ -56,9 +46,6 @@ class LofterCountCommandsMixin:
         yield event.plain_result(_format_count_list(rows))
 
     async def handle_count_del(self, event):
-        if not is_admin_event(event):
-            yield event.plain_result(ADMIN_ONLY_MESSAGE)
-            return
         arg = self._cmd_arg(event.message_str).strip()
         if not arg:
             yield event.plain_result("请提供统计条件名称或编号，例如：/lofter count-del 米哈游相关")
@@ -70,9 +57,6 @@ class LofterCountCommandsMixin:
         yield event.plain_result(await self._delete_count_condition_by_index(arg))
 
     async def handle_count_all(self, event):
-        if not is_admin_event(event):
-            yield event.plain_result(ADMIN_ONLY_MESSAGE)
-            return
         conditions = await self._db.list_count_conditions()
         if not conditions:
             yield event.plain_result("当前没有统计条件")
@@ -93,11 +77,13 @@ class LofterCountCommandsMixin:
 
     async def _count_condition(self, name: str, expression: str, counted_at: str) -> CountResult:
         try:
-            result = await count_posts(expression, self._client)
+            result = await count_posts(expression, self._source)
             return replace(result, name=name, counted_at=counted_at)
         except Exception as e:
             logger.exception("Lofter: 统计「%s」失败", name)
-            return CountResult(name, expression, 0, "失败", str(e), counted_at)
+            return CountResult(
+                name, expression, 0, "failed", str(e), counted_at
+            )
 
     async def _delete_count_condition_by_index(self, arg: str) -> str:
         if not arg.isdigit() or int(arg) < 1:
@@ -123,15 +109,7 @@ class LofterCountCommandsMixin:
         return event.chain_result([file_component])
 
 
-def _format_count_result(result: CountResult) -> str:
-    lines = [
-        f"「{result.name}」统计完成：{result.count} 个作品",
-        f"候选作品：{result.candidates}",
-        f"扫描页数：{format_scanned_pages(result.scanned_pages) or '无'}",
-        f"条件：{result.expression}",
-    ]
-    lines.extend(f"提示：{warning}" for warning in result.warnings)
-    return "\n".join(lines)
+_format_count_result = format_count_result
 
 
 def _format_count_list(rows: list[tuple[str, str]]) -> str:

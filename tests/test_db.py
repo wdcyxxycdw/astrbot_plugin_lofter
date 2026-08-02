@@ -67,6 +67,11 @@ def _insert_v1_fixture(conn: sqlite3.Connection):
     )
 
 
+async def _ensure_source(db, session_id: str, sub_type: str):
+    target = f"__{sub_type}_source__"
+    await db.add_subscription(session_id, sub_type, target, "subscribe")
+
+
 @pytest.mark.asyncio
 async def test_config_get_set(db):
     assert await db.get_config("foo") is None
@@ -128,6 +133,7 @@ async def test_add_subscribe_and_exclude_are_independent(db):
 
 @pytest.mark.asyncio
 async def test_filter_unseen_session(db):
+    await _ensure_source(db, "sess1", "tag")
     ids = ["1", "2", "3"]
     unseen = await db.filter_unseen_session("sess1", "tag", ids)
     assert set(unseen) == {"1", "2", "3"}
@@ -143,6 +149,7 @@ async def test_filter_unseen_session(db):
 
 @pytest.mark.asyncio
 async def test_seen_count(db):
+    await _ensure_source(db, "sess1", "tag")
     assert await db.seen_count("sess1", "tag") == 0
     await db.mark_seen_session("sess1", "tag", ["1", "2"])
     assert await db.seen_count("sess1", "tag") == 2
@@ -151,6 +158,7 @@ async def test_seen_count(db):
 
 @pytest.mark.asyncio
 async def test_cold_start_no_push(db):
+    await _ensure_source(db, "sess1", "tag")
     all_ids = ["10", "20", "30"]
     unseen = await db.filter_unseen_session("sess1", "tag", all_ids)
     is_cold = await db.seen_count("sess1", "tag") == 0
@@ -182,6 +190,8 @@ async def test_sent_posts_session_isolated(db):
 
 @pytest.mark.asyncio
 async def test_seen_session_isolated(db):
+    await _ensure_source(db, "sess1", "tag")
+    await _ensure_source(db, "sess2", "tag")
     await db.mark_seen_session("sess1", "tag", ["a"])
     unseen = await db.filter_unseen_session("sess2", "tag", ["a"])
     assert unseen == ["a"]
@@ -274,7 +284,7 @@ async def test_migration_v2_to_v3_adds_count_conditions(tmp_path):
     await db.initialize()
     await db.upsert_count_condition("条件", "原神")
     assert await db.list_count_conditions() == [("条件", "原神")]
-    assert await db.get_config("schema_version") == "4"
+    assert await db.get_config("schema_version") == "5"
     await db.close()
 
 
@@ -335,5 +345,5 @@ async def test_migration_v3_to_v4_adds_author_blocks(tmp_path):
     migrated = LofterDB(db_path)
     await migrated.initialize()
     assert await migrated.add_author_block("sess1", "username", "someuser", "someuser") is True
-    assert await migrated.get_config("schema_version") == "4"
+    assert await migrated.get_config("schema_version") == "5"
     await migrated.close()

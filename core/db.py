@@ -1,295 +1,190 @@
+from __future__ import annotations
+
 import asyncio
+import inspect
 import sqlite3
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from enum import Enum, auto
+from typing import TypeVar
 
-from .db_migrations import DDL, SCHEMA_VERSION, get_schema_version, migrate
+from .db_migrations import FaultHook, initialize_schema
+from .db_repository import LofterRepositoryMixin
+
+T = TypeVar("T")
+BUSY_TIMEOUT_MS = 5000
 
 
-class LofterDB:
-    def __init__(self, db_path: str):
+class SQLiteBusyError(RuntimeError):
+    pass
+
+
+class DatabaseClosedError(RuntimeError):
+    pass
+
+
+class DatabaseState(Enum):
+    CLOSED = auto()
+    OPENING = auto()
+    OPEN = auto()
+    CLOSING = auto()
+
+
+class LofterDB(LofterRepositoryMixin):
+    def __init__(self, db_path: str, *, migration_fault_hook: FaultHook | None = None):
         self._path = db_path
-        self._conn: Optional[sqlite3.Connection] = None
+        self._conn: sqlite3.Connection | None = None
+        self._migration_fault_hook = migration_fault_hook
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lofter-db")
+        self._executor_closed = False
+        self._state = DatabaseState.CLOSED
+        self._state_lock = asyncio.Lock()
+        self._close_lock = asyncio.Lock()
+        self._initialize_task: asyncio.Task | None = None
+        self._close_task: asyncio.Task | None = None
 
-    def _run(self, fn):
-        loop = asyncio.get_running_loop()
-        return loop.run_in_executor(self._executor, fn)
+    def _run(self, fn: Callable[[], T]):
+        if self._executor_closed:
+            raise DatabaseClosedError("database executor is closed")
+        return asyncio.get_running_loop().run_in_executor(self._executor, fn)
 
-    async def initialize(self):
-        def _init():
-            conn = sqlite3.connect(self._path, check_same_thread=False)
+    async def initialize(self) -> None:
+        async with self._state_lock:
+            if self._state is DatabaseState.OPEN:
+                return
+            if self._state is DatabaseState.CLOSING or self._executor_closed:
+                raise DatabaseClosedError("database is closing or closed")
+            if self._state is DatabaseState.CLOSED:
+                self._state = DatabaseState.OPENING
+                self._initialize_task = asyncio.create_task(self._finish_initialize())
+            task = self._initialize_task
+        await asyncio.shield(task)
+
+    async def _finish_initialize(self) -> None:
+        try:
+            conn = await self._run(self._open_connection)
+        except BaseException:
+            async with self._state_lock:
+                if self._state is DatabaseState.OPENING:
+                    self._state = DatabaseState.CLOSED
+            raise
+        async with self._state_lock:
+            if self._state is DatabaseState.OPENING:
+                self._conn = conn
+                self._state = DatabaseState.OPEN
+                return
+        await self._run(conn.close)
+
+    def _open_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(
+            self._path,
+            timeout=BUSY_TIMEOUT_MS / 1000,
+            check_same_thread=False,
+        )
+        try:
+            conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
             conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.executescript(DDL)
-            conn.commit()
-            ver = get_schema_version(conn)
-            if ver < SCHEMA_VERSION:
-                migrate(conn, ver)
+            initialize_schema(conn, self._migration_fault_hook)
+            return conn
+        except BaseException as exc:
+            conn.close()
+            classified = _classify_sqlite_error(exc)
+            if classified is exc:
+                raise
+            raise classified from exc
+
+    async def close(self) -> None:
+        async with self._close_lock:
+            if self._close_task is None:
+                self._close_task = asyncio.create_task(self._finish_close())
+            task = self._close_task
+        await _await_cleanup_before_cancel(task)
+
+    async def _finish_close(self) -> None:
+        task, conn = await self._begin_close()
+        try:
+            if task is not None:
+                await _await_initialize_for_close(task)
+            if conn is None:
+                conn = await self._take_connection()
+            if conn is not None:
+                await self._run(conn.close)
+        finally:
+            self._executor.shutdown(wait=True)
+            self._executor_closed = True
+            async with self._state_lock:
+                self._conn = None
+                self._state = DatabaseState.CLOSED
+                self._initialize_task = None
+
+    async def _begin_close(
+        self,
+    ) -> tuple[asyncio.Task | None, sqlite3.Connection | None]:
+        async with self._state_lock:
+            self._state = DatabaseState.CLOSING
+            task = self._initialize_task
+            conn, self._conn = self._conn, None
+            return task, conn
+
+    async def _take_connection(self) -> sqlite3.Connection | None:
+        async with self._state_lock:
+            conn, self._conn = self._conn, None
             return conn
 
-        self._conn = await self._run(_init)
+    async def transaction(self, callback: Callable[[sqlite3.Connection], T]) -> T:
+        conn = self._require_connection()
 
-    async def close(self):
-        if self._conn:
-            conn = self._conn
-            await self._run(conn.close)
-            self._conn = None
-        self._executor.shutdown(wait=True)
-
-    async def get_config(self, key: str) -> Optional[str]:
-        conn = self._conn
-
-        def _get():
-            row = conn.execute("SELECT value FROM config WHERE key=?", (key,)).fetchone()
-            return row[0] if row else None
-
-        return await self._run(_get)
-
-    async def set_config(self, key: str, value: str):
-        conn = self._conn
-
-        def _set():
-            conn.execute(
-                "INSERT INTO config(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (key, value),
-            )
-            conn.commit()
-
-        await self._run(_set)
-
-    async def add_subscription(self, session_id: str, sub_type: str, target: str, role: str = "subscribe") -> bool:
-        conn = self._conn
-
-        def _add():
+        def run_transaction() -> T:
             try:
-                conn.execute(
-                    "INSERT INTO subscriptions(session_id,type,role,target) VALUES(?,?,?,?)",
-                    (session_id, sub_type, role, target),
-                )
+                conn.execute("BEGIN IMMEDIATE")
+                result = callback(conn)
+                if inspect.isawaitable(result):
+                    if inspect.iscoroutine(result):
+                        result.close()
+                    raise TypeError("database transaction callback must be synchronous")
                 conn.commit()
-                return True
-            except sqlite3.IntegrityError:
-                return False
+                return result
+            except BaseException as exc:
+                if conn.in_transaction:
+                    conn.rollback()
+                classified = _classify_sqlite_error(exc)
+                if classified is exc:
+                    raise
+                raise classified from exc
 
-        return await self._run(_add)
+        return await self._run(run_transaction)
 
-    async def remove_subscription(self, session_id: str, sub_type: str, target: str, role: str = "subscribe") -> bool:
-        conn = self._conn
+    def _require_connection(self) -> sqlite3.Connection:
+        if self._state is not DatabaseState.OPEN or self._conn is None:
+            raise DatabaseClosedError("database is not initialized")
+        return self._conn
 
-        def _remove():
-            cur = conn.execute(
-                "DELETE FROM subscriptions WHERE session_id=? AND type=? AND role=? AND target=?",
-                (session_id, sub_type, role, target),
-            )
-            conn.commit()
-            return cur.rowcount > 0
 
-        return await self._run(_remove)
+async def _await_cleanup_before_cancel(task: asyncio.Task) -> None:
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    task.result()
+    if cancelled:
+        raise asyncio.CancelledError
 
-    async def remove_subscription_by_id(self, sub_id: int) -> bool:
-        conn = self._conn
 
-        def _remove():
-            cur = conn.execute("DELETE FROM subscriptions WHERE id=?", (sub_id,))
-            conn.commit()
-            return cur.rowcount > 0
+async def _await_initialize_for_close(task: asyncio.Task) -> None:
+    try:
+        await asyncio.shield(task)
+    except (Exception, asyncio.CancelledError):
+        pass
 
-        return await self._run(_remove)
 
-    async def get_subscription_id(self, session_id: str, sub_type: str, target: str, role: str = "subscribe") -> Optional[int]:
-        conn = self._conn
-
-        def _get():
-            row = conn.execute(
-                "SELECT id FROM subscriptions WHERE session_id=? AND type=? AND role=? AND target=?",
-                (session_id, sub_type, role, target),
-            ).fetchone()
-            return row[0] if row else None
-
-        return await self._run(_get)
-
-    async def list_subscriptions(self, session_id: Optional[str] = None) -> list[tuple]:
-        conn = self._conn
-
-        def _list():
-            if session_id:
-                return conn.execute(
-                    "SELECT id,session_id,type,role,target,created_at FROM subscriptions WHERE session_id=? ORDER BY id ASC",
-                    (session_id,),
-                ).fetchall()
-            return conn.execute(
-                "SELECT id,session_id,type,role,target,created_at FROM subscriptions ORDER BY id ASC"
-            ).fetchall()
-
-        return await self._run(_list)
-
-    async def filter_unseen_session(self, session_id: str, sub_type: str, post_ids: list[str]) -> list[str]:
-        if not post_ids:
-            return []
-        conn = self._conn
-
-        def _filter():
-            placeholders = ",".join("?" * len(post_ids))
-            seen = {
-                row[0]
-                for row in conn.execute(
-                    f"SELECT post_id FROM seen_posts WHERE session_id=? AND type=? AND post_id IN ({placeholders})",
-                    (session_id, sub_type, *post_ids),
-                ).fetchall()
-            }
-            return [pid for pid in post_ids if pid not in seen]
-
-        return await self._run(_filter)
-
-    async def mark_seen_session(self, session_id: str, sub_type: str, post_ids: list[str]):
-        if not post_ids:
-            return
-        conn = self._conn
-
-        def _mark():
-            conn.executemany(
-                "INSERT OR IGNORE INTO seen_posts(session_id,type,post_id) VALUES(?,?,?)",
-                [(session_id, sub_type, pid) for pid in post_ids],
-            )
-            conn.commit()
-
-        await self._run(_mark)
-
-    async def seen_count(self, session_id: str, sub_type: str) -> int:
-        conn = self._conn
-
-        def _count():
-            row = conn.execute(
-                "SELECT COUNT(*) FROM seen_posts WHERE session_id=? AND type=?",
-                (session_id, sub_type),
-            ).fetchone()
-            return row[0] if row else 0
-
-        return await self._run(_count)
-
-    async def filter_unsent(self, session_id: str, post_ids: list[str]) -> list[str]:
-        if not post_ids:
-            return []
-        conn = self._conn
-
-        def _filter():
-            placeholders = ",".join("?" * len(post_ids))
-            sent = {
-                row[0]
-                for row in conn.execute(
-                    f"SELECT post_id FROM sent_posts WHERE session_id=? AND post_id IN ({placeholders})",
-                    (session_id, *post_ids),
-                ).fetchall()
-            }
-            return [pid for pid in post_ids if pid not in sent]
-
-        return await self._run(_filter)
-
-    async def mark_sent(self, session_id: str, post_ids: list[str]):
-        if not post_ids:
-            return
-        conn = self._conn
-
-        def _mark():
-            conn.executemany(
-                "INSERT OR IGNORE INTO sent_posts(session_id,post_id) VALUES(?,?)",
-                [(session_id, pid) for pid in post_ids],
-            )
-            conn.commit()
-
-        await self._run(_mark)
-
-    async def clear_session(self, session_id: str):
-        """删除指定 session 的所有 seen/sent 记录，用于测试清理。"""
-        conn = self._conn
-
-        def _clear():
-            conn.execute("DELETE FROM seen_posts WHERE session_id=?", (session_id,))
-            conn.execute("DELETE FROM sent_posts WHERE session_id=?", (session_id,))
-            conn.commit()
-
-        await self._run(_clear)
-
-    async def delete_config(self, key: str):
-        """删除指定配置项。"""
-        conn = self._conn
-
-        def _del():
-            conn.execute("DELETE FROM config WHERE key=?", (key,))
-            conn.commit()
-
-        await self._run(_del)
-
-    async def add_author_block(self, session_id: str, kind: str, value: str, display: str) -> bool:
-        conn = self._conn
-
-        def _add():
-            try:
-                conn.execute(
-                    "INSERT INTO author_blocks(session_id,kind,value,display) VALUES(?,?,?,?)",
-                    (session_id, kind, value, display),
-                )
-                conn.commit()
-                return True
-            except sqlite3.IntegrityError:
-                return False
-
-        return await self._run(_add)
-
-    async def remove_author_block(self, session_id: str, kind: str, value: str) -> bool:
-        conn = self._conn
-
-        def _remove():
-            cur = conn.execute(
-                "DELETE FROM author_blocks WHERE session_id=? AND kind=? AND value=?",
-                (session_id, kind, value),
-            )
-            conn.commit()
-            return cur.rowcount > 0
-
-        return await self._run(_remove)
-
-    async def list_author_blocks(self, session_id: str) -> list[tuple]:
-        conn = self._conn
-
-        def _list():
-            return conn.execute(
-                "SELECT session_id,kind,value,display,created_at FROM author_blocks WHERE session_id=? ORDER BY created_at ASC, display ASC",
-                (session_id,),
-            ).fetchall()
-
-        return await self._run(_list)
-
-    async def upsert_count_condition(self, name: str, expression: str):
-        conn = self._conn
-
-        def _upsert():
-            conn.execute(
-                "INSERT INTO count_conditions(name,expression) VALUES(?,?) "
-                "ON CONFLICT(name) DO UPDATE SET expression=excluded.expression,updated_at=strftime('%s','now')",
-                (name, expression),
-            )
-            conn.commit()
-
-        await self._run(_upsert)
-
-    async def delete_count_condition(self, name: str) -> bool:
-        conn = self._conn
-
-        def _delete():
-            cur = conn.execute("DELETE FROM count_conditions WHERE name=?", (name,))
-            conn.commit()
-            return cur.rowcount > 0
-
-        return await self._run(_delete)
-
-    async def list_count_conditions(self) -> list[tuple[str, str]]:
-        conn = self._conn
-
-        def _list():
-            return conn.execute(
-                "SELECT name,expression FROM count_conditions ORDER BY updated_at DESC, name ASC"
-            ).fetchall()
-
-        return await self._run(_list)
+def _classify_sqlite_error(exc: BaseException) -> BaseException:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return exc
+    code = getattr(exc, "sqlite_errorcode", None)
+    locked_codes = {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+    message = str(exc).lower()
+    if code in locked_codes or "database is locked" in message or "database table is locked" in message:
+        return SQLiteBusyError(str(exc))
+    return exc

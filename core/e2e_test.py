@@ -4,9 +4,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Awaitable, Literal
 
-from .client import LofterClient
 from .db import LofterDB
 from .scheduler import SubscriptionScheduler
+from .source_scan import ContentSource
 from .storage import SubscriptionStorage
 from .e2e_steps_network import NetworkStepsMixin
 from .e2e_steps_flow import FlowStepsMixin
@@ -31,13 +31,13 @@ class E2ETestRunner(NetworkStepsMixin, FlowStepsMixin):
     def __init__(
         self,
         db: LofterDB,
-        client: LofterClient,
+        source: ContentSource,
         storage: SubscriptionStorage,
         scheduler: SubscriptionScheduler,
         send_push: Callable[[str, str, list], Awaitable[None]],
     ):
         self._db = db
-        self._client = client
+        self._source = source
         self._storage = storage
         self._scheduler = scheduler
         self._send_push = send_push

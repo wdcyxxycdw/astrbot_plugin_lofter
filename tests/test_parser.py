@@ -1,5 +1,12 @@
 import pytest
+from core.errors import SourceChallengeError, SourceLimitError, SourceSchemaError
 from core.parser import extract_lofter_username, parse_post_page, parse_blog_posts
+from core.source_limits import MAX_TITLE_BYTES, MAX_URL_BYTES
+
+
+def _exact_utf8(prefix: str, limit: int) -> str:
+    remaining = limit - len(prefix.encode("utf-8"))
+    return prefix + "界" * (remaining // 3) + "x" * (remaining % 3)
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -55,7 +62,9 @@ DEDUP_IMAGE_HTML = """\
 </body></html>"""
 
 BLOG_HOME_HTML = """\
-<!DOCTYPE html><html><body>
+<!DOCTYPE html><html><head>
+<link rel="canonical" href="https://user.lofter.com/"/>
+</head><body>
 <a href="https://user.lofter.com/post/aaa_111">帖子一</a>
 <a href="https://user.lofter.com/post/bbb_222">帖子二</a>
 <a href="https://user.lofter.com/post/aaa_111">重复链接</a>
@@ -65,6 +74,20 @@ BLOG_HOME_HTML = """\
 BLOG_HOME_EMPTY_HTML = "<html><body><p>没有帖子</p></body></html>"
 
 POST_URL = "https://test.lofter.com/post/abc_123def"
+POST_EVIDENCE = f'<link rel="canonical" href="{POST_URL}">'
+
+
+def with_post_evidence(html):
+    return html.replace("<head>", f"<head>{POST_EVIDENCE}", 1)
+
+
+for _fixture_name in (
+    "TEXT_POST_HTML", "IMAGE_POST_HTML", "MULTI_DASH_HTML", "NO_DASH_HTML",
+    "EMPTY_HTML", "LONG_DESC_HTML", "HTML_ENTITY_HTML", "DEDUP_IMAGE_HTML",
+    "P_ID_WITH_FULL_POST_HTML",
+):
+    if _fixture_name in globals():
+        globals()[_fixture_name] = with_post_evidence(globals()[_fixture_name])
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -96,6 +119,7 @@ async def test_text_post_title_and_author():
 async def test_text_post_summary_and_tags():
     post = await parse_post_page(TEXT_POST_HTML, POST_URL)
     assert "自主规制" in post.summary
+    assert "summary" in post.completeness
     assert "エマヒロ" in post.tags
     assert "希艾" in post.tags
     assert post.images == []
@@ -121,6 +145,9 @@ async def test_title_without_dash():
     post = await parse_post_page(NO_DASH_HTML, POST_URL)
     assert post.title == "纯标题无作者"
     assert post.author == ""
+    assert "summary" not in post.completeness
+    assert "author" not in post.completeness
+    assert "tags" not in post.completeness
 
 
 @pytest.mark.asyncio
@@ -132,14 +159,18 @@ async def test_silent_condition_when_no_summary_no_images():
 
 @pytest.mark.asyncio
 async def test_post_id_extracted_from_url():
-    post = await parse_post_page(TEXT_POST_HTML, "https://user.lofter.com/post/aaf97d58_34d8bede3")
+    url = "https://user.lofter.com/post/aaf97d58_34d8bede3"
+    html = TEXT_POST_HTML.replace(POST_URL, url)
+    post = await parse_post_page(html, url)
     assert post.post_id == "aaf97d58_34d8bede3"
 
 
 @pytest.mark.asyncio
 async def test_parse_post_page_extracts_author_username_from_url():
-    post = await parse_post_page(TEXT_POST_HTML, "https://SomeUser.lofter.com/post/abc123")
-    assert post.author_username == "SomeUser"
+    url = "https://SomeUser.lofter.com/post/abc123"
+    html = TEXT_POST_HTML.replace(POST_URL, url)
+    post = await parse_post_page(html, url)
+    assert post.author_username == "someuser"
 
 
 @pytest.mark.asyncio
@@ -188,9 +219,35 @@ async def test_blog_posts_have_url():
 
 @pytest.mark.asyncio
 async def test_parse_blog_posts_extracts_author_username():
-    html = '<a href="https://SomeUser.lofter.com/post/abc123">标题</a>'
+    html = """<html><head><link rel="canonical" href="https://SomeUser.lofter.com/"/></head>
+    <body><a href="https://SomeUser.lofter.com/post/abc123">标题</a></body></html>"""
     posts = await parse_blog_posts(html)
-    assert posts[0].author_username == "SomeUser"
+    assert posts[0].author_username == "someuser"
+
+
+@pytest.mark.asyncio
+async def test_blog_relative_post_link_uses_validated_canonical_host():
+    html = """
+    <link rel="canonical" href="https://SomeUser.lofter.com/">
+    <a href="/post/abc_123">相对链接帖子</a>
+    """
+
+    posts = await parse_blog_posts(html)
+
+    assert len(posts) == 1
+    assert posts[0].post_id == "abc_123"
+    assert posts[0].url == "https://someuser.lofter.com/post/abc_123"
+    assert posts[0].author_username == "someuser"
+
+
+@pytest.mark.asyncio
+async def test_blog_relative_post_uses_declared_identity_without_canonical():
+    html = '<div data-blog-name="demo"><a href="/post/abc_123">帖子</a></div>'
+
+    posts = await parse_blog_posts(html)
+
+    assert posts[0].url == "https://demo.lofter.com/post/abc_123"
+    assert posts[0].author_username == "demo"
 
 
 @pytest.mark.asyncio
@@ -222,6 +279,7 @@ NO_CONTENT_HTML = """\
 
 P_ID_WITH_FULL_POST_HTML = """\
 <!DOCTYPE html><html><head>
+<link rel="canonical" href="https://test.lofter.com/post/abc_123def">
 <title>测试标题-测试作者</title>
 <meta name="Description" content="摘要"/>
 </head><body>
@@ -263,3 +321,120 @@ async def test_post_content_field_populated():
     post = await parse_post_page(P_ID_WITH_FULL_POST_HTML, POST_URL)
     assert "正文第一段" in post.content
     assert "正文第二段" in post.content
+
+
+@pytest.mark.asyncio
+async def test_blog_shell_is_schema_failure():
+    with pytest.raises(SourceSchemaError):
+        await parse_blog_posts("<html><body><p>欢迎访问</p></body></html>")
+
+
+@pytest.mark.asyncio
+async def test_blog_post_link_is_identity_evidence():
+    html = '<a href="https://synthetic.lofter.com/post/abc_123">帖子</a>'
+
+    posts = await parse_blog_posts(html)
+
+    assert len(posts) == 1
+    assert posts[0].post_id == "abc_123"
+    assert posts[0].author_username == "synthetic"
+
+
+@pytest.mark.asyncio
+async def test_blog_identity_allows_empty_posts():
+    html = '<link rel="canonical" href="https://synthetic.lofter.com/">'
+    assert await parse_blog_posts(html) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parser_kind", ["blog", "post"])
+async def test_login_page_is_typed_challenge(parser_kind):
+    html = '<html><head><title>登录 - LOFTER</title></head><body><input type="password"></body></html>'
+    with pytest.raises(SourceChallengeError):
+        if parser_kind == "blog":
+            await parse_blog_posts(html)
+        else:
+            await parse_post_page(html, POST_URL)
+
+
+@pytest.mark.asyncio
+async def test_post_requires_page_evidence():
+    html = TEXT_POST_HTML.replace(POST_EVIDENCE, "")
+    with pytest.raises(SourceSchemaError, match="html"):
+        await parse_post_page(html, POST_URL)
+
+
+@pytest.mark.asyncio
+async def test_post_with_evidence_requires_usable_field():
+    html = '<html><head><link rel="canonical" href="https://test.lofter.com/post/abc_123def"></head></html>'
+    with pytest.raises(SourceSchemaError, match="post.content"):
+        await parse_post_page(html, POST_URL)
+
+
+@pytest.mark.asyncio
+async def test_post_page_rejects_canonical_identity_mismatch():
+    html = TEXT_POST_HTML.replace(POST_URL, "https://other.lofter.com/post/def_456")
+    with pytest.raises(SourceSchemaError, match="post.id"):
+        await parse_post_page(html, POST_URL)
+
+
+@pytest.mark.asyncio
+async def test_blog_page_item_limit_is_exact():
+    anchors = "".join(
+        f'<a href="https://user.lofter.com/post/{index:x}_1">p</a>'
+        for index in range(100)
+    )
+    html = '<link rel="canonical" href="https://user.lofter.com/">' + anchors
+    assert len(await parse_blog_posts(html)) == 100
+    extra = '<a href="https://user.lofter.com/post/64_1">p</a>'
+    with pytest.raises(SourceLimitError) as exc_info:
+        await parse_blog_posts(html + extra)
+    assert (exc_info.value.resource, exc_info.value.limit) == ("items", 100)
+
+
+@pytest.mark.asyncio
+async def test_post_parser_accepts_exact_utf8_title_and_url_limits():
+    prefix = "https://test.lofter.com/post/"
+    exact_url = prefix + "a" * (MAX_URL_BYTES - len(prefix))
+    exact_title = _exact_utf8("", MAX_TITLE_BYTES)
+    html = (
+        f'<link rel="canonical" href="{exact_url}">'
+        f"<title>{exact_title}</title>"
+    )
+    post = await parse_post_page(html, exact_url)
+    assert post.title == exact_title
+    assert post.url == exact_url
+
+
+@pytest.mark.asyncio
+async def test_post_parser_checks_full_image_url_before_query_strip():
+    prefix = "https://imglf5.lf127.net/img/a.jpg?quality="
+    exact_image = _exact_utf8(prefix, MAX_URL_BYTES)
+    html = (
+        f'{POST_EVIDENCE}<title>帖子</title><img src="{exact_image}">'
+    )
+    post = await parse_post_page(html, POST_URL)
+    assert post.images == ["https://imglf5.lf127.net/img/a.jpg"]
+
+    oversized = html.replace(exact_image, exact_image + "x")
+    with pytest.raises(SourceLimitError) as exc_info:
+        await parse_post_page(oversized, POST_URL)
+    assert (exc_info.value.resource, exc_info.value.limit) == (
+        "url",
+        MAX_URL_BYTES,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("html", "url", "resource"),
+    [
+        (f"{POST_EVIDENCE}<article><title>{'题' * 4097}</title></article>", POST_URL, "title"),
+        (f"{POST_EVIDENCE}<article><p id='p_x'>{'文' * (2 * 1024 * 1024 + 1)}</p></article>", POST_URL, "content"),
+        ("<article><title>帖子</title></article>", "https://test.lofter.com/post/" + "a" * 8192, "url"),
+    ],
+)
+async def test_post_field_limits_are_typed(html, url, resource):
+    with pytest.raises(SourceLimitError) as exc_info:
+        await parse_post_page(html, url)
+    assert exc_info.value.resource == resource

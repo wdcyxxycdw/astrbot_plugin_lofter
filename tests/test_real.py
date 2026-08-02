@@ -6,13 +6,16 @@
     export LOFTER_TAG="标签名"
     export LOFTER_BLOG="用户名"
 
-    uv run pytest tests/test_real.py -v -s
+    LOFTER_RUN_LIVE=1 uv run pytest tests/test_real.py -v -s
 """
 
 import os
+from contextlib import asynccontextmanager
+
 import pytest
 
 from core.client import LofterClient
+from core.content_source import DefaultContentSource
 from core.dwr_parser import parse_dwr_response
 from core.parser import parse_post_page, parse_blog_posts
 from core.scheduler import _enrich_blog_posts
@@ -21,6 +24,12 @@ COOKIE = os.getenv("LOFTER_COOKIE", "")
 POST_URL = os.getenv("LOFTER_POST_URL", "")
 TAG = os.getenv("LOFTER_TAG", "")
 BLOG = os.getenv("LOFTER_BLOG", "")
+RUN_LIVE = os.getenv("LOFTER_RUN_LIVE") == "1"
+
+pytestmark = [
+    pytest.mark.real,
+    pytest.mark.skipif(not RUN_LIVE, reason="需要设置 LOFTER_RUN_LIVE=1"),
+]
 
 
 def skip_if_missing(*vars_):
@@ -28,11 +37,32 @@ def skip_if_missing(*vars_):
     return pytest.mark.skipif(bool(missing), reason="缺少环境变量")
 
 
+@asynccontextmanager
+async def _live_client():
+    client = LofterClient(COOKIE)
+    await client.initialize()
+    try:
+        yield client
+    finally:
+        await client.close()
+
+
+@asynccontextmanager
+async def _live_source():
+    source = DefaultContentSource()
+    source.update_cookie(COOKIE)
+    await source.initialize()
+    try:
+        yield source
+    finally:
+        await source.close()
+
+
 @pytest.mark.asyncio
 @skip_if_missing(COOKIE, POST_URL)
 async def test_real_parse_post():
-    client = LofterClient(COOKIE)
-    html = await client.get(POST_URL)
+    async with _live_client() as client:
+        html = await client.get(POST_URL, credentialed=True)
     print(f"\n[HTML 长度] {len(html)} 字符")
 
     post = await parse_post_page(html, POST_URL)
@@ -49,8 +79,8 @@ async def test_real_parse_post():
 @skip_if_missing(COOKIE, TAG)
 async def test_real_tag_dwr():
     """通过 DWR TagBean.search 获取标签帖子列表"""
-    client = LofterClient(COOKIE)
-    raw = await client.search_tag(TAG, limit=20)
+    async with _live_client() as client:
+        raw = await client.search_tag(TAG, limit=20)
     print(f"\n[DWR 响应长度] {len(raw)} 字符")
 
     posts = await parse_dwr_response(raw)
@@ -68,9 +98,9 @@ async def test_real_tag_dwr():
 @pytest.mark.asyncio
 @skip_if_missing(COOKIE, BLOG)
 async def test_real_parse_blog():
-    client = LofterClient(COOKIE)
     url = f"https://{BLOG}.lofter.com"
-    html = await client.get(url)
+    async with _live_client() as client:
+        html = await client.get(url, credentialed=True)
     print(f"\n[博主页 HTML 长度] {len(html)} 字符")
 
     posts = await parse_blog_posts(html)
@@ -84,13 +114,11 @@ async def test_real_parse_blog():
 @pytest.mark.asyncio
 @skip_if_missing(COOKIE, BLOG)
 async def test_real_enrich_blog_posts():
-    client = LofterClient(COOKIE)
-    url = f"https://{BLOG}.lofter.com"
-    html = await client.get(url)
-    posts = await parse_blog_posts(html)
-    assert len(posts) > 0, "博主页未解析到任何帖子"
-
-    enriched = await _enrich_blog_posts(posts[:1], client)
+    async with _live_source() as source:
+        page = await source.list_blog(BLOG, None, 20)
+        posts = page.items
+        assert posts, "博主页未解析到任何帖子"
+        enriched = await _enrich_blog_posts(posts[:1], source)
     assert len(enriched) == 1
 
     post = enriched[0]
