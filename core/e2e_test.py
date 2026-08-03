@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Literal
 
 from .db import LofterDB
+from .parser import Post
+from .post_identity import is_canonical_post_url, post_url_identity
 from .scheduler import SendFunc, SubscriptionScheduler
-from .source_scan import ContentSource
+from .source_scan import ContentSource, SourcePage
 from .storage import SubscriptionStorage
+from .subscription_service import SubscriptionService
 from .e2e_steps_network import NetworkStepsMixin
 from .e2e_steps_flow import FlowStepsMixin
 
@@ -22,26 +26,47 @@ class StepResult:
 
 
 class E2ETestRunner(NetworkStepsMixin, FlowStepsMixin):
-    TEST_SESSION = "__lofter_e2e_test__"
     TEST_TAG = "摄影"
-    # TODO: 如 lofter-news 不可用，替换为任意长期活跃博主
-    TEST_BLOG = "lofter-news"
-    TEST_CONFIG_KEY = "__e2e_test_kv__"
 
     def __init__(
         self,
         db: LofterDB,
         source: ContentSource,
         storage: SubscriptionStorage,
+        subscriptions: SubscriptionService,
         scheduler: SubscriptionScheduler,
         send_push: SendFunc,
     ):
+        suffix = uuid.uuid4().hex
+        self.TEST_SESSION = f"__lofter_e2e_test__:{suffix}"
+        self.PREVIEW_SESSION = f"__lofter_e2e_preview__:{suffix}"
+        self.TEST_CONFIG_KEY = f"__e2e_test_kv__:{suffix}"
         self._db = db
         self._source = source
         self._storage = storage
+        self._subscriptions = subscriptions
         self._scheduler = scheduler
         self._send_push = send_push
         self._artifacts: dict = {}
+
+    async def _load_fixture(self) -> tuple[SourcePage, Post, str]:
+        page = self._artifacts.get("tag_page")
+        if page is None:
+            page = await self._source.list_tag(
+                self.TEST_TAG, None, 20, "new"
+            )
+            self._artifacts["tag_page"] = page
+            self._artifacts["tag_posts"] = page.items
+
+        for post in page.items:
+            if not post.url or not is_canonical_post_url(post.url):
+                continue
+            _, _, owner = post_url_identity(post.url)
+            if owner:
+                self._artifacts["fixture_post"] = post
+                self._artifacts["fixture_blog"] = owner
+                return page, post, owner
+        raise AssertionError("标签结果中没有可用的帖子和博主 fixture")
 
     async def run_all(self, real_session_id: str) -> list[StepResult]:
         results: list[StepResult] = []
@@ -63,18 +88,18 @@ class E2ETestRunner(NetworkStepsMixin, FlowStepsMixin):
             self._step_14_subtag_full,
             self._step_15_subblog_full,
         ]
-        for fn in steps:
-            results.append(await fn())
+        try:
+            for fn in steps:
+                results.append(await fn())
 
-        results.append(await self._step_16_subtagpreview(real_session_id))
-        results.append(await self._step_17_seen_sent())
-        results.append(await self._step_18_scheduler_state())
-        results.append(await self._step_19_manual_poll())
-        results.append(await self._step_20_push_blog(real_session_id))
-
-        cleanup = await self._cleanup()
-        results.append(cleanup)
-        return results
+            results.append(await self._step_16_subtagpreview(real_session_id))
+            results.append(await self._step_17_seen_sent())
+            results.append(await self._step_18_scheduler_state())
+            results.append(await self._step_19_manual_poll())
+            results.append(await self._step_20_push_blog(real_session_id))
+            return results
+        finally:
+            results.append(await self._cleanup())
 
     def _timed_start(self) -> float:
         return time.perf_counter()
@@ -95,15 +120,16 @@ class E2ETestRunner(NetworkStepsMixin, FlowStepsMixin):
         name = "测试清理"
         t0 = self._timed_start()
         details: list[str] = []
-        s = self.TEST_SESSION
         try:
-            subs = await self._storage.list_by_session(s)
-            for sub in subs:
-                await self._storage.remove_by_id(sub.id)
-            details.append(f"删除 {len(subs)} 条订阅")
-
-            await self._db.clear_session(s)
-            details.append("seen/sent 记录已清理")
+            removed = 0
+            for session_id in (self.TEST_SESSION, self.PREVIEW_SESSION):
+                subs = await self._storage.list_by_session(session_id)
+                for sub in subs:
+                    await self._storage.remove_by_id(sub.id)
+                removed += len(subs)
+                await self._db.clear_session(session_id)
+            details.append(f"删除 {removed} 条订阅")
+            details.append("测试 session 的 seen/delivery 已清理")
 
             await self._db.delete_config(self.TEST_CONFIG_KEY)
             details.append(f"配置键 {self.TEST_CONFIG_KEY} 已删除")

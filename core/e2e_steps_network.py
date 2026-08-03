@@ -3,9 +3,10 @@ from __future__ import annotations
 import re
 
 from .dwr_engine import execute_dwr
-from .filter import FilterRule, apply_filter, parse_tag_expr
+from .filter import FilterRule, parse_tag_expr
 from .formatter import format_post, visible_images
 from .parser import Post
+from .post_consumers import apply_filter_with_fields
 from .utils import _split_text
 
 POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
@@ -53,10 +54,8 @@ class NetworkStepsMixin:
         t0 = self._timed_start()
         details: list[str] = []
         try:
-            page = await self._source.list_blog(self.TEST_BLOG, None, 1)
-            if not page.items:
-                return self._skip(name, "博主列表为空，无法选择单帖")
-            post = await self._source.get_post(page.items[0].url)
+            _, fixture_post, _ = await self._load_fixture()
+            post = await self._source.get_post(fixture_post.url)
             self._artifacts["rich_post"] = post
             details.append(f"get_post → {post.post_id}")
             return self._pass(name, self._timed_end(t0), details)
@@ -68,7 +67,7 @@ class NetworkStepsMixin:
         t0 = self._timed_start()
         details: list[str] = []
         try:
-            page = await self._source.list_tag(self.TEST_TAG, None, 20, "new")
+            page, _, _ = await self._load_fixture()
             self._artifacts["tag_posts"] = page.items
             details.append(
                 f"source={page.source}，映射 {page.mapped_count}，丢弃 {page.dropped_count}"
@@ -89,7 +88,8 @@ class NetworkStepsMixin:
         t0 = self._timed_start()
         details: list[str] = []
         try:
-            page = await self._source.list_blog(self.TEST_BLOG, None, 20)
+            _, _, fixture_blog = await self._load_fixture()
+            page = await self._source.list_blog(fixture_blog, None, 20)
             self._artifacts["blog_posts"] = page.items
             details.append(f"source={page.source}，得到 {len(page.items)} 条帖子")
             return self._pass(name, self._timed_end(t0), details)
@@ -155,8 +155,12 @@ class NetworkStepsMixin:
             details.append(f"parse_tag_expr → subs={subs}, excls={excls}")
 
             rule = FilterRule(search_tags=subs, exclude_tags=excls)
-            filtered = apply_filter(tag_posts, rule)
-            details.append(f"apply_filter: {len(tag_posts)} → {len(filtered)} 条")
+            filtered = await apply_filter_with_fields(
+                tag_posts, rule, self._source
+            )
+            details.append(
+                f"apply_filter_with_fields: {len(tag_posts)} → {len(filtered)} 条"
+            )
             assert len(filtered) <= len(tag_posts)
             return self._pass(name, self._timed_end(t0), details)
         except Exception as e:

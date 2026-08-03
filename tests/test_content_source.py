@@ -158,6 +158,72 @@ async def test_tag_primary_first_page_failure_switches_to_dwr_start(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_ordered_terminal_mobile_tag_page_is_used_directly():
+    client = FakeClient()
+    source = DefaultContentSource(client)
+    posts = [
+        make_post("new", "2026-01-09 00:00:00"),
+        make_post("old", "2026-01-07 00:00:00"),
+    ]
+    source._mobile = SimpleNamespace(
+        list_tag=AsyncMock(return_value=mobile_page(posts))
+    )
+
+    result = await source.list_tag("demo", None, 20, "new")
+
+    assert result.source == "mobile_tag"
+    assert result.items == posts
+    client.search_tag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mobile_tag_page_with_unknown_publish_time_uses_dwr(monkeypatch):
+    client = FakeClient()
+    client.search_tag.return_value = "dwr"
+    source = DefaultContentSource(client)
+    primary = make_post("primary")
+    primary.completeness = primary.completeness - {"publish_time"}
+    fallback = make_post("primary")
+    source._mobile = SimpleNamespace(
+        list_tag=AsyncMock(return_value=mobile_page([primary]))
+    )
+    monkeypatch.setattr(
+        source_module,
+        "parse_dwr_response_result",
+        AsyncMock(return_value=DWRParseResult([fallback], 1, 0, False)),
+    )
+
+    result = await source.list_tag("demo", None, 20, "new")
+
+    assert result.items == [fallback]
+    assert result.evidence_items == (primary,)
+    client.search_tag.assert_awaited_once_with("demo", 0, 20)
+
+
+@pytest.mark.asyncio
+async def test_legacy_mobile_cursor_restarts_dwr_from_zero(monkeypatch):
+    client = FakeClient()
+    client.search_tag.return_value = "dwr"
+    source = DefaultContentSource(client)
+    source._mobile = SimpleNamespace(list_tag=AsyncMock())
+    expected = make_post("fallback")
+    monkeypatch.setattr(
+        source_module,
+        "parse_dwr_response_result",
+        AsyncMock(return_value=DWRParseResult([expected], 1, 0, False)),
+    )
+
+    result = await source.list_tag(
+        "demo", "v1:mobile_tag:mobile-2", 20, "new"
+    )
+
+    assert result.items == [expected]
+    assert result.restarted is True
+    source._mobile.list_tag.assert_not_awaited()
+    client.search_tag.assert_awaited_once_with("demo", 0, 20)
+
+
+@pytest.mark.asyncio
 async def test_mobile_list_identity_error_propagates_without_fallback():
     client = FakeClient()
     source = DefaultContentSource(client)
@@ -199,18 +265,17 @@ async def test_dwr_identity_error_cannot_be_hidden_by_primary(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_tag_midscan_failure_restarts_dwr_from_zero(monkeypatch):
+async def test_nonterminal_tag_page_restarts_dwr_from_zero(monkeypatch):
     client = FakeClient()
     client.search_tag.return_value = "dwr"
     source = DefaultContentSource(client)
-    primary = make_post("primary", "2026-01-09 00:00")
-    fallback = make_post("primary", "2026-01-09 00:00")
+    primary = make_post("primary", "2026-01-09 00:00:00")
+    fallback = make_post("primary", "2026-01-09 00:00:00")
     source._mobile = SimpleNamespace(
         list_tag=AsyncMock(
-            side_effect=[
-                mobile_page([primary], cursor="mobile-2", exhausted=False),
-                SourceSchemaError("mobile"),
-            ]
+            return_value=mobile_page(
+                [primary], cursor="mobile-2", exhausted=False
+            )
         )
     )
     parser = AsyncMock(side_effect=[
@@ -223,9 +288,10 @@ async def test_tag_midscan_failure_restarts_dwr_from_zero(monkeypatch):
         lambda cursor: source.list_tag("demo", cursor, 20, "new")
     )
 
-    assert [item.post_id for item in result.items] == ["primary"]
-    assert result.items[0] is fallback
+    assert result.items == [fallback]
+    assert [item.post_id for item in result.evidence_items] == ["primary"]
     assert result.source == "dwr"
+    source._mobile.list_tag.assert_awaited_once_with("demo", None)
     assert client.search_tag.await_args_list == [
         call("demo", 0, 20),
         call("demo", 20, 20),
@@ -233,30 +299,22 @@ async def test_tag_midscan_failure_restarts_dwr_from_zero(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_incomplete_tag_page_restarts_dwr_and_discards_primary(monkeypatch):
+async def test_unordered_terminal_tag_page_uses_dwr_order(monkeypatch):
     client = FakeClient()
     client.search_tag.return_value = "dwr"
     source = DefaultContentSource(client)
-    primary = make_post("primary", "2026-01-09 00:00")
-    fallback = make_post("primary", "2026-01-09 00:00")
-    fallback_2 = make_post("mixed", "2026-01-07 00:00")
+    primary_old = make_post("old", "2026-01-07 00:00:00")
+    primary_new = make_post("new", "2026-01-09 00:00:00")
+    fallback_new = make_post("new", "2026-01-09 00:00:00")
+    fallback_old = make_post("old", "2026-01-07 00:00:00")
     source._mobile = SimpleNamespace(
-        list_tag=AsyncMock(
-            side_effect=[
-                mobile_page([primary], cursor="mobile-2", exhausted=False),
-                mobile_page(
-                    [make_post("mixed", "2026-01-07 00:00")],
-                    dropped=1,
-                    complete=False,
-                ),
-            ]
-        )
+        list_tag=AsyncMock(return_value=mobile_page([primary_old, primary_new]))
     )
     monkeypatch.setattr(
         source_module,
         "parse_dwr_response_result",
         AsyncMock(side_effect=[
-            DWRParseResult([fallback, fallback_2], 2, 0, False),
+            DWRParseResult([fallback_new, fallback_old], 2, 0, False),
             DWRParseResult([], 0, 0, True),
         ]),
     )
@@ -265,9 +323,8 @@ async def test_incomplete_tag_page_restarts_dwr_and_discards_primary(monkeypatch
         lambda cursor: source.list_tag("demo", cursor, 20, "new")
     )
 
-    assert [item.post_id for item in result.items] == ["primary", "mixed"]
-    assert result.items == [fallback, fallback_2]
-    assert {item.post_id for item in result.evidence_items} == {"primary", "mixed"}
+    assert result.items == [fallback_new, fallback_old]
+    assert [item.post_id for item in result.evidence_items] == ["old", "new"]
     assert result.source == "dwr"
     assert client.search_tag.await_args_list == [
         call("demo", 0, 20),
@@ -318,21 +375,18 @@ async def test_incomplete_blog_page_restarts_html_and_discards_primary(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_midscan_fallback_failure_is_typed_partial():
+async def test_nonterminal_mobile_fallback_failure_is_typed_partial():
     client = FakeClient()
     client.search_tag.side_effect = SourceSchemaError("dwr")
     source = DefaultContentSource(client)
-    primary = make_post("primary")
+    primary = make_post("primary", "2026-01-09 00:00:00")
     source._mobile = SimpleNamespace(
         list_tag=AsyncMock(
-            side_effect=[
-                mobile_page([primary], cursor="mobile-2", exhausted=False),
-                SourceSchemaError("mobile"),
-            ]
+            return_value=mobile_page(
+                [primary], cursor="mobile-2", exhausted=False
+            )
         )
     )
-
-    from core.errors import SourcePartialError
 
     with pytest.raises(SourcePartialError) as exc_info:
         await collect_pages(
@@ -340,6 +394,7 @@ async def test_midscan_fallback_failure_is_typed_partial():
         )
 
     assert exc_info.value.mapped_count == 1
+    assert [post.post_id for post in exc_info.value.evidence_items] == ["primary"]
 
 
 @pytest.mark.asyncio

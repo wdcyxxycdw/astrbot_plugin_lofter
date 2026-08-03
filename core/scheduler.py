@@ -880,17 +880,20 @@ class SubscriptionScheduler:
             await asyncio.sleep(self._interval)
             await self._poll_all()
 
+    async def _poll_single_session(self, session_id: str) -> None:
+        await _poll_delivery_session(
+            session_id,
+            self._source,
+            self._subscription_service,
+            self._gates,
+            self._delivery_queue,
+            self._send_func,
+        )
+
     async def _poll_all(self):
         session_ids = await self._delivery_queue.session_ids()
         tasks = [
-            _poll_delivery_session(
-                session_id,
-                self._source,
-                self._subscription_service,
-                self._gates,
-                self._delivery_queue,
-                self._send_func,
-            )
+            self._poll_single_session(session_id)
             for session_id in session_ids
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
