@@ -239,6 +239,64 @@ def test_dwr_rejects_invalid_authoritative_url(value):
 
 
 @pytest.mark.parametrize(
+    ("value", "shape"),
+    [
+        ("", "empty"),
+        ("   ", "blank"),
+        (" 1a_2b ", "surrounding_whitespace"),
+        ("1a_2b", "slug"),
+        ("/post/1a_2b", "relative_post_path"),
+        ("post/1a_2b", "relative_post_path"),
+        ("//demo.lofter.com/post/1a_2b", "protocol_relative"),
+        ("http://demo.lofter.com/post/1a_2b", "http_url"),
+        ("https://demo.lofter.com/archive", "first_party_non_post_url"),
+        (
+            "https://demo.lofter.com/post/1a_2b?token=private-token",
+            "first_party_post_url_with_query",
+        ),
+        (
+            "https://demo.lofter.com/post/1a_2b#private-fragment",
+            "first_party_post_url_with_fragment",
+        ),
+        (
+            "https://name:private-password@demo.lofter.com/post/1a_2b",
+            "first_party_post_url_invalid_authority",
+        ),
+        ("https://attacker.example/post/1a_2b", "external_https_url"),
+        ("mailto:private@example.com", "other_url"),
+        ("https://[invalid", "malformed_url"),
+        ("opaque private text", "text"),
+    ],
+)
+def test_dwr_invalid_permalink_reports_only_safe_value_shape(value, shape):
+    with pytest.raises(DWRIdentityError) as exc_info:
+        _map_post({"post": {"permalink": value}})
+
+    error = exc_info.value
+    assert error.reason == "invalid_post_url"
+    assert error.fields == ("permalink",)
+    assert error.fingerprint == "invalid_post_url:permalink"
+    assert error.value_shape == shape
+    assert error.diagnostic == f"invalid_post_url:permalink;shape={shape}"
+    if value:
+        assert value not in str(error)
+        assert value not in error.diagnostic
+
+
+def test_dwr_identity_shape_is_allowlisted():
+    error = DWRIdentityError(
+        "invalid_post_url",
+        "permalink",
+        value_shape="private-upstream-shape",
+    )
+
+    assert error.value_shape == "unknown"
+    assert error.diagnostic == "invalid_post_url:permalink;shape=unknown"
+    assert "private-upstream-shape" not in str(error)
+    assert "private-upstream-shape" not in error.diagnostic
+
+
+@pytest.mark.parametrize(
     "fallback",
     [
         "https://legacy.lofter.com/post/ff_ee",

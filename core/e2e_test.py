@@ -397,7 +397,7 @@ def _error_health(error: BaseException) -> Health:
 
 def _safe_error(error: BaseException) -> str:
     if isinstance(error, DWRIdentityError):
-        return f"DWR 身份冲突（{error.fingerprint}）"
+        return f"DWR 身份冲突（{error.diagnostic}）"
     if isinstance(error, SourceSchemaError):
         return f"内容源响应结构无效（{error.location}）"
     if isinstance(error, SourceError):

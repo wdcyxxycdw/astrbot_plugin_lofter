@@ -47,7 +47,12 @@ class SourceSchemaError(SourceError):
 
 
 class DWRIdentityError(SourceSchemaError):
-    def __init__(self, reason: str, *fields: str) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *fields: str,
+        value_shape: str | None = None,
+    ) -> None:
         self.location = "dwr.post.id"
         safe_reason = _safe_dwr_identity_reason(reason)
         safe_fields = _safe_dwr_identity_fields(fields)
@@ -59,6 +64,14 @@ class DWRIdentityError(SourceSchemaError):
             self.reason = safe_reason
             self.fields = safe_fields
             self.fingerprint = f"{safe_reason}:{'+'.join(safe_fields)}"
+        self.value_shape = (
+            _safe_dwr_identity_shape(value_shape)
+            if self.reason == "invalid_post_url" and value_shape is not None
+            else None
+        )
+        self.diagnostic = self.fingerprint
+        if self.value_shape is not None:
+            self.diagnostic = f"{self.diagnostic};shape={self.value_shape}"
         SourceError.__init__(
             self,
             f"DWR 帖子身份无效（dwr.post.id；{self.fingerprint}）",
@@ -163,6 +176,28 @@ def _safe_dwr_identity_fields(values: Iterable[str]) -> tuple[str, ...]:
         "blogInfo.blogName",
     }
     return tuple(sorted({value for value in values if value in known}))
+
+
+def _safe_dwr_identity_shape(value: str) -> str:
+    known = {
+        "empty",
+        "blank",
+        "surrounding_whitespace",
+        "slug",
+        "relative_post_path",
+        "protocol_relative",
+        "http_url",
+        "first_party_non_post_url",
+        "first_party_post_url_with_query",
+        "first_party_post_url_with_fragment",
+        "first_party_post_url_invalid_authority",
+        "external_https_url",
+        "other_url",
+        "malformed_url",
+        "text",
+        "unknown",
+    }
+    return value if value in known else "unknown"
 
 
 def _safe_location(value: str) -> str:
