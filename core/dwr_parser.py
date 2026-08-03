@@ -5,6 +5,7 @@ import json
 import re
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlsplit
 
 from .dwr_engine import execute_dwr, validate_dwr_input
 from .errors import (
@@ -34,6 +35,8 @@ from .source_limits import (
 )
 
 _DWR_CALLBACK = "dwr.engine._remoteHandleCallback"
+_DWR_POST_PATH = re.compile(r"^/post/[A-Za-z0-9_-]+/?$")
+_DWR_POST_SLUG = re.compile(r"^[A-Za-z0-9_-]+$")
 _CHALLENGE_MARKERS = (
     "not logged in",
     "captcha",
@@ -227,12 +230,57 @@ def _authoritative_url_identity(
     except SourceLimitError:
         raise
     except SourceSchemaError:
-        raise DWRIdentityError("invalid_post_url", key) from None
+        raise DWRIdentityError(
+            "invalid_post_url",
+            key,
+            value_shape=_dwr_url_shape(value),
+        ) from None
     try:
         url, post_id, owner = post_url_identity(value)
     except ValueError:
-        raise DWRIdentityError("invalid_post_url", key) from None
+        raise DWRIdentityError(
+            "invalid_post_url",
+            key,
+            value_shape=_dwr_url_shape(value),
+        ) from None
     return key, url, post_id, owner
+
+
+def _dwr_url_shape(value: str) -> str:
+    if value == "":
+        return "empty"
+    if value.isspace():
+        return "blank"
+    if value != value.strip():
+        return "surrounding_whitespace"
+    if _DWR_POST_SLUG.fullmatch(value):
+        return "slug"
+    if _DWR_POST_PATH.fullmatch(value) or _DWR_POST_PATH.fullmatch(f"/{value}"):
+        return "relative_post_path"
+    if value.startswith("//"):
+        return "protocol_relative"
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except (TypeError, ValueError, UnicodeError):
+        return "malformed_url"
+    scheme = parsed.scheme.casefold()
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    if scheme == "http":
+        return "http_url"
+    if scheme != "https":
+        return "other_url" if scheme else "text"
+    first_party = host == "lofter.com" or host.endswith(".lofter.com")
+    if not first_party:
+        return "external_https_url"
+    if parsed.username is not None or parsed.password is not None or port not in (None, 443):
+        return "first_party_post_url_invalid_authority"
+    if _DWR_POST_PATH.fullmatch(parsed.path):
+        if parsed.query:
+            return "first_party_post_url_with_query"
+        if parsed.fragment:
+            return "first_party_post_url_with_fragment"
+    return "first_party_non_post_url"
 
 
 def _fallback_url_identity(

@@ -176,6 +176,35 @@ async def test_forced_dwr_failure_is_independent_and_payload_free():
 
 
 @pytest.mark.asyncio
+async def test_invalid_permalink_report_includes_shape_without_payload():
+    secrets = (
+        "https://private-owner.lofter.com/post/1a_2b?token=private-token",
+        "private-owner",
+        "1a_2b",
+        "private-token",
+    )
+    error = DWRIdentityError(
+        "invalid_post_url",
+        "permalink",
+        value_shape="relative_post_path",
+    )
+    source = _OfflineSource([_post("1a_1")], [], dwr_error=error)
+    runner, send, scheduler_task = await _runner(source)
+
+    try:
+        results = await runner.run_all("qq:real-session")
+    finally:
+        await _stop(scheduler_task)
+
+    report = format_report(results)
+    assert "invalid_post_url:permalink;shape=relative_post_path" in report
+    assert error.fingerprint == "invalid_post_url:permalink"
+    for secret in secrets:
+        assert secret not in report
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_insufficient_fixture_is_inconclusive_and_sends_nothing():
     source = _OfflineSource([_post("1a_1")], [])
     runner, send, scheduler_task = await _runner(source)
