@@ -11,6 +11,7 @@ from .author_block import AuthorBlockStorage
 from .db import LofterDB
 from .delivery import DeliveryQueue, DiscoveryResult
 from .errors import (
+    DWREvidenceError,
     DWRIdentityError,
     SourceChallengeError,
     SourceError,
@@ -396,6 +397,8 @@ def _error_health(error: BaseException) -> Health:
 
 
 def _safe_error(error: BaseException) -> str:
+    if isinstance(error, DWREvidenceError):
+        return f"DWR 证据冲突（{error.diagnostic}）"
     if isinstance(error, DWRIdentityError):
         return f"DWR 身份冲突（{error.diagnostic}）"
     if isinstance(error, SourceSchemaError):

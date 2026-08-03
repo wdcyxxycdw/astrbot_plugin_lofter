@@ -46,6 +46,27 @@ class SourceSchemaError(SourceError):
         super().__init__(f"内容源响应结构无效（{self.location}）", _safe=True)
 
 
+class DWREvidenceError(SourceSchemaError):
+    def __init__(self, reason: str, *fields: str) -> None:
+        self.location = "post.evidence"
+        safe_reason = _safe_dwr_evidence_reason(reason)
+        safe_fields = _safe_dwr_evidence_fields(fields)
+        if safe_reason == "evidence_conflict" or not safe_fields:
+            self.reason = "evidence_conflict"
+            self.fields = ()
+            self.fingerprint = "evidence_conflict:unknown"
+        else:
+            self.reason = safe_reason
+            self.fields = safe_fields
+            self.fingerprint = f"{safe_reason}:{'+'.join(safe_fields)}"
+        self.diagnostic = self.fingerprint
+        SourceError.__init__(
+            self,
+            f"DWR 帖子证据冲突（post.evidence；{self.fingerprint}）",
+            _safe=True,
+        )
+
+
 class DWRIdentityError(SourceSchemaError):
     def __init__(
         self,
@@ -151,6 +172,22 @@ def mark_limit_identity_complete(error: SourceLimitError) -> None:
 
 def limit_identity_complete(error: SourceLimitError) -> bool:
     return getattr(error, "identity_prefix_complete", False) is True
+
+
+def _safe_dwr_evidence_reason(value: str) -> str:
+    return value if value == "content_alias_conflict" else "evidence_conflict"
+
+
+def _safe_dwr_evidence_fields(values: Iterable[str]) -> tuple[str, ...]:
+    known = {
+        "dirContent",
+        "content",
+        "dirContent.content",
+        "dirContent.text",
+        "content.content",
+        "content.text",
+    }
+    return tuple(dict.fromkeys(value for value in values if value in known))
 
 
 def _safe_dwr_identity_reason(value: str) -> str:

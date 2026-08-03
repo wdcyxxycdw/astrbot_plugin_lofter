@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 from .dwr_engine import execute_dwr, validate_dwr_input
 from .errors import (
+    DWREvidenceError,
     DWRIdentityError,
     SourceChallengeError,
     SourceLimitError,
@@ -105,17 +106,20 @@ def _bounded_text(value: object, resource: str, limit: int) -> str:
     return validate_text_bytes(value, resource, limit)
 
 
-def _extract_summary(value: object) -> tuple[str, bool]:
+def _extract_summary(value: object, field: str) -> tuple[str, bool]:
     if isinstance(value, str):
         raw = _bounded_text(value, "content", MAX_CONTENT_BYTES)
         return _strip_html(raw).strip(), True
     if isinstance(value, dict):
-        return _summary_alias(value)
+        return _summary_alias(value, field)
     return "", False
 
 
-def _summary_alias(value: dict[object, object]) -> tuple[str, bool]:
+def _summary_alias(
+    value: dict[object, object], field: str
+) -> tuple[str, bool]:
     aliases: list[str] = []
+    fields: list[str] = []
     for key in ("content", "text"):
         if key not in value or value[key] is None:
             continue
@@ -124,14 +128,17 @@ def _summary_alias(value: dict[object, object]) -> tuple[str, bool]:
             raise SourceSchemaError("content")
         text = _bounded_text(raw, "content", MAX_CONTENT_BYTES)
         aliases.append(_strip_html(text).strip())
-    return _consistent_summary_aliases(aliases)
+        fields.append(f"{field}.{key}")
+    return _consistent_summary_aliases(aliases, fields)
 
 
-def _consistent_summary_aliases(aliases: list[str]) -> tuple[str, bool]:
+def _consistent_summary_aliases(
+    aliases: list[str], fields: list[str]
+) -> tuple[str, bool]:
     if not aliases:
         return "", False
     if any(value != aliases[0] for value in aliases[1:]):
-        raise SourceSchemaError("post.evidence")
+        raise DWREvidenceError("content_alias_conflict", *fields)
     return aliases[0], True
 
 
@@ -422,13 +429,16 @@ def _string_field(
 
 
 def _content_field(post: dict[str, object]) -> tuple[str, bool]:
-    aliases = [
-        _extract_summary(post[key])
-        for key in ("dirContent", "content")
-        if key in post and isinstance(post[key], (str, dict))
-    ]
-    known = [value for value, complete in aliases if complete]
-    summary, complete = _consistent_summary_aliases(known)
+    aliases: list[str] = []
+    fields: list[str] = []
+    for key in ("dirContent", "content"):
+        if key not in post or not isinstance(post[key], (str, dict)):
+            continue
+        value, complete = _extract_summary(post[key], key)
+        if complete:
+            aliases.append(value)
+            fields.append(key)
+    summary, complete = _consistent_summary_aliases(aliases, fields)
     if not complete:
         return "", False
     return summary[:300] + ("…" if len(summary) > 300 else ""), True
