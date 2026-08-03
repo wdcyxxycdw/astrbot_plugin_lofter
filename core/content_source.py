@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from .client import LofterClient
 from .dwr_parser import parse_dwr_response_result
 from .errors import (
     IDENTITY_SCHEMA_LOCATIONS,
+    SourceBusinessError,
+    SourceChallengeError,
     SourceClosingError,
     SourceError,
+    SourceHTTPError,
     SourceLimitError,
     SourcePartialError,
+    SourceRetryExhaustedError,
     SourceSchemaError,
+    SourceTimeoutError,
     attach_source_evidence,
     limit_identity_complete,
 )
@@ -31,6 +36,14 @@ from .source_limits import MAX_ITEMS, MAX_URL_BYTES, validate_text_bytes
 from .source_scan import ContentSource, SourcePage, collect_pages
 
 _DNS_LABEL = re.compile(r"^(?!-)[A-Za-z0-9-]{1,63}(?<!-)$")
+
+
+@dataclass(frozen=True)
+class MobileTagDiagnostic:
+    page: SourcePage | None
+    evidence_items: tuple[Post, ...]
+    fallback_reason: str | None
+    error: SourceError | None
 
 
 class DefaultContentSource:
@@ -143,6 +156,14 @@ class DefaultContentSource:
             evidence = _error_evidence(exc)
         return primary, evidence
 
+    async def diagnose_mobile_tag(
+        self, tag: str, limit: int, sort: str = "new"
+    ) -> MobileTagDiagnostic:
+        _validate_limit(limit)
+        if sort != "new":
+            raise SourceSchemaError("sort")
+        return await self._diagnose_mobile_tag(tag, None, sort)
+
     async def list_tag(
         self, tag: str, cursor: str | None, limit: int, sort: str
     ) -> SourcePage:
@@ -152,15 +173,17 @@ class DefaultContentSource:
         source, value = _decode_cursor(cursor, "mobile_tag", {"mobile_tag", "dwr"})
         if source == "dwr":
             return await self._dwr_page(tag, value, limit, restarted=False)
-        primary: SourcePage | None = None
-        evidence: tuple[Post, ...] = ()
         if cursor is None:
-            primary, evidence = await self._mobile_tag_primary(tag, value)
-        valid_primary = (
-            primary is not None and _valid_mobile_tag_primary(primary, sort)
-        )
-        if valid_primary:
-            return primary
+            diagnostic = await self._diagnose_mobile_tag(tag, value, sort)
+            primary = diagnostic.page
+            evidence = diagnostic.evidence_items
+            fallback_reason = diagnostic.fallback_reason
+            if fallback_reason is None and primary is not None:
+                return primary
+        else:
+            primary = None
+            evidence = ()
+            fallback_reason = "mobile_cursor_restart"
         fallback_primary = (
             primary if primary is not None and not primary.complete else None
         )
@@ -171,30 +194,47 @@ class DefaultContentSource:
         except SourceClosingError:
             raise
         except SourceLimitError as exc:
+            _set_mobile_fallback_reason(exc, fallback_reason)
             attach_source_evidence(exc, evidence)
             if not limit_identity_complete(exc):
                 raise
             if fallback_primary is not None:
-                return _with_evidence(fallback_primary, _error_evidence(exc))
+                return _tag_fallback_page(
+                    _with_evidence(fallback_primary, _error_evidence(exc)),
+                    fallback_reason,
+                )
             raise
         except SourceSchemaError as exc:
+            _set_mobile_fallback_reason(exc, fallback_reason)
             attach_source_evidence(exc, evidence)
             _raise_identity_error(exc)
             if fallback_primary is not None:
-                return _with_evidence(fallback_primary, _error_evidence(exc))
+                return _tag_fallback_page(
+                    _with_evidence(fallback_primary, _error_evidence(exc)),
+                    fallback_reason,
+                )
             raise
         except SourceError as exc:
+            _set_mobile_fallback_reason(exc, fallback_reason)
             attach_source_evidence(exc, evidence)
             if fallback_primary is not None:
-                return _with_evidence(fallback_primary, _error_evidence(exc))
+                return _tag_fallback_page(
+                    _with_evidence(fallback_primary, _error_evidence(exc)),
+                    fallback_reason,
+                )
             raise
-        return _finish_tag_fallback(fallback_primary, fallback, evidence, cursor)
+        try:
+            result = _finish_tag_fallback(
+                fallback_primary, fallback, evidence, cursor
+            )
+        except SourceError as exc:
+            _set_mobile_fallback_reason(exc, fallback_reason)
+            raise
+        return _tag_fallback_page(result, fallback_reason)
 
-    async def _mobile_tag_primary(
-        self, tag: str, cursor: str | None
-    ) -> tuple[SourcePage | None, tuple[Post, ...]]:
-        primary: SourcePage | None = None
-        evidence: tuple[Post, ...] = ()
+    async def _diagnose_mobile_tag(
+        self, tag: str, cursor: str | None, sort: str
+    ) -> MobileTagDiagnostic:
         try:
             page = await self._mobile.list_tag(tag, cursor)
             evidence = _mobile_identity_records(page)
@@ -204,13 +244,33 @@ class DefaultContentSource:
         except SourceLimitError as exc:
             if not limit_identity_complete(exc):
                 raise
-            evidence = _error_evidence(exc)
+            return MobileTagDiagnostic(
+                None,
+                _error_evidence(exc),
+                _mobile_error_reason(exc),
+                exc,
+            )
         except SourceSchemaError as exc:
-            evidence = _error_evidence(exc)
             _raise_identity_error(exc)
+            return MobileTagDiagnostic(
+                None,
+                _error_evidence(exc),
+                _mobile_error_reason(exc),
+                exc,
+            )
         except SourceError as exc:
-            evidence = _error_evidence(exc)
-        return primary, evidence
+            return MobileTagDiagnostic(
+                None,
+                _error_evidence(exc),
+                _mobile_error_reason(exc),
+                exc,
+            )
+        return MobileTagDiagnostic(
+            primary,
+            evidence,
+            _mobile_tag_fallback_reason(primary, sort),
+            None,
+        )
 
     async def collect_tag(self, tag: str, limit: int, sort: str = "new") -> SourcePage:
         return await collect_pages(
@@ -342,7 +402,6 @@ class DefaultContentSource:
             mapped_count=result.mapped_count,
             dropped_count=result.dropped_count,
             complete=result.complete,
-            diagnostics=("fallback_dwr",),
             restarted=restarted,
             evidence_items=result.evidence_items,
         )
@@ -410,20 +469,62 @@ async def _complete_html_blog_posts(
         raise
 
 
-def _valid_mobile_tag_primary(page: SourcePage, sort: str) -> bool:
-    if not page.complete or page.sort != sort:
-        return False
+def _mobile_tag_fallback_reason(
+    page: SourcePage, sort: str
+) -> str | None:
+    if not page.complete:
+        return "mobile_incomplete"
+    if page.sort != sort:
+        return "mobile_sort_mismatch"
     if any(
         not post.has_fields({"publish_time"}) or not post.publish_time
         for post in page.items
     ):
-        return False
+        return "mobile_publish_time_missing"
     times = [parse_publish_time(post.publish_time) for post in page.items]
     if any(value is None for value in times):
-        return False
-    return all(
-        current <= previous
+        return "mobile_publish_time_invalid"
+    if any(
+        current > previous
         for previous, current in zip(times, times[1:])
+    ):
+        return "mobile_order_regressed"
+    return None
+
+
+def _mobile_error_reason(error: SourceError) -> str:
+    if isinstance(error, SourceChallengeError):
+        return "mobile_challenge"
+    if isinstance(error, SourceHTTPError):
+        return "mobile_http"
+    if isinstance(error, SourceTimeoutError):
+        return "mobile_timeout"
+    if isinstance(error, SourceRetryExhaustedError):
+        return "mobile_retry_exhausted"
+    if isinstance(error, SourceBusinessError):
+        return "mobile_business"
+    if isinstance(error, SourceSchemaError):
+        return "mobile_schema"
+    if isinstance(error, SourcePartialError):
+        return "mobile_partial"
+    if isinstance(error, SourceLimitError):
+        return "mobile_limit"
+    return "mobile_source_error"
+
+
+def _set_mobile_fallback_reason(
+    error: SourceError, reason: str | None
+) -> None:
+    error.mobile_fallback_reason = reason or "mobile_source_error"
+
+
+def _tag_fallback_page(
+    page: SourcePage, reason: str | None
+) -> SourcePage:
+    diagnostic = f"mobile_fallback:{reason or 'mobile_source_error'}"
+    return replace(
+        page,
+        diagnostics=(*page.diagnostics, "fallback_dwr", diagnostic),
     )
 
 

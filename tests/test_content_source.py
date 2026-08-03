@@ -7,15 +7,21 @@ import core.content_source as source_module
 from core.content_source import DefaultContentSource
 from core.dwr_parser import DWRParseResult
 from core.errors import (
+    SourceBusinessError,
+    SourceChallengeError,
     SourceClosingError,
     SourceHTTPError,
+    SourceLimitError,
     SourcePartialError,
+    SourceRetryExhaustedError,
     SourceSchemaError,
+    SourceTimeoutError,
     attach_source_evidence,
+    mark_limit_identity_complete,
 )
 from core.mobile_parser import MobilePage
 from core.parser import Post
-from core.source_scan import collect_pages
+from core.source_scan import ContentSource, collect_pages
 
 
 def make_post(post_id, when="2026-01-01 00:00"):
@@ -34,6 +40,7 @@ def mobile_page(
     cursor=None,
     exhausted=True,
     source="mobile_tag",
+    sort="new",
     dropped=0,
     complete=True,
     evidence=(),
@@ -44,7 +51,7 @@ def mobile_page(
         source=source,
         next_cursor=cursor,
         exhausted=exhausted,
-        sort="new",
+        sort=sort,
         mapped_count=len(items),
         dropped_count=dropped,
         complete=complete,
@@ -154,6 +161,10 @@ async def test_tag_primary_first_page_failure_switches_to_dwr_start(monkeypatch)
     assert result.source == "dwr"
     assert result.restarted is False
     assert result.items == [expected]
+    assert result.diagnostics == (
+        "fallback_dwr",
+        "mobile_fallback:mobile_schema",
+    )
     client.search_tag.assert_awaited_once_with("demo", 0, 20)
 
 
@@ -177,6 +188,135 @@ async def test_ordered_terminal_mobile_tag_page_is_used_directly():
 
 
 @pytest.mark.asyncio
+async def test_mobile_tag_diagnostic_accepts_eligible_page_without_dwr():
+    client = FakeClient()
+    source = DefaultContentSource(client)
+    posts = [
+        make_post("new", "2026-01-09 00:00:00"),
+        make_post("old", "2026-01-07 00:00:00"),
+    ]
+    source._mobile = SimpleNamespace(
+        list_tag=AsyncMock(return_value=mobile_page(posts))
+    )
+
+    result = await source.diagnose_mobile_tag("demo", 20)
+
+    assert result.page is not None
+    assert result.page.items == posts
+    assert result.evidence_items == tuple(posts)
+    assert result.fallback_reason is None
+    assert result.error is None
+    client.search_tag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("page", "reason"),
+    [
+        (mobile_page([], complete=False), "mobile_incomplete"),
+        (mobile_page([], sort="hot"), "mobile_sort_mismatch"),
+        (
+            mobile_page([make_post("missing")]),
+            "mobile_publish_time_invalid",
+        ),
+        (
+            mobile_page([
+                make_post("old", "2026-01-07 00:00:00"),
+                make_post("new", "2026-01-09 00:00:00"),
+            ]),
+            "mobile_order_regressed",
+        ),
+    ],
+)
+async def test_mobile_tag_diagnostic_reports_page_rejection(page, reason):
+    client = FakeClient()
+    source = DefaultContentSource(client)
+    source._mobile = SimpleNamespace(list_tag=AsyncMock(return_value=page))
+
+    result = await source.diagnose_mobile_tag("demo", 20)
+
+    assert result.page is not None
+    assert result.fallback_reason == reason
+    assert result.error is None
+    client.search_tag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mobile_tag_diagnostic_reports_missing_publish_time():
+    client = FakeClient()
+    source = DefaultContentSource(client)
+    post = make_post("missing", "2026-01-09 00:00:00")
+    post.completeness = post.completeness - {"publish_time"}
+    source._mobile = SimpleNamespace(
+        list_tag=AsyncMock(return_value=mobile_page([post]))
+    )
+
+    result = await source.diagnose_mobile_tag("demo", 20)
+
+    assert result.fallback_reason == "mobile_publish_time_missing"
+    client.search_tag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (SourceHTTPError(503), "mobile_http"),
+        (SourceTimeoutError(), "mobile_timeout"),
+        (SourceRetryExhaustedError(3), "mobile_retry_exhausted"),
+        (SourceChallengeError(), "mobile_challenge"),
+        (SourceBusinessError(500), "mobile_business"),
+        (SourceSchemaError("response"), "mobile_schema"),
+        (SourcePartialError(0, 1), "mobile_partial"),
+    ],
+)
+async def test_mobile_tag_diagnostic_classifies_fallback_errors(error, reason):
+    client = FakeClient()
+    source = DefaultContentSource(client)
+    source._mobile = SimpleNamespace(list_tag=AsyncMock(side_effect=error))
+
+    result = await source.diagnose_mobile_tag("demo", 20)
+
+    assert result.page is None
+    assert result.fallback_reason == reason
+    assert result.error is error
+    client.search_tag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mobile_tag_diagnostic_classifies_safe_limit_error():
+    client = FakeClient()
+    source = DefaultContentSource(client)
+    error = SourceLimitError("items", 100)
+    mark_limit_identity_complete(error)
+    source._mobile = SimpleNamespace(list_tag=AsyncMock(side_effect=error))
+
+    result = await source.diagnose_mobile_tag("demo", 20)
+
+    assert result.fallback_reason == "mobile_limit"
+    assert result.error is error
+    client.search_tag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mobile_tag_diagnostic_propagates_identity_schema_error():
+    client = FakeClient()
+    source = DefaultContentSource(client)
+    error = SourceSchemaError("post.id")
+    source._mobile = SimpleNamespace(list_tag=AsyncMock(side_effect=error))
+
+    with pytest.raises(SourceSchemaError) as exc_info:
+        await source.diagnose_mobile_tag("demo", 20)
+
+    assert exc_info.value is error
+    client.search_tag.assert_not_awaited()
+
+
+def test_content_source_protocol_keeps_diagnostic_concrete():
+    assert "diagnose_mobile_tag" not in ContentSource.__dict__
+
+
+@pytest.mark.asyncio
 async def test_mobile_tag_page_with_unknown_publish_time_uses_dwr(monkeypatch):
     client = FakeClient()
     client.search_tag.return_value = "dwr"
@@ -197,6 +337,10 @@ async def test_mobile_tag_page_with_unknown_publish_time_uses_dwr(monkeypatch):
 
     assert result.items == [fallback]
     assert result.evidence_items == (primary,)
+    assert result.diagnostics == (
+        "fallback_dwr",
+        "mobile_fallback:mobile_publish_time_missing",
+    )
     client.search_tag.assert_awaited_once_with("demo", 0, 20)
 
 
@@ -219,6 +363,10 @@ async def test_legacy_mobile_cursor_restarts_dwr_from_zero(monkeypatch):
 
     assert result.items == [expected]
     assert result.restarted is True
+    assert result.diagnostics == (
+        "fallback_dwr",
+        "mobile_fallback:mobile_cursor_restart",
+    )
     source._mobile.list_tag.assert_not_awaited()
     client.search_tag.assert_awaited_once_with("demo", 0, 20)
 
@@ -238,6 +386,68 @@ async def test_mobile_list_identity_error_propagates_without_fallback():
 
     assert exc_info.value.location == "postData.postCount.blogId"
     client.search_tag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_automatic_dwr_failure_keeps_type_and_mobile_reason(monkeypatch):
+    client = FakeClient()
+    client.search_tag.return_value = "dwr"
+    source = DefaultContentSource(client)
+    source._mobile = SimpleNamespace(
+        list_tag=AsyncMock(side_effect=SourceTimeoutError())
+    )
+    error = SourceSchemaError("dwr.items")
+    monkeypatch.setattr(
+        source_module,
+        "parse_dwr_response_result",
+        AsyncMock(side_effect=error),
+    )
+
+    with pytest.raises(SourceSchemaError) as exc_info:
+        await source.list_tag("demo", None, 20, "new")
+
+    assert exc_info.value is error
+    assert error.mobile_fallback_reason == "mobile_timeout"
+
+
+@pytest.mark.asyncio
+async def test_explicit_dwr_cursor_has_no_mobile_fallback_diagnostic(monkeypatch):
+    client = FakeClient()
+    client.search_tag.return_value = "dwr"
+    source = DefaultContentSource(client)
+    source._mobile = SimpleNamespace(list_tag=AsyncMock())
+    expected = make_post("dwr", "2026-01-09 00:00:00")
+    monkeypatch.setattr(
+        source_module,
+        "parse_dwr_response_result",
+        AsyncMock(return_value=DWRParseResult([expected], 1, 0, False)),
+    )
+
+    result = await source.list_tag("demo", "v1:dwr:0", 20, "new")
+
+    assert result.items == [expected]
+    assert result.diagnostics == ()
+    source._mobile.list_tag.assert_not_awaited()
+    assert not hasattr(result, "mobile_fallback_reason")
+
+
+@pytest.mark.asyncio
+async def test_explicit_dwr_failure_has_no_mobile_fallback_reason(monkeypatch):
+    client = FakeClient()
+    client.search_tag.return_value = "dwr"
+    source = DefaultContentSource(client)
+    error = SourceSchemaError("dwr.items")
+    monkeypatch.setattr(
+        source_module,
+        "parse_dwr_response_result",
+        AsyncMock(side_effect=error),
+    )
+
+    with pytest.raises(SourceSchemaError) as exc_info:
+        await source.list_tag("demo", "v1:dwr:0", 20, "new")
+
+    assert exc_info.value is error
+    assert not hasattr(error, "mobile_fallback_reason")
 
 
 @pytest.mark.asyncio
@@ -291,6 +501,8 @@ async def test_nonterminal_tag_page_restarts_dwr_from_zero(monkeypatch):
     assert result.items == [fallback]
     assert [item.post_id for item in result.evidence_items] == ["primary"]
     assert result.source == "dwr"
+    assert result.restarted is True
+    assert "mobile_fallback:mobile_cursor_restart" in result.diagnostics
     source._mobile.list_tag.assert_awaited_once_with("demo", None)
     assert client.search_tag.await_args_list == [
         call("demo", 0, 20),
