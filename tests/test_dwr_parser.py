@@ -4,6 +4,7 @@ import pytest
 
 from core.dwr_parser import _map_post, parse_dwr_response, parse_dwr_response_result
 from core.errors import (
+    DWREvidenceError,
     DWRIdentityError,
     SourceChallengeError,
     SourceLimitError,
@@ -354,6 +355,62 @@ def test_dwr_identity_shape_is_allowlisted():
     assert error.diagnostic == "invalid_post_url:permalink;shape=unknown"
     assert "private-upstream-shape" not in str(error)
     assert "private-upstream-shape" not in error.diagnostic
+
+
+@pytest.mark.parametrize(
+    ("fields", "diagnostic"),
+    [
+        (
+            {"dirContent": "private-dir", "content": "private-content"},
+            "content_alias_conflict:dirContent+content",
+        ),
+        (
+            {
+                "content": {
+                    "content": "private-inner-content",
+                    "text": "private-inner-text",
+                }
+            },
+            "content_alias_conflict:content.content+content.text",
+        ),
+    ],
+)
+def test_dwr_content_alias_conflict_has_payload_free_diagnostic(
+    fields, diagnostic
+):
+    with pytest.raises(DWREvidenceError) as exc_info:
+        _map_post({
+            "post": {
+                "postUrl": "https://private-owner.lofter.com/post/1a_2b",
+                "blogInfo": {"blogName": "private-owner"},
+                **fields,
+            }
+        })
+
+    error = exc_info.value
+    assert error.location == "post.evidence"
+    assert error.reason == "content_alias_conflict"
+    assert error.diagnostic == diagnostic
+    for secret in (
+        "private-dir",
+        "private-content",
+        "private-inner-content",
+        "private-inner-text",
+        "private-owner",
+        "1a_2b",
+    ):
+        assert secret not in str(error)
+        assert secret not in error.diagnostic
+
+
+def test_dwr_evidence_diagnostic_is_allowlisted():
+    error = DWREvidenceError("private-reason", "private-field")
+
+    assert error.reason == "evidence_conflict"
+    assert error.fields == ()
+    assert error.diagnostic == "evidence_conflict:unknown"
+    assert "private-reason" not in str(error)
+    assert "private-field" not in str(error)
 
 
 @pytest.mark.parametrize(

@@ -7,7 +7,11 @@ import pytest
 
 import core.scheduler as scheduler_module
 from core.e2e_test import E2ETestRunner, format_report
-from core.errors import DWRIdentityError, SourceChallengeError
+from core.errors import (
+    DWREvidenceError,
+    DWRIdentityError,
+    SourceChallengeError,
+)
 from core.parser import Post
 from core.source_scan import SourcePage
 
@@ -173,6 +177,34 @@ async def test_forced_dwr_failure_is_independent_and_payload_free():
     assert "post_id_conflict:postId+postUrl" in report
     assert secret_url not in report
     assert "private-owner" not in report
+
+
+@pytest.mark.asyncio
+async def test_dwr_evidence_report_identifies_fields_without_payload():
+    secrets = (
+        "private-dir-content",
+        "private-content",
+        "https://private-owner.lofter.com/post/1a_2b",
+        "private-owner",
+        "1a_2b",
+    )
+    error = DWREvidenceError(
+        "content_alias_conflict", "dirContent", "content"
+    )
+    source = _OfflineSource([_post("1a_1")], [], dwr_error=error)
+    runner, send, scheduler_task = await _runner(source)
+
+    try:
+        results = await runner.run_all("qq:real-session")
+    finally:
+        await _stop(scheduler_task)
+
+    report = format_report(results)
+    assert "DWR 证据冲突（content_alias_conflict:dirContent+content）" in report
+    assert results[2].health == "degraded"
+    for secret in secrets:
+        assert secret not in report
+    send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
