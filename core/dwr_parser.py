@@ -8,6 +8,7 @@ from typing import Optional
 
 from .dwr_engine import execute_dwr, validate_dwr_input
 from .errors import (
+    DWRIdentityError,
     SourceChallengeError,
     SourceLimitError,
     SourceSchemaError,
@@ -203,54 +204,85 @@ def _map_post(item: object) -> Optional[Post]:
 
 def _url_identities(
     post: dict[str, object],
-) -> list[tuple[str, str, str]]:
-    identities: list[tuple[str, str, str]] = []
-    for key in ("blogPageUrl", "postUrl", "permalink"):
-        if key not in post or post[key] is None:
-            continue
-        value = post[key]
-        if not isinstance(value, str):
-            if key == "blogPageUrl":
-                continue
-            raise SourceSchemaError("dwr.post.id")
-        try:
-            validate_text_bytes(value, "url", MAX_URL_BYTES)
-        except SourceSchemaError:
-            if key == "blogPageUrl":
-                continue
-            raise SourceSchemaError("dwr.post.id") from None
-        try:
-            identities.append(post_url_identity(value))
-        except ValueError:
-            if key == "blogPageUrl":
-                continue
-            raise SourceSchemaError("dwr.post.id") from None
-    return identities
+) -> list[tuple[str, str, str, str]]:
+    authoritative = [
+        identity
+        for key in ("postUrl", "permalink")
+        if (identity := _authoritative_url_identity(post, key)) is not None
+    ]
+    fallback = _fallback_url_identity(post)
+    return authoritative or ([fallback] if fallback is not None else [])
+
+
+def _authoritative_url_identity(
+    post: dict[str, object], key: str
+) -> tuple[str, str, str, str] | None:
+    if key not in post or post[key] is None:
+        return None
+    value = post[key]
+    if not isinstance(value, str):
+        raise DWRIdentityError("invalid_identity_type", key)
+    try:
+        validate_text_bytes(value, "url", MAX_URL_BYTES)
+    except SourceLimitError:
+        raise
+    except SourceSchemaError:
+        raise DWRIdentityError("invalid_post_url", key) from None
+    try:
+        url, post_id, owner = post_url_identity(value)
+    except ValueError:
+        raise DWRIdentityError("invalid_post_url", key) from None
+    return key, url, post_id, owner
+
+
+def _fallback_url_identity(
+    post: dict[str, object],
+) -> tuple[str, str, str, str] | None:
+    value = post.get("blogPageUrl")
+    if not isinstance(value, str):
+        return None
+    try:
+        validate_text_bytes(value, "url", MAX_URL_BYTES)
+    except SourceLimitError:
+        raise
+    except SourceSchemaError:
+        return None
+    try:
+        url, post_id, owner = post_url_identity(value)
+    except ValueError:
+        return None
+    return "blogPageUrl", url, post_id, owner
 
 
 def _validate_identity(
     post: dict[str, object],
-    identities: list[tuple[str, str, str]],
+    identities: list[tuple[str, str, str, str]],
 ) -> tuple[str, str]:
     blog = post.get("blogInfo")
     blog = blog if isinstance(blog, dict) else {}
-    post_id = identities[0][1]
-    try:
-        if any(identity[1] != post_id for identity in identities[1:]):
-            raise ValueError("conflicting post id")
-        blog_name = blog.get("blogName")
-        structured = blog_name if isinstance(blog_name, str) else ""
-        consistent_blog_owner(
-            *(identity[2] for identity in identities), structured
-        )
-        _validate_numeric_identity(post, blog, post_id)
-    except ValueError:
-        raise SourceSchemaError("dwr.post.id") from None
-    resolved = next(
-        (identity[0] for identity in identities if identity[2]),
-        identities[0][0],
+    fields = tuple(identity[0] for identity in identities)
+    post_id = identities[0][2]
+    if any(identity[2] != post_id for identity in identities[1:]):
+        raise DWRIdentityError("post_url_conflict", *fields)
+    blog_name = blog.get("blogName")
+    structured = blog_name if isinstance(blog_name, str) else ""
+    owner_fields = tuple(
+        identity[0] for identity in identities if identity[3]
     )
-    return resolved, post_id
+    try:
+        consistent_blog_owner(
+            *(identity[3] for identity in identities), structured
+        )
+    except ValueError:
+        if structured:
+            owner_fields = (*owner_fields, "blogInfo.blogName")
+        raise DWRIdentityError("owner_conflict", *owner_fields) from None
+    selected = next(
+        (identity for identity in identities if identity[3]),
+        identities[0],
+    )
+    _validate_numeric_identity(post, blog, post_id, selected[0])
+    return selected[1], post_id
 
 
 def _identity_witness(post: dict[str, object], url: str, post_id: str) -> Post:
@@ -273,18 +305,59 @@ def _identity_witness(post: dict[str, object], url: str, post_id: str) -> Post:
 
 
 def _validate_numeric_identity(
-    post: dict[str, object], blog: dict[str, object], post_id: str
+    post: dict[str, object],
+    blog: dict[str, object],
+    post_id: str,
+    url_field: str,
 ) -> None:
     post_blog_id = post.get("blogId")
     blog_info_id = blog.get("blogId")
+    blog_fields = tuple(
+        field
+        for field, value in (
+            ("blogId", post_blog_id),
+            ("blogInfo.blogId", blog_info_id),
+        )
+        if value is not None
+    )
+    for value, field in (
+        (post_blog_id, "blogId"),
+        (blog_info_id, "blogInfo.blogId"),
+    ):
+        if value is None:
+            continue
+        try:
+            decimal_post_id(value, 0)
+        except ValueError:
+            raise DWRIdentityError("invalid_identity_type", field) from None
     if post_blog_id is not None and blog_info_id is not None:
         if decimal_post_id(post_blog_id, 0) != decimal_post_id(blog_info_id, 0):
-            raise ValueError("conflicting blog id")
-    validate_mobile_identity_parts(
-        post_id,
-        blog_ids=(post_blog_id, blog_info_id),
-        post_ids=(post.get("id"), post.get("postId")),
-    )
+            raise DWRIdentityError("blog_id_conflict", *blog_fields)
+    try:
+        validate_mobile_identity_parts(post_id, blog_ids=(
+            post_blog_id, blog_info_id,
+        ))
+    except ValueError:
+        raise DWRIdentityError(
+            "blog_id_conflict", url_field, *blog_fields
+        ) from None
+    dwr_post_id = post.get("postId")
+    if dwr_post_id is None:
+        return
+    try:
+        decimal_post_id(0, dwr_post_id)
+    except ValueError:
+        raise DWRIdentityError(
+            "invalid_identity_type", "postId"
+        ) from None
+    try:
+        validate_mobile_identity_parts(
+            post_id, post_ids=(dwr_post_id,)
+        )
+    except ValueError:
+        raise DWRIdentityError(
+            "post_id_conflict", "postId", url_field
+        ) from None
 
 
 def _string_field(

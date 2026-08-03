@@ -1,19 +1,34 @@
 from __future__ import annotations
 
+import asyncio
+import os
+import tempfile
 import time
-import uuid
 from dataclasses import dataclass, field
 from typing import Literal
 
+from .author_block import AuthorBlockStorage
 from .db import LofterDB
+from .delivery import DeliveryQueue, DiscoveryResult
+from .errors import (
+    DWRIdentityError,
+    SourceChallengeError,
+    SourceError,
+    SourceHTTPError,
+    SourceRetryExhaustedError,
+    SourceSchemaError,
+    SourceTimeoutError,
+)
 from .parser import Post
-from .post_identity import is_canonical_post_url, post_url_identity
 from .scheduler import SendFunc, SubscriptionScheduler
+from .session_gate import SessionGateRegistry
 from .source_scan import ContentSource, SourcePage
 from .storage import SubscriptionStorage
 from .subscription_service import SubscriptionService
 from .e2e_steps_network import NetworkStepsMixin
 from .e2e_steps_flow import FlowStepsMixin
+
+Health = Literal["healthy", "degraded", "inconclusive"]
 
 
 @dataclass
@@ -23,159 +38,434 @@ class StepResult:
     duration_ms: int = 0
     details: list[str] = field(default_factory=list)
     error: str | None = None
+    health: Health = "healthy"
+    facts: dict[str, str | int | bool] = field(default_factory=dict)
+
+
+class _ControlledSource:
+    def __init__(self, live: ContentSource, tag: str) -> None:
+        self._live = live
+        self._tag = tag
+        self._post: Post | None = None
+
+    def use(self, post: Post) -> None:
+        self._post = post
+
+    async def get_post(self, url: str) -> Post:
+        return await self._live.get_post(url)
+
+    async def list_blog(
+        self, username: str, cursor: str | None, limit: int
+    ) -> SourcePage:
+        return await self._live.list_blog(username, cursor, limit)
+
+    async def list_tag(
+        self, tag: str, cursor: str | None, limit: int, sort: str
+    ) -> SourcePage:
+        if tag != self._tag or cursor is not None or sort != "new":
+            raise SourceSchemaError("response")
+        items = [self._post] if self._post is not None else []
+        return SourcePage(
+            items=items,
+            source="e2e_controlled",
+            next_cursor=None,
+            exhausted=True,
+            sort="new",
+            mapped_count=len(items),
+            dropped_count=0,
+            complete=True,
+        )
+
+
+class _ObservingDeliveryQueue(DeliveryQueue):
+    def __init__(self, db: LofterDB, gates: SessionGateRegistry) -> None:
+        super().__init__(db, gates)
+        self.persist_ready = asyncio.Event()
+        self.release_claim = asyncio.Event()
+        self.discovery_result: DiscoveryResult | None = None
+        self.persist_error: BaseException | None = None
+
+    async def persist_discovery(self, snapshot, batches):
+        try:
+            result = await super().persist_discovery(snapshot, batches)
+        except BaseException as exc:
+            self.persist_error = exc
+            self.persist_ready.set()
+            raise
+        self.discovery_result = result
+        self.persist_ready.set()
+        await self.release_claim.wait()
+        return result
+
+
+@dataclass
+class _E2ERuntime:
+    temporary: tempfile.TemporaryDirectory[str]
+    db: LofterDB
+    source: _ControlledSource
+    storage: SubscriptionStorage
+    subscriptions: SubscriptionService
+    queue: _ObservingDeliveryQueue
+    scheduler: SubscriptionScheduler
+    session_id: str = "__lofter_e2e_health__"
 
 
 class E2ETestRunner(NetworkStepsMixin, FlowStepsMixin):
     TEST_TAG = "摄影"
+    WAIT_SECONDS = 10
+    POLL_SECONDS = 70
 
     def __init__(
         self,
-        db: LofterDB,
         source: ContentSource,
-        storage: SubscriptionStorage,
-        subscriptions: SubscriptionService,
         scheduler: SubscriptionScheduler,
         send_push: SendFunc,
-    ):
-        suffix = uuid.uuid4().hex
-        self.TEST_SESSION = f"__lofter_e2e_test__:{suffix}"
-        self.PREVIEW_SESSION = f"__lofter_e2e_preview__:{suffix}"
-        self.TEST_CONFIG_KEY = f"__e2e_test_kv__:{suffix}"
-        self._db = db
+    ) -> None:
         self._source = source
-        self._storage = storage
-        self._subscriptions = subscriptions
-        self._scheduler = scheduler
+        self._production_scheduler = scheduler
         self._send_push = send_push
-        self._artifacts: dict = {}
-
-    async def _load_fixture(self) -> tuple[SourcePage, Post, str]:
-        page = self._artifacts.get("tag_page")
-        if page is None:
-            page = await self._source.list_tag(
-                self.TEST_TAG, None, 20, "new"
-            )
-            self._artifacts["tag_page"] = page
-            self._artifacts["tag_posts"] = page.items
-
-        for post in page.items:
-            if not post.url or not is_canonical_post_url(post.url):
-                continue
-            _, _, owner = post_url_identity(post.url)
-            if owner:
-                self._artifacts["fixture_post"] = post
-                self._artifacts["fixture_blog"] = owner
-                return page, post, owner
-        raise AssertionError("标签结果中没有可用的帖子和博主 fixture")
+        self._runtime: _E2ERuntime | None = None
+        self._real_session_id = ""
+        self._poll_task: asyncio.Task | None = None
+        self._bridge_task: asyncio.Task | None = None
+        self._send_entered = asyncio.Event()
+        self._release_send = asyncio.Event()
+        self._send_entries = 0
+        self._send_attempts = 0
+        self._send_result: bool | None = None
+        self._send_error: BaseException | None = None
+        self._artifacts: dict[str, object] = {}
+        self._cleanup_complete = False
 
     async def run_all(self, real_session_id: str) -> list[StepResult]:
+        self._real_session_id = real_session_id
         results: list[StepResult] = []
-
-        steps = [
-            self._step_01_config_rw,
-            self._step_02_dwr_engine,
-            self._step_03_http_get,
-            self._step_04_dwr_search,
-            self._step_05_dwr_parse,
-            self._step_06_blog_fetch,
-            self._step_07_blog_parse,
-            self._step_08_post_parse,
-            self._step_09_auto_parse,
-            self._step_10_filter,
-            self._step_11_format,
-            self._step_12_search_flow,
-            self._step_13_subscription_crud,
-            self._step_14_subtag_full,
-            self._step_15_subblog_full,
-        ]
         try:
-            for fn in steps:
-                results.append(await fn())
-
-            results.append(await self._step_16_subtagpreview(real_session_id))
-            results.append(await self._step_17_seen_sent())
-            results.append(await self._step_18_scheduler_state())
-            results.append(await self._step_19_manual_poll())
-            results.append(await self._step_20_push_blog(real_session_id))
+            for step in (
+                self._step_01_runtime,
+                self._step_02_normal_tag,
+                self._step_03_forced_dwr,
+                self._step_04_live_fixture,
+                self._step_05_warmup_pending,
+                self._step_06_delivery_acceptance,
+            ):
+                results.append(await step())
             return results
         finally:
             results.append(await self._cleanup())
 
+    async def _create_runtime(self) -> _E2ERuntime:
+        temporary = tempfile.TemporaryDirectory(prefix="lofter-e2e-")
+        db = LofterDB(os.path.join(temporary.name, "health.db"))
+        try:
+            await db.initialize()
+        except BaseException:
+            await db.close()
+            temporary.cleanup()
+            raise
+        gates = SessionGateRegistry()
+        source = _ControlledSource(self._source, self.TEST_TAG)
+        storage = SubscriptionStorage(db)
+        blocks = AuthorBlockStorage(db, gates)
+        subscriptions = SubscriptionService(db, source, gates)
+        queue = _ObservingDeliveryQueue(db, gates)
+        scheduler = SubscriptionScheduler(
+            storage,
+            source,
+            db,
+            self._send_bridge,
+            block_storage=blocks,
+            gates=gates,
+            subscription_service=subscriptions,
+            delivery_queue=queue,
+        )
+        return _E2ERuntime(
+            temporary, db, source, storage, subscriptions, queue, scheduler
+        )
+
+    async def _send_bridge(
+        self,
+        session_id: str,
+        post: Post,
+        header: str,
+        source_types: frozenset[str],
+    ) -> bool:
+        self._send_entries += 1
+        entry = self._send_entries
+        self._bridge_task = asyncio.current_task()
+        self._send_entered.set()
+        await self._release_send.wait()
+        if entry > 1:
+            return False
+        self._send_attempts += 1
+        try:
+            result = await self._send_push(
+                self._real_session_id,
+                post,
+                f"【Lofter E2E 测试】{header}",
+                source_types,
+            )
+        except BaseException as exc:
+            self._send_error = exc
+            raise
+        self._send_result = result is True
+        return result is True
+
+    async def _wait_event_or_poll(self, event: asyncio.Event) -> bool:
+        if self._poll_task is None:
+            return False
+        waiter = asyncio.create_task(event.wait())
+        try:
+            done, _ = await asyncio.wait(
+                (waiter, self._poll_task),
+                timeout=self.WAIT_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            return waiter in done and event.is_set()
+        finally:
+            if not waiter.done():
+                waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+
+    async def _delivery_row(self) -> tuple | None:
+        runtime = self._runtime
+        candidate = self._artifacts.get("candidate")
+        if runtime is None or not isinstance(candidate, Post):
+            return None
+        return await runtime.db.transaction(
+            lambda conn: conn.execute(
+                """
+                SELECT d.status,d.lease_token,d.attempts,COUNT(ds.delivery_id)
+                FROM deliveries d
+                LEFT JOIN delivery_sources ds ON ds.delivery_id=d.id
+                WHERE d.session_id=? AND d.post_id=?
+                GROUP BY d.id
+                """,
+                (runtime.session_id, candidate.post_id),
+            ).fetchone()
+        )
+
+    async def _candidate_seen(self) -> bool:
+        runtime = self._runtime
+        candidate = self._artifacts.get("candidate")
+        if runtime is None or not isinstance(candidate, Post):
+            return False
+        row = await runtime.db.transaction(
+            lambda conn: conn.execute(
+                """
+                SELECT 1 FROM seen_posts sp
+                JOIN subscriptions s ON s.id=sp.subscription_id
+                WHERE s.session_id=? AND s.type='tag' AND s.role='subscribe'
+                  AND sp.post_id=?
+                """,
+                (runtime.session_id, candidate.post_id),
+            ).fetchone()
+        )
+        return row is not None
+
     def _timed_start(self) -> float:
         return time.perf_counter()
 
-    def _timed_end(self, t0: float) -> int:
-        return int((time.perf_counter() - t0) * 1000)
+    def _timed_end(self, started: float) -> int:
+        return int((time.perf_counter() - started) * 1000)
 
-    def _pass(self, name: str, ms: int, details: list[str]) -> StepResult:
-        return StepResult(name=name, status="pass", duration_ms=ms, details=details)
+    def _pass(
+        self,
+        name: str,
+        ms: int,
+        details: list[str],
+        facts: dict[str, str | int | bool] | None = None,
+    ) -> StepResult:
+        return StepResult(
+            name=name,
+            status="pass",
+            duration_ms=ms,
+            details=details,
+            facts=facts or {},
+        )
 
-    def _fail(self, name: str, ms: int, e: Exception, details: list[str]) -> StepResult:
-        return StepResult(name=name, status="fail", duration_ms=ms, details=details, error=str(e))
+    def _fail(
+        self,
+        name: str,
+        ms: int,
+        error: BaseException,
+        details: list[str],
+        *,
+        health: Health | None = None,
+        facts: dict[str, str | int | bool] | None = None,
+    ) -> StepResult:
+        return StepResult(
+            name=name,
+            status="fail",
+            duration_ms=ms,
+            details=details,
+            error=_safe_error(error),
+            health=health or _error_health(error),
+            facts=facts or {},
+        )
 
     def _skip(self, name: str, reason: str) -> StepResult:
-        return StepResult(name=name, status="skip", details=[reason])
+        return StepResult(
+            name=name,
+            status="skip",
+            details=[reason],
+            health="inconclusive",
+        )
+
+    def _inconclusive(
+        self,
+        name: str,
+        ms: int,
+        details: list[str],
+        facts: dict[str, str | int | bool] | None = None,
+    ) -> StepResult:
+        return StepResult(
+            name=name,
+            status="fail",
+            duration_ms=ms,
+            details=details,
+            health="inconclusive",
+            facts=facts or {},
+        )
 
     async def _cleanup(self) -> StepResult:
-        name = "测试清理"
-        t0 = self._timed_start()
+        name = "临时资源清理"
+        started = self._timed_start()
         details: list[str] = []
+        runtime = self._runtime
         try:
-            removed = 0
-            for session_id in (self.TEST_SESSION, self.PREVIEW_SESSION):
-                subs = await self._storage.list_by_session(session_id)
-                for sub in subs:
-                    await self._storage.remove_by_id(sub.id)
-                removed += len(subs)
-                await self._db.clear_session(session_id)
-            details.append(f"删除 {removed} 条订阅")
-            details.append("测试 session 的 seen/delivery 已清理")
+            if runtime is None:
+                self._cleanup_complete = True
+                return self._pass(
+                    name,
+                    self._timed_end(started),
+                    ["未创建临时 SQLite"],
+                    {"temp_db_cleaned": True},
+                )
+            runtime.queue.release_claim.set()
+            self._release_send.set()
+            for task in (self._poll_task, self._bridge_task):
+                if task is not None and not task.done():
+                    task.cancel()
+            tasks = [
+                task
+                for task in (self._poll_task, self._bridge_task)
+                if task is not None
+            ]
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            path = runtime.temporary.name
+            await runtime.db.close()
+            runtime.temporary.cleanup()
+            if os.path.exists(path):
+                raise RuntimeError("temporary directory remains")
+            self._cleanup_complete = True
+            details.append("临时 SQLite 已关闭并删除")
+            details.append("生产数据库未参与测试写入")
+            return self._pass(
+                name,
+                self._timed_end(started),
+                details,
+                {"temp_db_cleaned": True},
+            )
+        except BaseException as exc:
+            return self._fail(
+                name,
+                self._timed_end(started),
+                exc,
+                details,
+                health="degraded",
+                facts={"temp_db_cleaned": False},
+            )
 
-            await self._db.delete_config(self.TEST_CONFIG_KEY)
-            details.append(f"配置键 {self.TEST_CONFIG_KEY} 已删除")
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
+
+_TEMPORARY_ERRORS = (
+    asyncio.TimeoutError,
+    OSError,
+    SourceChallengeError,
+    SourceHTTPError,
+    SourceRetryExhaustedError,
+    SourceTimeoutError,
+)
+
+
+def _error_health(error: BaseException) -> Health:
+    if isinstance(error, _TEMPORARY_ERRORS):
+        return "inconclusive"
+    return "degraded"
+
+
+def _safe_error(error: BaseException) -> str:
+    if isinstance(error, DWRIdentityError):
+        return f"DWR 身份冲突（{error.fingerprint}）"
+    if isinstance(error, SourceSchemaError):
+        return f"内容源响应结构无效（{error.location}）"
+    if isinstance(error, SourceError):
+        return str(error)
+    if isinstance(error, asyncio.TimeoutError):
+        return "操作超时"
+    return type(error).__name__
 
 
 _STATUS_ICON = {"pass": "✓", "fail": "✗", "skip": "○"}
+_HEALTH_LABEL = {
+    "healthy": "HEALTHY",
+    "degraded": "DEGRADED",
+    "inconclusive": "INCONCLUSIVE",
+}
+
+
+def _overall_health(results: list[StepResult]) -> Health:
+    if any(result.health == "degraded" for result in results):
+        return "degraded"
+    if any(result.health == "inconclusive" for result in results):
+        return "inconclusive"
+    return "healthy"
+
+
+def _fact(results: list[StepResult], key: str, default):
+    for result in results:
+        if key in result.facts:
+            return result.facts[key]
+    return default
 
 
 def format_report(results: list[StepResult]) -> str:
-    lines = ["━━━ Lofter 端到端测试 ━━━", ""]
+    health = _overall_health(results)
+    source = _fact(results, "normal_source", "未验证")
+    dwr = "已真实验证" if _fact(results, "dwr_verified", False) else "未验证"
+    attempts = _fact(results, "send_attempts", 0)
+    accepted = _fact(results, "adapter_accepted", "unknown")
+    cleaned = _fact(results, "temp_db_cleaned", False)
+    accepted_label = {True: "是", False: "否", "unknown": "未知"}.get(
+        accepted, "未知"
+    )
 
+    lines = [
+        "━━━ Lofter 实时健康检查 ━━━",
+        f"总体状态：{_HEALTH_LABEL[health]}",
+        f"正常入口：{source}",
+        f"DWR：{dwr}",
+        f"真实发送：尝试 {attempts}，adapter accepted={accepted_label}",
+        f"临时 SQLite：{'已清理' if cleaned else '未确认清理'}",
+        "",
+    ]
     total = len(results)
-    for i, r in enumerate(results, 1):
-        icon = _STATUS_ICON.get(r.status, "?")
-        if r.status == "skip":
-            lines.append(f"[{i}/{total}] {icon} {r.name}")
-        else:
-            lines.append(f"[{i}/{total}] {icon} {r.name} ({r.duration_ms} ms)")
-        for d in r.details:
-            lines.append(f"  · {d}")
-        if r.error:
-            lines.append(f"  · 错误：{r.error}")
+    for index, result in enumerate(results, 1):
+        icon = _STATUS_ICON.get(result.status, "?")
+        suffix = "" if result.status == "skip" else f" ({result.duration_ms} ms)"
+        lines.append(f"[{index}/{total}] {icon} {result.name}{suffix}")
+        for detail in result.details:
+            lines.append(f"  · {detail}")
+        if result.error:
+            lines.append(f"  · 错误：{result.error}")
         lines.append("")
 
-    passed = sum(1 for r in results if r.status == "pass")
-    failed = sum(1 for r in results if r.status == "fail")
-    skipped = sum(1 for r in results if r.status == "skip")
-    total_ms = sum(r.duration_ms for r in results)
-
-    skip_refs = []
-    for i, r in enumerate(results, 1):
-        if r.status == "skip" and r.details:
-            skip_refs.append(f"[{i}] {r.details[0]}")
-
+    passed = sum(result.status == "pass" for result in results)
+    failed = sum(result.status == "fail" for result in results)
+    skipped = sum(result.status == "skip" for result in results)
+    total_ms = sum(result.duration_ms for result in results)
     lines.append("━━━ 结果 ━━━")
-    skip_note = f"，跳过 {skipped}（{'；'.join(skip_refs)}）" if skipped else ""
-    lines.append(f"通过 {passed}，失败 {failed}{skip_note}")
+    lines.append(f"通过 {passed}，失败 {failed}，跳过 {skipped}")
     lines.append(f"总耗时 {total_ms / 1000:.1f}s")
-
-    cleanup = next((r for r in results if r.name == "测试清理"), None)
-    if cleanup and cleanup.status == "pass":
-        lines.append("测试 session 清理完成")
-    else:
-        lines.append("注意：测试 session 清理可能未完成")
-
     return "\n".join(lines)

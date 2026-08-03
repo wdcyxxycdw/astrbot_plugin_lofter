@@ -4,7 +4,7 @@
 
 AstrBot 插件，功能：自动解析 Lofter 帖子链接、订阅标签/博主并定时推送、搜索标签内容、统计标签表达式，以及按会话屏蔽作者。
 
-当前插件版本为 v2.0.1，数据库 Schema 为 v5。
+当前插件版本为 v2.0.2，数据库 Schema 为 v5。
 
 ## 文件结构
 
@@ -263,6 +263,6 @@ Claim transaction：
 
 ## E2E 测试边界
 
-`/lofter test` 每次运行使用独立的主测试 session 和 preview session，执行真实网络与真实发送的 20 步集成测试；报告另列清理结果，并在结束时强制清理本次 session。该命令仅管理员可执行，不暴露给 LLM tool。
+`/lofter test` 是实时健康检查：调用当下真实 LOFTER 内容源，并在临时 SQLite 中复用生产 `SubscriptionService`、`DeliveryQueue` 和 `SubscriptionScheduler`，验证正常标签入口、独立 DWR 回退、单帖/博主页以及 `pending → sending → accepted → subscription seen` 状态链。fixture 足够时最多向命令所在会话发送一条带“Lofter E2E 测试”标识的真实消息；结束时清理全部临时资源，不写生产订阅、seen、delivery 或 config。报告区分 `HEALTHY`、`DEGRADED` 和 `INCONCLUSIVE`。该命令仅管理员可执行，不暴露给 LLM tool。
 
 普通 pytest 默认通过 marker 和 socket guard 隔离真实网络；只有显式 live 配置才允许真实测试。

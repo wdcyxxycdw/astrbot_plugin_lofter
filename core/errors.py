@@ -46,6 +46,26 @@ class SourceSchemaError(SourceError):
         super().__init__(f"内容源响应结构无效（{self.location}）", _safe=True)
 
 
+class DWRIdentityError(SourceSchemaError):
+    def __init__(self, reason: str, *fields: str) -> None:
+        self.location = "dwr.post.id"
+        safe_reason = _safe_dwr_identity_reason(reason)
+        safe_fields = _safe_dwr_identity_fields(fields)
+        if safe_reason == "identity_conflict" or not safe_fields:
+            self.reason = "identity_conflict"
+            self.fields = ()
+            self.fingerprint = "identity_conflict:unknown"
+        else:
+            self.reason = safe_reason
+            self.fields = safe_fields
+            self.fingerprint = f"{safe_reason}:{'+'.join(safe_fields)}"
+        SourceError.__init__(
+            self,
+            f"DWR 帖子身份无效（dwr.post.id；{self.fingerprint}）",
+            _safe=True,
+        )
+
+
 class SourceLimitError(SourceError):
     def __init__(
         self, resource: str = "resource", limit: int | None = None, message: str | None = None
@@ -118,6 +138,31 @@ def mark_limit_identity_complete(error: SourceLimitError) -> None:
 
 def limit_identity_complete(error: SourceLimitError) -> bool:
     return getattr(error, "identity_prefix_complete", False) is True
+
+
+def _safe_dwr_identity_reason(value: str) -> str:
+    known = {
+        "invalid_identity_type",
+        "invalid_post_url",
+        "post_url_conflict",
+        "owner_conflict",
+        "blog_id_conflict",
+        "post_id_conflict",
+    }
+    return value if value in known else "identity_conflict"
+
+
+def _safe_dwr_identity_fields(values: Iterable[str]) -> tuple[str, ...]:
+    known = {
+        "blogPageUrl",
+        "postUrl",
+        "permalink",
+        "blogId",
+        "blogInfo.blogId",
+        "postId",
+        "blogInfo.blogName",
+    }
+    return tuple(sorted({value for value in values if value in known}))
 
 
 def _safe_location(value: str) -> str:
