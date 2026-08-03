@@ -128,6 +128,32 @@ def test_admin_handlers_check_permission_before_plugin_business_logic():
         assert ast.unparse(first.test) == "not is_admin_event(event)", name
 
 
+def test_e2e_handler_uses_isolated_runner_and_discloses_live_effects():
+    method = _command_methods()["run_e2e_test"]
+    runner_call = next(
+        node
+        for node in ast.walk(method)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "E2ETestRunner"
+    )
+    assert [ast.unparse(arg) for arg in runner_call.args] == [
+        "self._source",
+        "self._scheduler",
+        "self._send_push",
+    ]
+
+    text = " ".join(
+        node.value
+        for node in ast.walk(method)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    )
+    assert "真实 LOFTER" in text
+    assert "临时 SQLite" in text
+    assert "最多向当前会话发送一条" in text
+    assert "Lofter E2E 测试" in text
+
+
 class DeniedEvent:
     message_str = object()
     unified_msg_origin = "should-not-be-read"

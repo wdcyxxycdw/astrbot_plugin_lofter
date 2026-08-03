@@ -3,7 +3,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from core.e2e_steps_network import NetworkStepsMixin
 from core.parser import Post
 from core.utils import extract_message_body_text
 from tests.test_command_permissions import _load_main_module
@@ -214,62 +213,6 @@ async def test_auto_parse_keeps_post_with_unknown_body_and_images():
     assert "可见标题" in results[0][0].text
     assert post.url in results[0][0].text
     assert "部分字段未知" in results[0][0].text
-
-
-class _NetworkStepProbe(NetworkStepsMixin):
-    def __init__(self, post):
-        self._artifacts = {"rich_post": post, "tag_posts": [post]}
-
-    def _timed_start(self):
-        return 0
-
-    def _timed_end(self, started):
-        return 0
-
-    def _pass(self, name, duration, details):
-        return SimpleNamespace(name=name, status="pass", details=details)
-
-    def _fail(self, name, duration, error, details):
-        return SimpleNamespace(
-            name=name, status="fail", error=str(error), details=details
-        )
-
-    def _skip(self, name, reason):
-        return SimpleNamespace(name=name, status="skip", details=[reason])
-
-
-@pytest.mark.asyncio
-async def test_e2e_post_diagnostic_reports_unknown_images():
-    post = Post(
-        post_id="abc_123",
-        title="标题",
-        summary="",
-        images=["https://secret.invalid/image.jpg"],
-        url="https://demo.lofter.com/post/abc_123",
-        completeness=frozenset({"title", "url"}),
-    )
-
-    result = await _NetworkStepProbe(post)._step_08_post_parse()
-
-    assert "images=unknown" in result.details[0]
-    assert "images=1" not in result.details[0]
-
-
-@pytest.mark.asyncio
-async def test_e2e_format_step_accepts_partial_tag_post():
-    post = Post(
-        post_id="abc_123",
-        title="标签结果",
-        summary="可信摘要",
-        url="https://demo.lofter.com/post/abc_123",
-        source="mobile_tag",
-        completeness=frozenset({"title", "summary", "url"}),
-    )
-
-    result = await _NetworkStepProbe(post)._step_11_format()
-
-    assert result.status == "pass"
-    assert result.details[-1] == "format_post(include_time=True) OK"
 
 
 def test_message_object_message_list_is_used_for_plain_fallback():

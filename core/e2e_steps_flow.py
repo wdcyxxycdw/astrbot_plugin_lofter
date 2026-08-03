@@ -1,244 +1,196 @@
 from __future__ import annotations
 
-from .content_source import collect_pages
-from .filter import parse_tag_expr
+import asyncio
+
 from .parser import Post
 
 
 class FlowStepsMixin:
-
-    async def _step_12_search_flow(self) -> object:
-        name = "search 流程"
-        t0 = self._timed_start()
+    async def _step_05_warmup_pending(self) -> object:
+        name = "订阅 warmup 与 pending"
+        started = self._timed_start()
+        runtime = self._runtime
+        baseline = self._artifacts.get("baseline")
+        candidate = self._artifacts.get("candidate")
+        if runtime is None:
+            return self._skip(name, "临时运行时未就绪")
+        if not isinstance(baseline, Post) or not isinstance(candidate, Post):
+            return self._skip(name, "实时 fixture 未就绪")
+        self._artifacts["pending_verified"] = False
         details: list[str] = []
         try:
-            page = await collect_pages(
-                lambda cursor: self._source.list_tag(
-                    self.TEST_TAG, cursor, 25, "new"
-                ),
-                limit=25,
+            runtime.source.use(baseline)
+            result = await runtime.subscriptions.subscribe_tags(
+                runtime.session_id, [self.TEST_TAG], []
             )
-            posts = page.items
-            details.append(f"source={page.source}，合计 {len(posts)} 条")
-            assert posts, "搜索结果为空"
-            assert len({post.post_id for post in posts}) == len(posts), "搜索结果未去重"
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
+            if result.added_subscribes != (self.TEST_TAG,):
+                raise RuntimeError("subscription warmup did not add target")
+            state = await _warmup_state(runtime, baseline, candidate)
+            if state != ("active", 1, 0):
+                raise RuntimeError("subscription warmup state mismatch")
+            details.append("fetch-first 订阅已激活")
+            details.append("baseline 已写入具体 subscription seen")
+            details.append("candidate 在 discovery 前保持 unseen")
 
-    async def _step_13_subscription_crud(self) -> object:
-        name = "订阅 CRUD"
-        t0 = self._timed_start()
-        details: list[str] = []
-        s = self.TEST_SESSION
-        try:
-            ok = await self._storage.add(s, "tag", "TestA", "subscribe")
-            assert ok, "add tag TestA 失败"
-            details.append("add(tag, TestA, subscribe) OK")
-
-            subs = await self._storage.list_by_session(s)
-            assert any(x.target == "TestA" for x in subs), "list 未找到 TestA"
-            details.append(f"list_by_session → {len(subs)} 条")
-
-            sub = await self._storage.get(s, "tag", "TestA", "subscribe")
-            assert sub is not None, "get 返回 None"
-            details.append("get(tag, TestA) OK")
-
-            ok = await self._storage.remove(s, "tag", "TestA", "subscribe")
-            assert ok, "remove TestA 失败"
-            details.append("remove(tag, TestA) OK")
-
-            ok = await self._storage.add(s, "tag", "TestB", "exclude")
-            assert ok
-            ok = await self._storage.remove(s, "tag", "TestB", "exclude")
-            assert ok
-            details.append("add/remove exclude tag OK")
-
-            ok = await self._storage.add(s, "blog", "TestC")
-            assert ok
-            ok = await self._storage.remove(s, "blog", "TestC")
-            assert ok
-            details.append("add/remove blog OK")
-
-            ok = await self._storage.add(s, "tag", "TestD", "subscribe")
-            assert ok
-            sub_d = await self._storage.get(s, "tag", "TestD", "subscribe")
-            assert sub_d is not None
-            ok = await self._storage.remove_by_id(sub_d.id)
-            assert ok
-            details.append("remove_by_id OK")
-
-            final = await self._storage.list_by_session(s)
-            assert len(final) == 0, f"CRUD 后仍有 {len(final)} 条残留"
-            details.append("最终 list 为空，CRUD 正确")
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
-
-    async def _step_14_subtag_full(self) -> object:
-        name = "subtag 完整链路"
-        t0 = self._timed_start()
-        details: list[str] = []
-        s = self.TEST_SESSION
-        try:
-            excl_tag = f"{self.TEST_TAG}_unlikely_excl"
-            subs, excls = parse_tag_expr(f"{self.TEST_TAG} -{excl_tag}")
-
-            result = await self._subscriptions.subscribe_tags(
-                s, subs, excls
+            runtime.source.use(candidate)
+            self._poll_task = asyncio.create_task(
+                runtime.scheduler._poll_single_session(runtime.session_id)
             )
-            details.append(
-                f"添加订阅 {list(result.added_subscribes)}，"
-                f"排除 {list(result.added_excludes)}"
+            ready = await self._wait_event_or_poll(runtime.queue.persist_ready)
+            if runtime.queue.persist_error is not None:
+                raise runtime.queue.persist_error
+            if not ready:
+                raise RuntimeError("scheduler did not persist discovery")
+            discovery = runtime.queue.discovery_result
+            if discovery is None or discovery.admitted != 1:
+                raise RuntimeError("candidate was not admitted")
+            row = await self._delivery_row()
+            if row is None:
+                raise RuntimeError("pending delivery is missing")
+            status, lease, attempts, source_count = row
+            if status != "pending" or lease is not None:
+                raise RuntimeError("delivery is not pending")
+            if attempts != 0 or source_count < 1:
+                raise RuntimeError("pending delivery provenance is invalid")
+            if await self._candidate_seen():
+                raise RuntimeError("candidate became seen before ack")
+            self._artifacts["pending_verified"] = True
+            details.append("production persist_discovery 已写入 pending")
+            details.append("delivery_sources 已记录实际订阅来源")
+            return self._pass(
+                name,
+                self._timed_end(started),
+                details,
+                {"pending_verified": True},
+            )
+        except Exception as exc:
+            return self._fail(
+                name,
+                self._timed_end(started),
+                exc,
+                details,
+                facts={"pending_verified": False},
             )
 
-            count = await self._db.seen_count(s, "tag")
-            assert count > 0, f"初始化后 seen_count=0"
-            details.append(f"seen_count(session, 'tag') = {count}")
-
-            all_subs = await self._storage.list_by_session(s)
-            has_sub = any(x.type == "tag" and x.role == "subscribe" and x.target == self.TEST_TAG for x in all_subs)
-            has_excl = any(x.type == "tag" and x.role == "exclude" and x.target == excl_tag for x in all_subs)
-            assert has_sub, "DB 中未找到 subscribe 记录"
-            assert has_excl, "DB 中未找到 exclude 记录"
-            details.append("DB 订阅记录验证 OK")
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
-
-    async def _step_15_subblog_full(self) -> object:
-        name = "subblog 完整链路"
-        t0 = self._timed_start()
+    async def _step_06_delivery_acceptance(self) -> object:
+        name = "claim、adapter、ack 与 seen"
+        started = self._timed_start()
+        runtime = self._runtime
+        if runtime is None or self._poll_task is None:
+            return self._skip(name, "pending 链路未就绪")
+        if self._artifacts.get("pending_verified") is not True:
+            return self._skip(name, "pending 状态未通过验证")
         details: list[str] = []
-        s = self.TEST_SESSION
+        runtime.queue.release_claim.set()
         try:
-            _, _, fixture_blog = await self._load_fixture()
-            result = await self._subscriptions.subscribe_blog(
-                s, fixture_blog
+            entered = await self._wait_event_or_poll(self._send_entered)
+            if not entered:
+                raise RuntimeError("scheduler did not enter adapter")
+            row = await self._delivery_row()
+            if row is None:
+                raise RuntimeError("sending delivery is missing")
+            status, lease, attempts, source_count = row
+            if status != "sending" or not isinstance(lease, str) or not lease:
+                raise RuntimeError("delivery lease was not established")
+            if attempts != 0 or source_count < 1:
+                raise RuntimeError("sending delivery provenance is invalid")
+            if await self._candidate_seen():
+                raise RuntimeError("candidate became seen before ack")
+            details.append("production claim_next 已建立 sending lease")
+
+            self._release_send.set()
+            await asyncio.wait_for(
+                asyncio.shield(self._poll_task), self.POLL_SECONDS
             )
-            assert result.added_subscribes == (fixture_blog,)
-            details.append(f"subscribe blog {fixture_blog} OK")
-
-            count = await self._db.seen_count(s, "blog")
-            details.append(f"seen_count(session, 'blog') = {count}")
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
-
-    async def _step_16_subtagpreview(self, real_session_id: str) -> object:
-        name = "subtagpreview 推送"
-        t0 = self._timed_start()
-        details: list[str] = []
-        s = self.PREVIEW_SESSION
-        try:
-            excl_tag = f"{self.TEST_TAG}_unlikely_excl"
-            result = await self._subscriptions.subscribe_tags(
-                s,
-                [self.TEST_TAG],
-                [excl_tag],
-                preview=True,
+            facts = {
+                "send_attempts": self._send_attempts,
+                "adapter_accepted": self._send_result
+                if self._send_result is not None
+                else "unknown",
+            }
+            if self._send_entries != 1 or self._send_attempts > 1:
+                raise RuntimeError("adapter bridge invoked more than once")
+            if self._send_error is not None:
+                raise self._send_error
+            if self._send_result is None:
+                return self._inconclusive(
+                    name,
+                    self._timed_end(started),
+                    [*details, "adapter 结果未知，delivery 保持 lease recovery 语义"],
+                    facts,
+                )
+            if self._send_result is not True:
+                return self._fail(
+                    name,
+                    self._timed_end(started),
+                    RuntimeError("adapter rejected delivery"),
+                    details,
+                    health="degraded",
+                    facts=facts,
+                )
+            row = await self._delivery_row()
+            if row is None or row[0] != "accepted" or row[1] is not None:
+                raise RuntimeError("delivery was not accepted")
+            if not await self._candidate_seen():
+                raise RuntimeError("accepted delivery was not marked seen")
+            details.append("真实 adapter 严格返回 True")
+            details.append("production ack_success 已写入 accepted")
+            details.append("candidate 已写入 subscription-level seen")
+            return self._pass(
+                name,
+                self._timed_end(started),
+                details,
+                facts,
             )
-            posts = list(result.preview_posts)
-            details.append(f"preview_posts 得 {len(posts)} 条")
-
-            if not posts:
-                details.append("无可推送帖子，跳过推送")
-                return self._pass(name, self._timed_end(t0), details)
-
-            post = posts[0]
-            header = f"【标签「{self.TEST_TAG}」有新内容】"
-            accepted = await self._send_push(
-                real_session_id, post, header, frozenset({"tag"})
+        except asyncio.TimeoutError as exc:
+            return self._fail(
+                name,
+                self._timed_end(started),
+                exc,
+                details,
+                health="inconclusive",
+                facts={
+                    "send_attempts": self._send_attempts,
+                    "adapter_accepted": "unknown",
+                },
             )
-            assert accepted is True, "adapter 未接受标签预览推送"
-            details.append(f"推送首条到 real_session，含 {len(post.images)} 张图")
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
-
-    async def _step_17_seen_sent(self) -> object:
-        name = "seen/sent 追踪"
-        t0 = self._timed_start()
-        details: list[str] = []
-        s = self.TEST_SESSION
-        fake_ids = ["__e2e_fake_1__", "__e2e_fake_2__"]
-        try:
-            await self._db.mark_seen_session(s, "tag", fake_ids)
-            unseen = await self._db.filter_unseen_session(s, "tag", fake_ids)
-            assert unseen == [], f"seen 后 filter_unseen 应返回空，实际 {unseen}"
-            count = await self._db.seen_count(s, "tag")
-            details.append(f"mark_seen + filter_unseen OK，seen_count={count}")
-
-            await self._db.mark_sent(s, fake_ids)
-            unsent = await self._db.filter_unsent(s, fake_ids)
-            assert unsent == [], f"sent 后 filter_unsent 应返回空，实际 {unsent}"
-            details.append("mark_sent + filter_unsent OK")
-
-            await self._db.transaction(lambda conn: (
-                conn.execute(
-                    "DELETE FROM seen_posts WHERE subscription_id IN "
-                    "(SELECT id FROM subscriptions WHERE session_id=?) AND post_id IN (?,?)",
-                    (s, *fake_ids),
-                ),
-                conn.execute(
-                    "DELETE FROM deliveries WHERE session_id=? AND post_id IN (?,?)",
-                    (s, *fake_ids),
-                ),
-            ))
-            details.append("fake ids 已清理")
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
-
-    async def _step_18_scheduler_state(self) -> object:
-        name = "调度器状态"
-        t0 = self._timed_start()
-        details: list[str] = []
-        try:
-            task = self._scheduler._task
-            interval = self._scheduler._interval
-            assert task is not None, "_task 为 None"
-            assert not task.done(), "_task 已结束"
-            assert interval > 0, f"_interval={interval} 非正数"
-            details.append(f"_task 存在且运行中")
-            details.append(f"_interval={interval}s ({interval // 60} 分钟)")
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
-
-    async def _step_19_manual_poll(self) -> object:
-        name = "手动轮询测试 session"
-        t0 = self._timed_start()
-        details: list[str] = []
-        s = self.TEST_SESSION
-        try:
-            before = await self._db.seen_count(s, "tag")
-            await self._scheduler._poll_single_session(s)
-            after = await self._db.seen_count(s, "tag")
-            details.append(
-                f"单 session 轮询完成，seen 变化: before={before}, after={after}"
+        except Exception as exc:
+            return self._fail(
+                name,
+                self._timed_end(started),
+                exc,
+                details,
+                facts={
+                    "send_attempts": self._send_attempts,
+                    "adapter_accepted": self._send_result
+                    if self._send_result is not None
+                    else "unknown",
+                },
             )
-            details.append("无新帖（符合 warmup 后预期）" if after == before else f"新增 {after - before} 条 seen（有新帖）")
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
 
-    async def _step_20_push_blog(self, real_session_id: str) -> object:
-        name = "推送博主帖"
-        t0 = self._timed_start()
-        details: list[str] = []
-        blog_posts: list[Post] | None = self._artifacts.get("blog_posts")
-        if not blog_posts:
-            return self._skip(name, "依赖 step 7 (blog_posts) 未就绪或为空")
-        try:
-            _, _, fixture_blog = await self._load_fixture()
-            post = blog_posts[0]
-            header = f"【博主「{fixture_blog}」有新内容】"
-            accepted = await self._send_push(
-                real_session_id, post, header, frozenset({"blog"})
-            )
-            assert accepted is True, "adapter 未接受博主帖子推送"
-            details.append(f"推送首条到 real_session，含 {len(post.images)} 张图")
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
+
+async def _warmup_state(runtime, baseline: Post, candidate: Post) -> tuple:
+    return await runtime.db.transaction(
+        lambda conn: conn.execute(
+            """
+            SELECT s.state,
+                   EXISTS(
+                       SELECT 1 FROM seen_posts sp
+                       WHERE sp.subscription_id=s.id AND sp.post_id=?
+                   ),
+                   EXISTS(
+                       SELECT 1 FROM seen_posts sp
+                       WHERE sp.subscription_id=s.id AND sp.post_id=?
+                   )
+            FROM subscriptions s
+            WHERE s.session_id=? AND s.type='tag'
+              AND s.role='subscribe' AND s.target=?
+            """,
+            (
+                baseline.post_id,
+                candidate.post_id,
+                runtime.session_id,
+                runtime.source._tag,
+            ),
+        ).fetchone()
+    )

@@ -120,7 +120,7 @@ def test_partial_structured_post_id_conflict_is_rejected(parser):
         with pytest.raises(SourceSchemaError, match="dwr.post.id"):
             _map_post({
                 "post": {
-                    "id": 44,
+                    "postId": 44,
                     "blogPageUrl": ALICE_URL,
                     "title": "Demo",
                     "blogInfo": {"blogName": "alice"},

@@ -132,7 +132,7 @@ async def _search_unique_posts(source: ContentSource, keyword: str, limit: int):
     "astrbot_plugin_lofter",
     "user",
     "解析 Lofter 链接，订阅 Lofter 标签/博主，搜索 Lofter 内容，支持标签表达式统计",
-    "v2.0.1",
+    "v2.0.2",
 )
 class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -597,13 +597,13 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             return
         from .core.e2e_test import E2ETestRunner, format_report
         runner = E2ETestRunner(
-            self._db,
             self._source,
-            self._storage,
-            self._subscriptions,
             self._scheduler,
             self._send_push,
         )
-        yield event.plain_result("开始端到端测试，请等待……")
+        yield event.plain_result(
+            "开始 Lofter 实时健康检查：将访问真实 LOFTER，使用临时 SQLite；"
+            "若实时 fixture 足够，最多向当前会话发送一条带“Lofter E2E 测试”标识的真实消息。"
+        )
         results = await runner.run_all(event.unified_msg_origin)
         yield event.plain_result(format_report(results))

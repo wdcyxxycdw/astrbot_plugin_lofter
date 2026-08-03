@@ -3,7 +3,12 @@ import json
 import pytest
 
 from core.dwr_parser import _map_post, parse_dwr_response, parse_dwr_response_result
-from core.errors import SourceChallengeError, SourceLimitError, SourceSchemaError
+from core.errors import (
+    DWRIdentityError,
+    SourceChallengeError,
+    SourceLimitError,
+    SourceSchemaError,
+)
 from core.source_limits import MAX_CONTENT_BYTES, MAX_TITLE_BYTES, MAX_URL_BYTES
 
 
@@ -192,30 +197,86 @@ async def test_parse_dwr_response_uses_explicit_default_https_port():
 
 
 @pytest.mark.parametrize(
-    ("alias", "value"),
+    ("post_url", "permalink", "reason"),
     [
-        ("postUrl", "https://bob.lofter.com/post/1a_2b"),
-        ("permalink", "https://alice.lofter.com/post/1a_2c"),
-        ("postUrl", 1),
+        (
+            "https://alice.lofter.com/post/1a_2b",
+            "https://alice.lofter.com/post/1a_2c",
+            "post_url_conflict",
+        ),
+        (
+            "https://alice.lofter.com/post/1a_2b",
+            "https://bob.lofter.com/post/1a_2b",
+            "owner_conflict",
+        ),
     ],
 )
-def test_dwr_rejects_conflicting_or_invalid_url_alias(alias, value):
-    post = {
-        "blogPageUrl": "https://alice.lofter.com/post/1a_2b",
-        "blogInfo": {"blogName": "alice"},
-        alias: value,
-    }
-
-    with pytest.raises(SourceSchemaError) as exc_info:
-        _map_post({"post": post})
+def test_dwr_rejects_authoritative_url_conflict(
+    post_url, permalink, reason
+):
+    with pytest.raises(DWRIdentityError) as exc_info:
+        _map_post({
+            "post": {
+                "postUrl": post_url,
+                "permalink": permalink,
+            }
+        })
 
     assert exc_info.value.location == "dwr.post.id"
+    assert exc_info.value.reason == reason
+    assert exc_info.value.fields == ("permalink", "postUrl")
 
 
-def test_dwr_enforces_unselected_url_alias_limit():
+@pytest.mark.parametrize("value", [1, "https://attacker.example/post/1a_2b"])
+def test_dwr_rejects_invalid_authoritative_url(value):
+    with pytest.raises(DWRIdentityError) as exc_info:
+        _map_post({"post": {"postUrl": value}})
+
+    assert exc_info.value.reason in {
+        "invalid_identity_type", "invalid_post_url",
+    }
+    assert exc_info.value.fields == ("postUrl",)
+
+
+@pytest.mark.parametrize(
+    "fallback",
+    [
+        "https://legacy.lofter.com/post/ff_ee",
+        "https://legacy.lofter.com/",
+        1,
+    ],
+)
+def test_dwr_authoritative_url_ignores_legacy_fallback_drift(fallback):
+    mapped = _map_post({
+        "post": {
+            "blogPageUrl": fallback,
+            "postUrl": "https://alice.lofter.com/post/1a_2b",
+            "blogInfo": {"blogName": "alice"},
+        }
+    })
+
+    assert mapped is not None
+    assert mapped.post_id == "1a_2b"
+    assert mapped.url == "https://alice.lofter.com/post/1a_2b"
+
+
+def test_dwr_uses_legacy_fallback_without_authoritative_url():
+    mapped = _map_post({
+        "post": {
+            "blogPageUrl": "https://alice.lofter.com/post/1a_2b",
+            "blogInfo": {"blogName": "alice"},
+        }
+    })
+
+    assert mapped is not None
+    assert mapped.post_id == "1a_2b"
+    assert mapped.url == "https://alice.lofter.com/post/1a_2b"
+
+
+def test_dwr_enforces_unselected_legacy_fallback_limit():
     post = {
-        "blogPageUrl": "https://user.lofter.com/post/abc_123",
-        "postUrl": _EXACT_POST_URL + "x",
+        "blogPageUrl": _EXACT_POST_URL + "x",
+        "postUrl": "https://user.lofter.com/post/abc_123",
     }
 
     with pytest.raises(SourceLimitError) as exc_info:
@@ -226,11 +287,11 @@ def test_dwr_enforces_unselected_url_alias_limit():
     )
 
 
-def test_dwr_accepts_canonically_equivalent_url_aliases():
+def test_dwr_accepts_canonically_equivalent_authoritative_urls():
     mapped = _map_post({
         "post": {
-            "blogPageUrl": "https://DEMO.lofter.com:443/post/001A_00002B/",
-            "postUrl": "https://demo.lofter.com/post/1a_2b",
+            "blogPageUrl": "https://legacy.lofter.com/post/ff_ee",
+            "postUrl": "https://DEMO.lofter.com:443/post/001A_00002B/",
             "permalink": "https://lofter.com/post/1a_2b",
             "blogInfo": {"blogName": "demo"},
         }
@@ -241,8 +302,41 @@ def test_dwr_accepts_canonically_equivalent_url_aliases():
     assert mapped.url == "https://demo.lofter.com/post/1a_2b"
 
 
+def test_dwr_generic_id_is_not_post_local_identity():
+    mapped = _map_post({
+        "post": {
+            "postUrl": "https://demo.lofter.com/post/1a_2b",
+            "id": 999,
+            "postId": 43,
+            "blogId": 26,
+            "blogInfo": {"blogId": 26, "blogName": "demo"},
+        }
+    })
+
+    assert mapped is not None
+    assert mapped.post_id == "1a_2b"
+
+
+def test_dwr_rejects_post_id_conflict_with_safe_fingerprint():
+    secret_url = "https://private-owner.lofter.com/post/1a_2b"
+    with pytest.raises(DWRIdentityError) as exc_info:
+        _map_post({
+            "post": {
+                "postUrl": secret_url,
+                "postId": 44,
+                "blogInfo": {"blogName": "private-owner"},
+            }
+        })
+
+    error = exc_info.value
+    assert error.fingerprint == "post_id_conflict:postId+postUrl"
+    assert secret_url not in str(error)
+    assert "44" not in str(error)
+    assert "private-owner" not in str(error)
+
+
 @pytest.mark.asyncio
-async def test_dwr_mixed_page_propagates_url_alias_identity_error():
+async def test_dwr_mixed_page_propagates_authoritative_identity_error():
     body = """
     dwr.engine._remoteHandleCallback("0", "0", [
         {post: {
@@ -250,16 +344,16 @@ async def test_dwr_mixed_page_propagates_url_alias_identity_error():
             blogInfo: {blogName: "demo"}
         }},
         {post: {
-            blogPageUrl: "https://demo.lofter.com/post/1a_2c",
-            postUrl: "https://other.lofter.com/post/1a_2c"
+            postUrl: "https://demo.lofter.com/post/1a_2c",
+            permalink: "https://other.lofter.com/post/1a_2c"
         }}
     ]);
     """
 
-    with pytest.raises(SourceSchemaError) as exc_info:
+    with pytest.raises(DWRIdentityError) as exc_info:
         await parse_dwr_response_result(body)
 
-    assert exc_info.value.location == "dwr.post.id"
+    assert exc_info.value.reason == "owner_conflict"
 
 
 @pytest.mark.asyncio

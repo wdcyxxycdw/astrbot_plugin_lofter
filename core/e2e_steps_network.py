@@ -1,203 +1,185 @@
 from __future__ import annotations
 
-import re
-
-from .dwr_engine import execute_dwr
-from .filter import FilterRule, parse_tag_expr
-from .formatter import format_post, visible_images
+from .errors import SourcePartialError, SourceSchemaError
 from .parser import Post
-from .post_consumers import apply_filter_with_fields
-from .utils import _split_text
-
-POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
+from .post_consumers import ensure_subscription_posts
+from .post_fields import merge_post_fields
+from .source_scan import SourcePage
 
 
 class NetworkStepsMixin:
-
-    async def _step_01_config_rw(self) -> object:
-        name = "配置读写"
-        t0 = self._timed_start()
+    async def _step_01_runtime(self) -> object:
+        name = "运行时与隔离存储"
+        started = self._timed_start()
         details: list[str] = []
         try:
-            cookie = await self._db.get_config("lofter_cookie") or ""
-            details.append(f"Cookie 存在，长度 {len(cookie)}")
+            self._runtime = await self._create_runtime()
+            details.append("临时 SQLite 已初始化")
+            details.append("生产数据库未注入健康检查运行时")
+            task = self._production_scheduler._task
+            if task is None or task.done():
+                raise RuntimeError("production scheduler is not running")
+            if self._production_scheduler._interval <= 0:
+                raise RuntimeError("production scheduler interval is invalid")
+            details.append("生产 scheduler task 正在运行")
+            return self._pass(
+                name,
+                self._timed_end(started),
+                details,
+                {"runtime_isolated": True},
+            )
+        except Exception as exc:
+            return self._fail(
+                name,
+                self._timed_end(started),
+                exc,
+                details,
+                facts={"runtime_isolated": self._runtime is not None},
+            )
 
-            await self._db.set_config(self.TEST_CONFIG_KEY, "v1")
-            val = await self._db.get_config(self.TEST_CONFIG_KEY)
-            assert val == "v1", f"期望 v1，实际 {val}"
-            details.append(f"set_config('{self.TEST_CONFIG_KEY}', 'v1') OK")
-            details.append("get_config 往返值匹配")
-
-            self._source.update_cookie(cookie)
-            details.append("source.update_cookie 无异常")
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
-
-    async def _step_02_dwr_engine(self) -> object:
-        name = "DWR 引擎"
-        t0 = self._timed_start()
+    async def _step_02_normal_tag(self) -> object:
+        name = "真实标签来源"
+        started = self._timed_start()
         details: list[str] = []
         try:
-            import dukpy  # noqa: F401
-            details.append("dukpy 加载成功")
-
-            sample_js = "dwr.engine._remoteHandleCallback('0','0',[{answer:42}]);"
-            items = await execute_dwr(sample_js)
-            details.append(f"样本 JS 执行结果: {items}")
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
-
-    async def _step_03_http_get(self) -> object:
-        name = "ContentSource 单帖"
-        t0 = self._timed_start()
-        details: list[str] = []
-        try:
-            _, fixture_post, _ = await self._load_fixture()
-            post = await self._source.get_post(fixture_post.url)
-            self._artifacts["rich_post"] = post
-            details.append(f"get_post → {post.post_id}")
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
-
-    async def _step_04_dwr_search(self) -> object:
-        name = "ContentSource 标签页"
-        t0 = self._timed_start()
-        details: list[str] = []
-        try:
-            page, _, _ = await self._load_fixture()
-            self._artifacts["tag_posts"] = page.items
+            page = await self._source.list_tag(
+                self.TEST_TAG, None, 20, "new"
+            )
+            _validate_page(page)
+            self._artifacts["normal_page"] = page
+            source = _safe_source(page.source)
+            details.append(f"source={source}")
             details.append(
-                f"source={page.source}，映射 {page.mapped_count}，丢弃 {page.dropped_count}"
+                f"映射 {page.mapped_count}，丢弃 {page.dropped_count}"
             )
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
-
-    async def _step_05_dwr_parse(self) -> object:
-        name = "ContentSource 标签结果"
-        posts: list[Post] | None = self._artifacts.get("tag_posts")
-        if posts is None:
-            return self._skip(name, "依赖 ContentSource 标签页未就绪")
-        return self._pass(name, 0, [f"得到 {len(posts)} 条帖子"])
-
-    async def _step_06_blog_fetch(self) -> object:
-        name = "ContentSource 博主页"
-        t0 = self._timed_start()
-        details: list[str] = []
-        try:
-            _, _, fixture_blog = await self._load_fixture()
-            page = await self._source.list_blog(fixture_blog, None, 20)
-            self._artifacts["blog_posts"] = page.items
-            details.append(f"source={page.source}，得到 {len(page.items)} 条帖子")
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
-
-    async def _step_07_blog_parse(self) -> object:
-        name = "ContentSource 博主结果"
-        posts: list[Post] | None = self._artifacts.get("blog_posts")
-        if posts is None:
-            return self._skip(name, "依赖 ContentSource 博主页未就绪")
-        return self._pass(name, 0, [f"得到 {len(posts)} 条帖子"])
-
-    async def _step_08_post_parse(self) -> object:
-        name = "ContentSource 帖子结果"
-        rich: Post | None = self._artifacts.get("rich_post")
-        if rich is None:
-            return self._skip(name, "依赖 ContentSource 单帖未就绪")
-        image_count = (
-            str(len(visible_images(rich)))
-            if rich.has_fields({"images"})
-            else "unknown"
-        )
-        details = [
-            f"title={rich.title!r}, author={rich.author!r}, images={image_count}"
-        ]
-        return self._pass(name, 0, details)
-
-    async def _step_09_auto_parse(self) -> object:
-        name = "auto_parse 链路"
-        t0 = self._timed_start()
-        details: list[str] = []
-        blog_posts: list[Post] | None = self._artifacts.get("blog_posts")
-        try:
-            sample_url = "https://foo.lofter.com/post/abc123"
-            assert POST_PATTERN.search(sample_url), "POST_PATTERN 未命中"
-            details.append(f"(a) POST_PATTERN 匹配: {sample_url!r} OK")
-
-            if blog_posts:
-                post = blog_posts[0]
-                text = format_post(post)
-                assert text and len(text) > 0, "format_post 返回空字符串"
-                details.append(f"(b) format_post 返回 {len(text)} 字符")
-
-            long_content = "A" * 500 + "\n\n" + "B" * 500
-            chunks = _split_text(long_content)
-            assert len(chunks) >= 1, "split_text 返回空"
-            details.append(f"(c) _split_text 切出 {len(chunks)} 块")
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
-
-    async def _step_10_filter(self) -> object:
-        name = "过滤链路"
-        t0 = self._timed_start()
-        details: list[str] = []
-        tag_posts: list[Post] | None = self._artifacts.get("tag_posts")
-        if tag_posts is None:
-            return self._skip(name, "依赖 step 5 (tag_posts) 未就绪")
-        try:
-            excl = f"{self.TEST_TAG}_unlikely_excl"
-            subs, excls = parse_tag_expr(f"{self.TEST_TAG} -{excl}")
-            details.append(f"parse_tag_expr → subs={subs}, excls={excls}")
-
-            rule = FilterRule(search_tags=subs, exclude_tags=excls)
-            filtered = await apply_filter_with_fields(
-                tag_posts, rule, self._source
+            return self._pass(
+                name,
+                self._timed_end(started),
+                details,
+                {"normal_source": source},
             )
+        except Exception as exc:
+            return self._fail(
+                name,
+                self._timed_end(started),
+                exc,
+                details,
+            )
+
+    async def _step_03_forced_dwr(self) -> object:
+        name = "真实 DWR fallback"
+        started = self._timed_start()
+        details: list[str] = []
+        try:
+            page = await self._source.list_tag(
+                self.TEST_TAG, "v1:dwr:0", 20, "new"
+            )
+            _validate_page(page)
+            if page.source != "dwr":
+                raise SourceSchemaError("response")
+            self._artifacts["dwr_page"] = page
+            details.append("source=dwr")
             details.append(
-                f"apply_filter_with_fields: {len(tag_posts)} → {len(filtered)} 条"
+                f"映射 {page.mapped_count}，丢弃 {page.dropped_count}"
             )
-            assert len(filtered) <= len(tag_posts)
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
+            return self._pass(
+                name,
+                self._timed_end(started),
+                details,
+                {"dwr_verified": True},
+            )
+        except Exception as exc:
+            return self._fail(
+                name,
+                self._timed_end(started),
+                exc,
+                details,
+                facts={"dwr_verified": False},
+            )
 
-    async def _step_11_format(self) -> object:
-        name = "格式化"
-        t0 = self._timed_start()
+    async def _step_04_live_fixture(self) -> object:
+        name = "实时 fixture、单帖与博主页"
+        started = self._timed_start()
+        pages = _available_pages(self._artifacts)
+        if not pages:
+            return self._skip(name, "标签来源未就绪，无法建立实时 fixture")
+        candidates = _unique_posts(pages)
+        if len(candidates) < 2:
+            return self._inconclusive(
+                name,
+                self._timed_end(started),
+                ["实时结果不足两个不同帖子"],
+            )
         details: list[str] = []
-        tag_posts: list[Post] | None = self._artifacts.get("tag_posts")
         try:
-            posts = tag_posts or []
-            post = posts[0] if posts else Post(post_id="x", title="测试标题", summary="摘要", author="作者", url="https://x.lofter.com/post/1")
-
-            t1 = format_post(post)
-            assert t1, "format_post 基础调用失败"
-            details.append(f"format_post(post) → {len(t1)} 字符")
-
-            t2 = format_post(post, header="【测试头部】")
-            assert t2.startswith("【测试头部】"), "header 未出现"
-            details.append("format_post(header=...) OK")
-
-            body_post = (
-                post
-                if post.has_fields({"content"})
-                else Post(
-                    post_id="x", title="测试标题", summary="",
-                    content="完整正文", url="https://x.lofter.com/post/1",
+            enriched = []
+            for candidate in candidates[:2]:
+                detail = await self._source.get_post(candidate.url)
+                merged = merge_post_fields(candidate, detail)
+                values = await ensure_subscription_posts(
+                    [merged], self._source, {"images"}
                 )
+                enriched.append(values[0])
+            owner = enriched[0].author_username
+            if not owner:
+                raise SourceSchemaError("author")
+            blog_page = await self._source.list_blog(owner, None, 20)
+            _validate_page(blog_page)
+            self._artifacts["baseline"] = enriched[0]
+            self._artifacts["candidate"] = enriched[1]
+            self._artifacts["blog_page"] = blog_page
+            details.append("两个不同帖子已通过真实单帖入口补全")
+            details.append(
+                f"博主页 source={_safe_source(blog_page.source)}，"
+                f"映射 {blog_page.mapped_count}"
             )
-            t3 = format_post(body_post, body="自定义正文")
-            assert "自定义正文" in t3, "body 未出现"
-            details.append("format_post(body=...) OK")
+            return self._pass(
+                name,
+                self._timed_end(started),
+                details,
+                {"fixture_ready": True},
+            )
+        except Exception as exc:
+            return self._fail(
+                name,
+                self._timed_end(started),
+                exc,
+                details,
+                facts={"fixture_ready": False},
+            )
 
-            t4 = format_post(post, include_time=True)
-            assert t4, "include_time 调用失败"
-            details.append("format_post(include_time=True) OK")
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
+
+def _validate_page(page: SourcePage) -> None:
+    if not isinstance(page, SourcePage):
+        raise SourceSchemaError("response")
+    if not page.complete:
+        raise SourcePartialError(page.mapped_count, page.dropped_count)
+    if page.sort != "new":
+        raise SourceSchemaError("sort")
+
+
+def _available_pages(artifacts: dict[str, object]) -> list[SourcePage]:
+    return [
+        page
+        for key in ("normal_page", "dwr_page")
+        if isinstance((page := artifacts.get(key)), SourcePage)
+    ]
+
+
+def _unique_posts(pages: list[SourcePage]) -> list[Post]:
+    posts: dict[str, Post] = {}
+    for page in pages:
+        for post in page.items:
+            if post.post_id and post.url:
+                posts.setdefault(post.post_id, post)
+    return list(posts.values())
+
+
+def _safe_source(value: str) -> str:
+    known = {
+        "dwr",
+        "html_blog",
+        "mobile_blog",
+        "mobile_tag",
+    }
+    return value if value in known else "unknown"
