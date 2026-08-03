@@ -263,6 +263,16 @@ Claim transaction：
 
 ## E2E 测试边界
 
-`/lofter test` 是实时健康检查：调用当下真实 LOFTER 内容源，并在临时 SQLite 中复用生产 `SubscriptionService`、`DeliveryQueue` 和 `SubscriptionScheduler`，验证正常标签入口、独立 DWR 回退、单帖/博主页以及 `pending → sending → accepted → subscription seen` 状态链。fixture 足够时最多向命令所在会话发送一条带“Lofter E2E 测试”标识的真实消息；结束时清理全部临时资源，不写生产订阅、seen、delivery 或 config。报告区分 `HEALTHY`、`DEGRADED` 和 `INCONCLUSIVE`。该命令仅管理员可执行，不暴露给 LLM tool。
+`/lofter test` 是管理员显式触发的实时健康检查，固定执行九个步骤：`runtime`、`mobile_direct`、`dwr_direct`、`production_orchestration`、`fixture_detail`、`blog`、`warmup_pending`、`claim_send_ack_seen`、`cleanup`。
 
-普通 pytest 默认通过 marker 和 socket guard 隔离真实网络；只有显式 live 配置才允许真实测试。
+- runtime、Mobile 直连、DWR 直连和完整生产标签编排是四个独立 root probe；前一项失败不阻止后续 root 实际执行。
+- Mobile-only probe 使用与生产编排相同的 eligibility 判定，并报告固定、无载荷的 fallback reason；显式 DWR probe 不伪报 Mobile fallback。
+- fixture 优先使用 production、Mobile、DWR 中首个能提供两个不同帖子的健康来源，只有单一来源都不足时才跨来源组合；两个帖子完成公开单帖补全后才原子发布，并按发布时间选择较旧 baseline 和较新 candidate。
+- blog 与标签投递链在 fixture 后分叉；blog 失败不阻断 tag flow。
+- 临时 SQLite 中复用生产 `SubscriptionService`、`DeliveryQueue` 和 `SubscriptionScheduler`；flow 使用纯内存 controlled source，不再访问真实内容源，验证 `pending → sending → accepted → subscription seen`。
+- skip 通过稳定 step key 传播根 `blocked_by`，不复制上游异常。
+- fixture 足够时最多向命令所在会话发送一条带“Lofter E2E 测试”标识的真实消息。
+- cleanup 独立尝试取消临时 task、关闭 DB 和删除临时目录；不写生产订阅、seen、delivery 或 config。
+- 报告区分 `HEALTHY`、`DEGRADED` 和 `INCONCLUSIVE`，且不暴露 Cookie、URL、post ID、owner、正文、图片 URL、响应体或原始异常。
+
+该命令仅管理员可执行，不暴露给 LLM tool。开发回归只使用离线 fake；普通 pytest 通过 marker 和 socket guard 隔离真实网络，只有显式 live 配置才允许真实测试。

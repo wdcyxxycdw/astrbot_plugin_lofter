@@ -358,11 +358,46 @@ def test_dwr_identity_shape_is_allowlisted():
 
 
 @pytest.mark.parametrize(
-    ("fields", "diagnostic"),
+    ("fields", "summary"),
     [
         (
             {"dirContent": "private-dir", "content": "private-content"},
-            "content_alias_conflict:dirContent+content",
+            "private-dir",
+        ),
+        (
+            {"dirContent": "", "content": "private-content"},
+            "private-content",
+        ),
+        ({"content": "private-content"}, "private-content"),
+    ],
+)
+def test_dwr_maps_dir_content_as_summary_with_content_fallback(
+    fields, summary
+):
+    mapped = _map_post({
+        "post": {
+            "postUrl": "https://private-owner.lofter.com/post/1a_2b",
+            "blogInfo": {"blogName": "private-owner"},
+            **fields,
+        }
+    })
+
+    assert mapped is not None
+    assert mapped.summary == summary
+    assert "summary" in mapped.completeness
+
+
+@pytest.mark.parametrize(
+    ("fields", "diagnostic"),
+    [
+        (
+            {
+                "dirContent": {
+                    "content": "private-inner-content",
+                    "text": "private-inner-text",
+                }
+            },
+            "content_alias_conflict:dirContent.content+dirContent.text",
         ),
         (
             {
@@ -392,8 +427,6 @@ def test_dwr_content_alias_conflict_has_payload_free_diagnostic(
     assert error.reason == "content_alias_conflict"
     assert error.diagnostic == diagnostic
     for secret in (
-        "private-dir",
-        "private-content",
         "private-inner-content",
         "private-inner-text",
         "private-owner",

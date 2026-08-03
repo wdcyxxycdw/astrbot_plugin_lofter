@@ -264,18 +264,19 @@ async def test_embedded_publish_time_satisfies_subscription_contract():
     source.get_post.assert_not_awaited()
 
 
-def test_dwr_known_empty_summary_conflicts_with_nonempty_alias():
-    with pytest.raises(SourceSchemaError) as exc_info:
-        _map_post({
-            "post": {
-                "blogPageUrl": "https://demo.lofter.com/post/1a_2b",
-                "title": "Demo",
-                "dirContent": "",
-                "content": "<p>FALLBACK-CONTENT</p>",
-            }
-        })
+def test_dwr_known_empty_summary_falls_back_to_content():
+    mapped = _map_post({
+        "post": {
+            "blogPageUrl": "https://demo.lofter.com/post/1a_2b",
+            "title": "Demo",
+            "dirContent": "",
+            "content": "<p>FALLBACK-CONTENT</p>",
+        }
+    })
 
-    assert exc_info.value.location == "post.evidence"
+    assert mapped is not None
+    assert mapped.summary == "FALLBACK-CONTENT"
+    assert "summary" in mapped.completeness
 
 
 def test_embedded_known_empty_alias_conflicts_with_nonempty_alias():

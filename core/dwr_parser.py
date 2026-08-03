@@ -429,18 +429,16 @@ def _string_field(
 
 
 def _content_field(post: dict[str, object]) -> tuple[str, bool]:
-    aliases: list[str] = []
-    fields: list[str] = []
+    candidates: list[str] = []
     for key in ("dirContent", "content"):
         if key not in post or not isinstance(post[key], (str, dict)):
             continue
         value, complete = _extract_summary(post[key], key)
         if complete:
-            aliases.append(value)
-            fields.append(key)
-    summary, complete = _consistent_summary_aliases(aliases, fields)
-    if not complete:
+            candidates.append(value)
+    if not candidates:
         return "", False
+    summary = next((value for value in candidates if value), "")
     return summary[:300] + ("…" if len(summary) > 300 else ""), True
 
 

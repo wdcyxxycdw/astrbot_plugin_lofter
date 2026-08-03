@@ -98,19 +98,34 @@ def _sub(target: str, sub_type: str) -> Subscription:
 
 
 @pytest.mark.parametrize(
-    "fields",
+    ("fields", "summary"),
     [
-        {"dirContent": "First", "content": "Second"},
-        {"dirContent": "", "content": "Second"},
-        {"dirContent": {"content": "First", "text": "Second"}},
+        ({"dirContent": "First", "content": "Second"}, "First"),
+        ({"dirContent": "", "content": "Second"}, "Second"),
     ],
 )
-def test_dwr_rejects_conflicting_summary_aliases(fields):
+def test_dwr_treats_dir_content_as_summary_and_content_as_fallback(
+    fields, summary
+):
     post = {
         "blogPageUrl": "https://demo.lofter.com/post/1a_2b",
         "title": "Demo",
         "blogInfo": {"blogName": "demo"},
         **fields,
+    }
+
+    mapped, dropped, _ = _map_items([{"post": post}])
+
+    assert dropped == 0
+    assert mapped[0].summary == summary
+
+
+def test_dwr_rejects_conflicting_nested_summary_aliases():
+    post = {
+        "blogPageUrl": "https://demo.lofter.com/post/1a_2b",
+        "title": "Demo",
+        "blogInfo": {"blogName": "demo"},
+        "dirContent": {"content": "First", "text": "Second"},
     }
 
     with pytest.raises(SourceSchemaError) as exc_info:

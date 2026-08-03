@@ -2,37 +2,42 @@ from __future__ import annotations
 
 import asyncio
 
+from .e2e_steps_network import FixtureBundle
 from .parser import Post
 
 
 class FlowStepsMixin:
-    async def _step_05_warmup_pending(self) -> object:
+    async def _step_07_warmup_pending(self) -> object:
+        key = "warmup_pending"
         name = "订阅 warmup 与 pending"
         started = self._timed_start()
+        blockers = self._dependency_blockers("runtime", "fixture_detail")
+        if blockers:
+            return self._skip(key, name, blockers)
         runtime = self._runtime
-        baseline = self._artifacts.get("baseline")
-        candidate = self._artifacts.get("candidate")
-        if runtime is None:
-            return self._skip(name, "临时运行时未就绪")
-        if not isinstance(baseline, Post) or not isinstance(candidate, Post):
-            return self._skip(name, "实时 fixture 未就绪")
+        bundle = self._artifacts.get("fixture_bundle")
+        if runtime is None or not isinstance(bundle, FixtureBundle):
+            return self._skip(key, name, blockers or ("runtime", "fixture_detail"))
         self._artifacts["pending_verified"] = False
         details: list[str] = []
         try:
-            runtime.source.use(baseline)
+            runtime.source.install(bundle)
+            runtime.source.use(bundle.baseline)
             result = await runtime.subscriptions.subscribe_tags(
                 runtime.session_id, [self.TEST_TAG], []
             )
             if result.added_subscribes != (self.TEST_TAG,):
                 raise RuntimeError("subscription warmup did not add target")
-            state = await _warmup_state(runtime, baseline, candidate)
+            state = await _warmup_state(
+                runtime, bundle.baseline, bundle.candidate
+            )
             if state != ("active", 1, 0):
                 raise RuntimeError("subscription warmup state mismatch")
             details.append("fetch-first 订阅已激活")
             details.append("baseline 已写入具体 subscription seen")
             details.append("candidate 在 discovery 前保持 unseen")
 
-            runtime.source.use(candidate)
+            runtime.source.use(bundle.candidate)
             self._poll_task = asyncio.create_task(
                 runtime.scheduler._poll_single_session(runtime.session_id)
             )
@@ -40,7 +45,13 @@ class FlowStepsMixin:
             if runtime.queue.persist_error is not None:
                 raise runtime.queue.persist_error
             if not ready:
-                raise RuntimeError("scheduler did not persist discovery")
+                return self._inconclusive(
+                    key,
+                    name,
+                    self._timed_end(started),
+                    [*details, "scheduler 未在期限内完成 discovery 持久化"],
+                    {"pending_verified": False},
+                )
             discovery = runtime.queue.discovery_result
             if discovery is None or discovery.admitted != 1:
                 raise RuntimeError("candidate was not admitted")
@@ -58,6 +69,7 @@ class FlowStepsMixin:
             details.append("production persist_discovery 已写入 pending")
             details.append("delivery_sources 已记录实际订阅来源")
             return self._pass(
+                key,
                 name,
                 self._timed_end(started),
                 details,
@@ -65,6 +77,7 @@ class FlowStepsMixin:
             )
         except Exception as exc:
             return self._fail(
+                key,
                 name,
                 self._timed_end(started),
                 exc,
@@ -72,20 +85,28 @@ class FlowStepsMixin:
                 facts={"pending_verified": False},
             )
 
-    async def _step_06_delivery_acceptance(self) -> object:
+    async def _step_08_claim_send_ack_seen(self) -> object:
+        key = "claim_send_ack_seen"
         name = "claim、adapter、ack 与 seen"
         started = self._timed_start()
+        blockers = self._dependency_blockers("warmup_pending")
+        if blockers:
+            return self._skip(key, name, blockers)
         runtime = self._runtime
         if runtime is None or self._poll_task is None:
-            return self._skip(name, "pending 链路未就绪")
-        if self._artifacts.get("pending_verified") is not True:
-            return self._skip(name, "pending 状态未通过验证")
+            return self._skip(key, name, ("warmup_pending",))
         details: list[str] = []
         runtime.queue.release_claim.set()
         try:
             entered = await self._wait_event_or_poll(self._send_entered)
             if not entered:
-                raise RuntimeError("scheduler did not enter adapter")
+                return self._inconclusive(
+                    key,
+                    name,
+                    self._timed_end(started),
+                    ["scheduler 未在期限内进入 adapter"],
+                    _send_facts(self),
+                )
             row = await self._delivery_row()
             if row is None:
                 raise RuntimeError("sending delivery is missing")
@@ -102,18 +123,14 @@ class FlowStepsMixin:
             await asyncio.wait_for(
                 asyncio.shield(self._poll_task), self.POLL_SECONDS
             )
-            facts = {
-                "send_attempts": self._send_attempts,
-                "adapter_accepted": self._send_result
-                if self._send_result is not None
-                else "unknown",
-            }
+            facts = _send_facts(self)
             if self._send_entries != 1 or self._send_attempts > 1:
                 raise RuntimeError("adapter bridge invoked more than once")
             if self._send_error is not None:
                 raise self._send_error
             if self._send_result is None:
                 return self._inconclusive(
+                    key,
                     name,
                     self._timed_end(started),
                     [*details, "adapter 结果未知，delivery 保持 lease recovery 语义"],
@@ -121,6 +138,7 @@ class FlowStepsMixin:
                 )
             if self._send_result is not True:
                 return self._fail(
+                    key,
                     name,
                     self._timed_end(started),
                     RuntimeError("adapter rejected delivery"),
@@ -137,6 +155,7 @@ class FlowStepsMixin:
             details.append("production ack_success 已写入 accepted")
             details.append("candidate 已写入 subscription-level seen")
             return self._pass(
+                key,
                 name,
                 self._timed_end(started),
                 details,
@@ -144,6 +163,7 @@ class FlowStepsMixin:
             )
         except asyncio.TimeoutError as exc:
             return self._fail(
+                key,
                 name,
                 self._timed_end(started),
                 exc,
@@ -156,17 +176,22 @@ class FlowStepsMixin:
             )
         except Exception as exc:
             return self._fail(
+                key,
                 name,
                 self._timed_end(started),
                 exc,
                 details,
-                facts={
-                    "send_attempts": self._send_attempts,
-                    "adapter_accepted": self._send_result
-                    if self._send_result is not None
-                    else "unknown",
-                },
+                facts=_send_facts(self),
             )
+
+
+def _send_facts(runner) -> dict[str, str | int | bool]:
+    return {
+        "send_attempts": runner._send_attempts,
+        "adapter_accepted": runner._send_result
+        if runner._send_result is not None
+        else "unknown",
+    }
 
 
 async def _warmup_state(runtime, baseline: Post, candidate: Post) -> tuple:
