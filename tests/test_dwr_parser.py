@@ -244,7 +244,6 @@ def test_dwr_rejects_invalid_authoritative_url(value):
         ("", "empty"),
         ("   ", "blank"),
         (" 1a_2b ", "surrounding_whitespace"),
-        ("1a_2b", "slug"),
         ("/post/1a_2b", "relative_post_path"),
         ("post/1a_2b", "relative_post_path"),
         ("//demo.lofter.com/post/1a_2b", "protocol_relative"),
@@ -281,6 +280,67 @@ def test_dwr_invalid_permalink_reports_only_safe_value_shape(value, shape):
     if value:
         assert value not in str(error)
         assert value not in error.diagnostic
+
+
+def test_dwr_accepts_permalink_slug_as_post_id_evidence():
+    mapped = _map_post({
+        "post": {
+            "postUrl": "https://alice.lofter.com/post/001A_00002B/",
+            "permalink": "1a_2b",
+            "postId": 43,
+            "blogId": 26,
+            "blogInfo": {"blogId": 26, "blogName": "alice"},
+        }
+    })
+
+    assert mapped is not None
+    assert mapped.post_id == "1a_2b"
+    assert mapped.url == "https://alice.lofter.com/post/1a_2b"
+    assert mapped.author_username == "alice"
+
+
+def test_dwr_accepts_permalink_slug_without_full_post_url():
+    mapped = _map_post({
+        "post": {
+            "permalink": "001A_00002B",
+            "postId": 43,
+            "blogId": 26,
+            "blogInfo": {"blogId": 26, "blogName": "alice"},
+        }
+    })
+
+    assert mapped is not None
+    assert mapped.post_id == "1a_2b"
+    assert mapped.url == "https://lofter.com/post/1a_2b"
+    assert mapped.author_username == "alice"
+
+
+def test_dwr_rejects_permalink_slug_conflicting_with_post_url():
+    with pytest.raises(DWRIdentityError) as exc_info:
+        _map_post({
+            "post": {
+                "postUrl": "https://alice.lofter.com/post/1a_2b",
+                "permalink": "1a_2c",
+            }
+        })
+
+    assert exc_info.value.reason == "post_url_conflict"
+    assert exc_info.value.fields == ("permalink", "postUrl")
+
+
+def test_dwr_rejects_permalink_slug_conflicting_with_numeric_post_id():
+    with pytest.raises(DWRIdentityError) as exc_info:
+        _map_post({
+            "post": {
+                "permalink": "1a_2b",
+                "postId": 44,
+                "blogId": 26,
+                "blogInfo": {"blogId": 26},
+            }
+        })
+
+    assert exc_info.value.reason == "post_id_conflict"
+    assert exc_info.value.fields == ("permalink", "postId")
 
 
 def test_dwr_identity_shape_is_allowlisted():

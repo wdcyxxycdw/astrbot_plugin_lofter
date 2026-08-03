@@ -20,6 +20,7 @@ from .errors import (
 )
 from .parser import Post, extract_lofter_username, post_field_metadata
 from .post_identity import (
+    canonical_post_id,
     consistent_blog_owner,
     decimal_post_id,
     post_url_identity,
@@ -226,7 +227,7 @@ def _authoritative_url_identity(
     if not isinstance(value, str):
         raise DWRIdentityError("invalid_identity_type", key)
     try:
-        validate_text_bytes(value, "url", MAX_URL_BYTES)
+        value = validate_text_bytes(value, "url", MAX_URL_BYTES)
     except SourceLimitError:
         raise
     except SourceSchemaError:
@@ -235,6 +236,9 @@ def _authoritative_url_identity(
             key,
             value_shape=_dwr_url_shape(value),
         ) from None
+    if key == "permalink" and _DWR_POST_SLUG.fullmatch(value):
+        post_id = canonical_post_id(value)
+        return key, f"https://lofter.com/post/{post_id}", post_id, ""
     try:
         url, post_id, owner = post_url_identity(value)
     except ValueError:
