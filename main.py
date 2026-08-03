@@ -132,7 +132,7 @@ async def _search_unique_posts(source: ContentSource, keyword: str, limit: int):
     "astrbot_plugin_lofter",
     "user",
     "解析 Lofter 链接，订阅 Lofter 标签/博主，搜索 Lofter 内容，支持标签表达式统计",
-    "v2.0.3",
+    "v2.0.4",
 )
 class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
