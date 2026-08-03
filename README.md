@@ -1,17 +1,19 @@
 # astrbot_plugin_lofter
 
-AstrBot 插件，用于解析 Lofter 链接、订阅 Lofter 标签/博主、搜索 Lofter 内容。
-开发中，有 bug 或想添加新功能随时提交 issue
+AstrBot 插件，用于解析 Lofter 链接、订阅 Lofter 标签/博主、搜索内容、屏蔽作者和统计标签作品。
+
+当前版本：**v2.0.0**。
 
 ## 功能
 
-- **自动解析**：消息中出现 Lofter 帖子链接时，自动提取内容——图片贴返回图片消息链，文字贴提取完整正文并以合并转发方式发送
-- **搜索**：按关键词搜索 Lofter 内容
-- **标签统计**：按标签表达式统计作品数量，支持保存多组条件并导出 CSV
-- **LLM 工具调用**：向 AstrBot LLM 暴露搜索、订阅管理、作者屏蔽和标签统计工具，方便通过自然语言调用插件能力
-- **订阅标签**：订阅指定标签，有新内容时自动推送；支持同时添加排除规则
-- **订阅博主**：订阅指定博主，发布新文章时自动推送（含标题、作者、摘要、标签和图片）
-- **屏蔽作者**：按当前会话屏蔽作者昵称或 Lofter 用户名，屏蔽后自动解析、搜索和订阅推送都不显示该作者作品
+- **自动解析**：消息中出现 Lofter 帖子链接时自动提取内容；图片贴返回图片消息链，文字贴返回正文。
+- **搜索**：按标签搜索 Lofter 内容。
+- **标签统计**：支持 AND / OR / NOT / 括号表达式、命名条件和 CSV 汇总。
+- **标签订阅**：订阅一个或多个标签，并可添加独立的排除标签规则。
+- **博主订阅**：订阅指定博主，发现新文章后自动推送。
+- **作者屏蔽**：按会话屏蔽作者昵称或 Lofter 用户名，应用于自动解析、搜索、预览和订阅推送。
+- **LLM 工具调用**：向 AstrBot LLM 暴露搜索、订阅、作者屏蔽和标签统计工具。
+- **持久化投递**：候选帖子先写入 SQLite 队列，再按稳定顺序逐条发送和确认。
 
 ## 安装
 
@@ -23,104 +25,130 @@ AstrBot 插件，用于解析 Lofter 链接、订阅 Lofter 标签/博主、搜�
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| `lofter_cookie` | Lofter 登录 Cookie（从浏览器开发者工具复制） | 空 |
+| `lofter_cookie` | Lofter 登录 Cookie；仅在需要授权的回退请求中按请求注入 | 空 |
 | `poll_interval` | 订阅轮询间隔（分钟） | 30 |
 | `max_images` | 解析帖子时最多展示的图片数量 | 3 |
-| `search_limit` | 搜索结果最多返回的条数（最大 100，超过 20 条自动翻页） | 3 |
+| `search_limit` | 搜索结果最多返回的条数，范围 1–100 | 3 |
 
 ### 获取 Cookie
 
-1. 浏览器登录 [lofter.com](https://www.lofter.com)
-2. 打开开发者工具（F12）→ Network 标签
-3. 刷新页面，点击任意请求，复制请求头中的 `Cookie` 字段值
-4. 粘贴到插件配置的 `lofter_cookie` 中，或运行时使用 `/lofter cookie <值>` 命令更新
+1. 浏览器登录 [lofter.com](https://www.lofter.com)。
+2. 打开开发者工具（F12）→ Network。
+3. 刷新页面，点击任意 Lofter 请求，复制请求头中的 `Cookie` 字段值。
+4. 粘贴到插件配置的 `lofter_cookie`，或由管理员执行 `/lofter cookie <值>`。
+
+匿名请求不会携带 Cookie。需要 Cookie 的回退请求不会把凭据带到其他 origin；跨 origin 重定向会被拒绝。
+
+## 内容解析方式
+
+插件不是只依赖页面 HTML：
+
+1. 优先读取结构化的移动端 JSON 数据。
+2. 按内容类型和失败原因回退到页面 embedded JSON、HTML 或 DWR 标签接口。
+3. DWR 响应在受限子进程中执行并提取对象图。
+4. 各来源都执行 canonical 帖子身份、字段证据和来源一致性校验；证据冲突时 fail closed，而不是拼接不可信结果。
+
+HTML 仍是博主页面等路径的回退来源，但不再是唯一解析方式。
 
 ## 使用
 
 ### 自动解析链接
 
-直接在聊天正文中发送 Lofter 帖子链接，插件会自动解析并返回内容；回复/引用消息中包含的历史链接不会触发解析：
+直接在聊天正文中发送 Lofter 帖子链接，插件会自动解析并返回内容；回复或引用消息中的历史链接不会触发解析：
 
-```
+```text
 https://username.lofter.com/post/xxxxxx
 ```
 
-**图片贴**（含 Lofter CDN 图片）：
-```
-▸ 帖子标题
-作者：xxx
+图片贴会发送统一格式文本和图片；无图片的长文本会按适配器能力使用合并转发或文本结果。
 
-#tag1 #tag2
+### 权限边界
 
-摘要内容
+以下三个命令是当前会话的只读查询，不要求管理员权限：
 
-──────────────
-https://...
-[图片]
-```
+- `/lofter list`
+- `/lofter block-list`
+- `/lofter count-list`
 
-**文字贴**（无图片）：以合并转发消息发送，第一条为标题/作者/标签，中间为正文分段内容，最后一条为原链接。正文超过 2 万字时最多发送前 10 块（约 2 万字），并附提示。
+其余 `/lofter` 命令均为管理员命令，并同时经过 AstrBot 权限过滤器和 handler 内检查。自动链接解析不属于管理命令。
 
 ### 命令
 
-| 命令 | 说明 |
-|------|------|
-| `/lofter search <关键词>` | 搜索 Lofter 内容 |
-| `/lofter subtag <标签名> [-排除标签...]` | 订阅标签，可同时指定排除规则 |
-| `/lofter subtagpreview <标签名> [-排除标签...]` | 订阅标签并立即预览最新 3 条内容 |
-| `/lofter subblog <用户名>` | 订阅博主 |
-| `/lofter count <名称> = <表达式>` | 保存并执行标签表达式统计 |
-| `/lofter count-list` | 查看已保存的全局统计条件（带编号） |
-| `/lofter count-del <名称或编号>` | 按名称或 `count-list` 编号删除统计条件 |
-| `/lofter count-all` | 执行全部统计条件并生成 CSV |
-| `/lofter list` | 查看当前会话的订阅列表（带编号） |
-| `/lofter unsub <编号>` | 按编号取消订阅（编号来自 `/lofter list`） |
-| `/lofter unsubtag <标签名>` | 取消订阅指定标签 |
-| `/lofter unexcludetag <标签名>` | 取消指定标签的排除规则 |
-| `/lofter unsubblog <用户名>` | 取消订阅博主 |
-| `/lofter cookie <值>` | 运行时更新 Lofter Cookie，立即生效 |
-| `/lofter block-author <昵称或用户名>` | 屏蔽当前会话中的指定作者 |
-| `/lofter unblock-author <昵称或用户名>` | 解除作者屏蔽 |
-| `/lofter block-list` | 查看当前会话屏蔽作者列表 |
+| 命令 | 权限 | 说明 |
+|------|------|------|
+| `/lofter list` | 公开只读 | 查看当前会话订阅列表和编号 |
+| `/lofter block-list` | 公开只读 | 查看当前会话作者屏蔽列表 |
+| `/lofter count-list` | 公开只读 | 查看已保存的全局统计条件 |
+| `/lofter search <标签>` | 管理员 | 搜索 Lofter 标签内容 |
+| `/lofter subtag <标签> [-排除标签...]` | 管理员 | 订阅标签并可同时添加排除规则 |
+| `/lofter subtagpreview <标签> [-排除标签...]` | 管理员 | 订阅标签并预览最新 3 条内容 |
+| `/lofter subblog <用户名>` | 管理员 | 订阅博主 |
+| `/lofter unsub <编号>` | 管理员 | 按 `/lofter list` 编号删除规则 |
+| `/lofter unsubtag <标签>` | 管理员 | 取消标签订阅 |
+| `/lofter unexcludetag <标签>` | 管理员 | 删除排除标签规则 |
+| `/lofter unsubblog <用户名>` | 管理员 | 取消博主订阅 |
+| `/lofter block-author <昵称或用户名>` | 管理员 | 屏蔽当前会话中的作者 |
+| `/lofter unblock-author <昵称或用户名>` | 管理员 | 解除作者屏蔽 |
+| `/lofter count <名称> = <表达式>` | 管理员 | 保存并执行标签统计 |
+| `/lofter count-del <名称或编号>` | 管理员 | 删除统计条件 |
+| `/lofter count-all` | 管理员 | 执行全部统计条件并生成 CSV |
+| `/lofter cookie <值>` | 管理员 | 更新运行时 Lofter Cookie |
+| `/lofter test` | 管理员 | 执行真实网络和真实推送的端到端测试 |
 
 ### LLM 工具调用
 
-插件会注册以下 AstrBot LLM 工具，供模型在对话中按需调用：
+插件注册四个 AstrBot LLM 工具，**全部仅管理员可调用**：
 
 | 工具 | 能力 |
 |------|------|
 | `lofter_content` | 搜索 Lofter 标签内容，返回文本结果和图片 URL |
-| `lofter_subscription` | 查看订阅、订阅/预览标签、订阅/退订博主、取消标签订阅或排除规则、按编号删除订阅 |
-| `lofter_author_block` | 查看、添加、解除当前会话作者屏蔽 |
-| `lofter_count` | 管理标签统计条件，执行单个或全部统计并生成 CSV |
+| `lofter_subscription` | 查看、添加、预览和删除标签/博主订阅及排除规则 |
+| `lofter_author_block` | 查看、添加和解除当前会话作者屏蔽 |
+| `lofter_count` | 管理标签统计条件，执行单项或全部统计并生成 CSV |
 
-订阅工具支持自然语言中的排除表达，例如“订阅原神但排除 R18”会映射为 `target="原神 -R18"`。作者屏蔽可以使用昵称、Lofter 用户名或 `https://username.lofter.com`。
+订阅工具支持 `原神 -R18` 形式的排除表达式。作者可以使用昵称、Lofter 用户名或 `https://username.lofter.com` 表示。
 
-出于安全和副作用控制，LLM 工具不会暴露 Cookie 更新和端到端测试命令；Lofter 链接解析仍由自动消息事件触发，不需要工具调用。
+LLM 工具不暴露 Cookie 更新、真实端到端测试或链接 parse；链接解析仍由自动消息事件触发。
 
-### 订阅标签与排除规则
+### 标签订阅与排除规则
 
-`/lofter subtag` 支持在标签名后用 `-` 添加排除规则，排除规则可以单独删除，不影响订阅本身：
-
-```
-/lofter subtag 原神                    # 订阅「原神」标签
-/lofter subtag 原神 -R18               # 订阅「原神」，同时排除带「R18」标签的帖子
-/lofter subtag 原神 -R18 -暴力         # 可同时添加多条排除规则
+```text
+/lofter subtag 原神
+/lofter subtag 原神 -R18
+/lofter subtag 原神 -R18 -暴力
 ```
 
-订阅列表（`/lofter list`）会显示每条记录的编号和类型：
+每条订阅或排除条件都是独立记录，可单独删除：
 
-```
+```text
 1. [标签｜订阅] 原神
 2. [标签｜排除] R18
 3. [博主]       username
 ```
 
-用 `/lofter unsub 2` 可直接按编号删除某条记录。
+`/lofter unsub 2` 会原子删除执行时列表中的第 2 条规则。
 
-### 屏蔽作者
+### Fetch-first 初始化与预览
 
-屏蔽名单按群聊/私聊隔离，可使用作者昵称或 Lofter 用户名：
+新增标签或博主订阅采用 fetch-first 初始化：
+
+1. 读取当前会话的订阅 revision 和 policy generation。
+2. 在 session gate 外抓取并验证新增目标，网络请求不会占用会话锁。
+3. 重新取得 gate，在单个 SQLite transaction 中复核 snapshot。
+4. 创建 `warming` 订阅，只给实际返回该帖的具体 subscription row 写入历史 seen，然后统一切换为 `active`。
+
+因此：
+
+- 合法空 feed 可以正常激活。
+- 抓取或 schema 校验失败不会留下部分订阅、排除规则、seen 或 generation 副作用。
+- 抓取期间发生退订、重新订阅或作者策略变化时，旧 snapshot 不能持久化。
+- 新的同类型订阅继承当前 active 订阅的 canonical seen 并集，删除旧来源后不会重推历史内容。
+- `subtagpreview` 只按实际来源记录 preview seen，不创建 delivery；排除或屏蔽只控制展示，被过滤帖子仍不会在解除规则后补推。
+- 只有排除规则、没有正向标签的 preview 会在写数据库前拒绝。
+
+### 作者屏蔽
+
+屏蔽名单按群聊或私聊会话隔离：
 
 ```text
 /lofter block-author 作者昵称
@@ -130,13 +158,11 @@ https://...
 /lofter unblock-author username
 ```
 
-屏蔽后，该作者作品不会出现在自动解析、搜索结果、订阅预览和订阅推送中。订阅轮询期间被屏蔽的作品会记录为已处理，解除屏蔽后不会补推旧内容。
+一次输入产生的昵称和用户名 key 会在同一个 transaction 中更新。实际变化会推进会话 policy generation，使正在抓取的旧结果失效。轮询中被屏蔽的作品会按实际订阅来源记录为已处理，解除屏蔽后不会补推旧内容。
 
-### 标签统计命令
+### 标签统计
 
-统计条件是全局保存的命名表达式，只有管理员可用：
-
-```
+```text
 /lofter count 米哈游相关 = 原神|崩铁 -R18
 /lofter count-list
 /lofter count-del 米哈游相关
@@ -144,23 +170,51 @@ https://...
 /lofter count-all
 ```
 
-表达式规则：空格或 `&` 表示 AND，`|`/`｜` 表示 OR，`-`/`－` 表示 NOT，`=`/`＝` 分隔名称和表达式，支持半角/全角括号分组。不支持 `AND`/`and` 关键字，避免和真实标签冲突。统计至少需要一个正向标签；多个正向标签会默认 5 并发扫描（每个标签内仍串行翻页），统计会持续翻页直到接口返回空页或重复页，结果会显示候选作品数、每个正向标签扫描页数。若接口在翻页后持续返回重复内容，会提示“疑似分页未生效或接口返回重复页”。
+表达式规则：
 
-`/lofter count-all` 会统计所有已保存条件并生成 CSV，CSV 包含作品数、候选作品、扫描页数、状态和错误/提示信息。
+- 空格或 `&`：AND
+- `|` / `｜`：OR
+- `-` / `－`：NOT
+- 半角或全角括号：分组
+- `=` / `＝`：分隔统计名称和表达式
+
+不支持 `AND` / `and` 关键字，以免与真实标签冲突。统计至少需要一个正向标签；结果按 canonical `post_id` 去重，并区分 `success`、`partial` 和 `failed`。`count-all` 会生成包含作品数、候选数、扫描页数、状态和错误/提示的 CSV。
+
+## 持久化投递语义
+
+订阅候选不会先截取 5 条再发送，而是先持久化到 `deliveries` / `delivery_sources`：
+
+- 保存实际返回帖子的具体 subscription row provenance；它与帖子字段 provenance 是两类不同证据。
+- 标签和博主共享同一个 session 队列，按 `published_at ASC, post_id ASC` 稳定消费。
+- 每个 session 每轮最多进行 5 次真实发送；超过部分留在队列中，即使下一轮 feed 已为空也会继续 drain。
+- 每条成功后立即独立 ack；第 N 条失败时，之前的 accepted 保留，第 N+1 条不会在本轮发送。
+- 只有 adapter **严格返回 `True`** 才转为 `accepted` 并写入当前有效来源的 seen。`False`、`None` 或普通异常不会确认成功。
+- 普通确定失败按 60 秒、300 秒、1800 秒、7200 秒、之后 21600 秒退避；第 10 次进入 `dead`。
+- 发送 timeout 为 60 秒，claim lease 为 5 分钟。timeout 或任务取消的结果不确定，因此 delivery 保持 `sending`，等待 lease recovery。
+- 每个 session 的 `pending + sending` admission 上限为 5000；超出容量的候选不写 seen，后续轮询可再次发现。
+
+投递保证是 **at-least-once**，不是 exactly-once：adapter 已接受但进程在本地 ack 前崩溃，或 60 秒 timeout 后底层发送最终完成，都可能在 lease 恢复后产生重复消息。
 
 ## 数据存储
 
-插件使用 SQLite 持久化数据，文件位于：
+SQLite 文件位于：
 
-```
+```text
 <astrbot_root>/data/plugins/astrbot_plugin_lofter/lofter.db
 ```
 
-- **精确去重**：通过 `seen_posts` 表记录会话已处理的帖子 ID；单轮最多推送 5 条，超出的新帖会保留到后续轮询继续推送，不会因限流被标记为已处理
-- **跨订阅去重**：通过 `sent_posts` 表记录会话维度已推送的帖子 ID，同一帖子匹配多个订阅标签时只推送一次
-- **数据库访问串行化**：所有 SQLite 操作通过插件专用单线程执行器运行，避免多会话轮询和命令并发时共享连接被多线程同时访问
-- **冷启动保护**：首次订阅及每次新增订阅时自动预热，不会刷屏推送历史帖子
-- **JSON 迁移**：若目录下存在旧版 `subscriptions.json`，首次启动会自动导入，原文件保留
+主要持久状态包括：
+
+- `subscriptions`、`subscription_revisions`、`session_policies`
+- 按 subscription 存储的 `seen_posts` 和水位/checkpoint
+- `deliveries` 和 `delivery_sources`
+- `author_blocks`、`count_conditions` 和配置 marker
+
+同一数据库路径通过 `<db>.lock` 的 OS advisory lock 保证单实例。SQLite 使用 WAL、foreign keys、显式 busy timeout 和单 callback transaction；事务不跨网络 `await`。
+
+旧版 `subscriptions.json` 会通过 version 2 marker 原子导入，源文件保留。Schema v1–v4 会在单个 transaction 中迁移到 v5，并在提交前校验结构和外键。
+
+当前版本**没有**自动清理 accepted/dead/seen 的 retention、dead delivery 恢复命令或 ReportStore。数据库会随历史记录持续增长，需要部署方自行监控和备份；不要直接修改状态表绕过队列协议。
 
 ## 许可证
 

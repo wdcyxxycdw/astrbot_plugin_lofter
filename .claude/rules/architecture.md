@@ -2,94 +2,267 @@
 
 ## 概览
 
-AstrBot 插件，功能：自动解析 Lofter 帖子链接提取图片、订阅标签/博主定时推送、搜索标签内容，并支持按会话屏蔽指定作者。
+AstrBot 插件，功能：自动解析 Lofter 帖子链接、订阅标签/博主并定时推送、搜索标签内容、统计标签表达式，以及按会话屏蔽作者。
+
+当前插件版本为 v2.0.0，数据库 Schema 为 v5。
 
 ## 文件结构
 
-```
-main.py            # 插件入口，注册所有命令和事件处理器
+```text
+main.py                    # 插件入口、命令、自动解析事件和生命周期
 core/
-  client.py        # HTTP 客户端，封装 GET 和 DWR 标签搜索
-  parser.py        # Post 数据模型 + 博主主页 HTML 解析
-  formatter.py     # 统一帖子文本格式化（format_post），各推送/搜索/解析场景共用
-  dwr_parser.py    # DWR 响应解析，调用 dwr_engine 执行 JS，提取对象图
-  dwr_engine.py    # 用 dukpy 执行 DWR 响应脚本，提取对象图
-  db.py            # SQLite 操作层（WAL 模式，async via run_in_executor）
-  db_migrations.py # 数据库 schema 迁移定义和执行
-  storage.py       # Subscription dataclass + SubscriptionStorage
-  scheduler.py     # 订阅轮询调度器
-  llm_tools.py     # AstrBot LLM 工具 mixin：搜索、订阅管理、作者屏蔽和统计工具调用
-  llm_tool_formatters.py # LLM 工具文本结果格式化辅助函数
-  author_block.py  # 会话级作者屏蔽：输入归一化、名单存储和 Post 过滤
-  tag_count.py     # 标签统计表达式解析、求值、分页统计和 CSV 生成
-  count_commands.py # /lofter count 系列统计命令 mixin
-  e2e_test.py            # /lofter test 端到端集成测试执行器（E2ETestRunner + format_report）
-  e2e_steps_network.py   # E2E 步骤 mixin：step 01-11（配置/网络/解析/过滤/格式化）
-  e2e_steps_flow.py      # E2E 步骤 mixin：step 12-20（搜索/订阅/调度/推送）
+  client.py                # 长生命周期 HTTP client、重试/限流/重定向和 Cookie 隔离
+  content_source.py        # Mobile 主路径和 DWR/embedded JSON/HTML 回退编排
+  mobile_adapter.py        # Mobile API 请求适配
+  mobile_parser.py         # Mobile JSON 严格解析
+  parser.py                # Post 数据模型、embedded JSON/HTML 解析
+  post_identity.py         # canonical post ID/URL/owner 校验
+  post_fields.py           # 字段 completeness、provenance、合并和证据冲突校验
+  source_scan.py           # 分页扫描、重启和 evidence items 分离
+  dwr_parser.py            # DWR 响应映射和对象图提取
+  dwr_engine.py            # 受限子进程执行 DWR 响应脚本
+  db.py                    # SQLite async 操作层和单 callback transaction
+  db_schema.py             # Schema v5 DDL 与严格结构校验
+  db_migrations.py         # 空库建库、v1-v4 到 v5 单事务迁移
+  db_json_migration.py     # subscriptions.json v2 原子迁移和 marker
+  db_checkpoints.py        # legacy checkpoint/floor 比较与水位更新
+  db_repository.py         # subscription snapshot、原子 mutation 和兼容 repository API
+  instance_lock.py         # 数据库生命周期级跨平台 OS advisory lock
+  storage.py               # Subscription dataclass 和兼容读取 API
+  session_gate.py          # 按 session_id 共享的 asyncio gate
+  subscription_service.py  # fetch-first 订阅、预览、删除和 snapshot fence
+  delivery.py              # 持久 delivery queue、claim/lease/ack/backoff 状态机
+  scheduler.py             # 抓取 actual sources、fenced discovery 和 session queue drain
+  formatter.py             # 统一帖子文本和图片格式化
+  llm_tools.py             # 四个管理员 LLM 工具
+  author_block.py          # 会话级作者屏蔽和原子 policy mutation
+  expression_planner.py    # 标签表达式 ROBDD 规划
+  tag_count.py             # 标签统计求值、分页扫描和 CSV
+  count_commands.py        # /lofter count 命令 mixin
+  e2e_test.py              # /lofter test 真实端到端执行器
+  e2e_steps_network.py     # E2E 网络/解析步骤
+  e2e_steps_flow.py        # E2E 订阅/调度/推送步骤
 ```
+
+## 权限边界
+
+公开只读 CLI 只有：
+
+- `/lofter list`
+- `/lofter block-list`
+- `/lofter count-list`
+
+其余 `/lofter` 命令使用 AstrBot `ADMIN` permission filter，并在 handler 内通过 `event.is_admin()` 二次检查。自动链接解析保持普通消息事件能力。
+
+四个 LLM 工具 `lofter_content`、`lofter_subscription`、`lofter_author_block`、`lofter_count` 全部只允许管理员调用。工具不暴露 Cookie 更新、真实 E2E 测试或链接 parse。
+
+## 内容源与 HTTP 边界
+
+`DefaultContentSource` 实现 `ContentSource`：
+
+- 单帖：Mobile detail 优先；失败后依次尝试匿名页面 embedded JSON、HTML parser，最后才进行 credentialed HTML 回退。
+- 标签：Mobile tag 优先；结果不完整时从 offset 0 重启 DWR，随后按 DWR offset 翻页。
+- 博主：Mobile blog 优先；结果不完整时回退匿名/授权 HTML，并在必要时补全帖子详情。
+- primary/fallback evidence 与业务 `items` 分离；fallback 必须覆盖 primary 已观察到的 identity 下界。
+- canonical ID、URL、owner、字段别名和重复 occurrence 发生冲突时 fail closed。
+
+HTTP client 使用长生命周期 `aiohttp.ClientSession` 和 `DummyCookieJar`：
+
+- 匿名请求不携带 Cookie。
+- Cookie 只在 `credentialed=True` 的第一方 HTTPS 请求中按请求注入。
+- credentialed redirect 不允许改变 origin。
+- 全局并发 8、单 host 并发 4；连接/总 timeout、响应体大小、重试和关闭状态都有显式边界。
+
+DWR 响应由受限子进程执行，不在插件主进程直接执行远端脚本。
 
 ## 数据库表
 
-```sql
-config(key, value)                                    -- Cookie 等配置，schema_version 迁移标记
-subscriptions(id, session_id, type, role, target)     -- type ∈ {tag, blog}；role ∈ {subscribe, exclude}
-seen_posts(session_id, type, post_id)                 -- 会话+类型维度，冷启动保护 + 新帖检测
-sent_posts(session_id, post_id)                       -- 会话维度，跨订阅去重
-count_conditions(name, expression, updated_at)        -- 命名标签统计表达式
-author_blocks(session_id, kind, value, display)       -- 会话级作者屏蔽；kind ∈ {name, username}
+```text
+config(key, value)                                      -- schema/json migration marker、Cookie 等配置
+subscriptions(id, session_id, type, role, target, state, revision,
+              initialized_at, created_at, updated_at)   -- 原子规则；warming/active
+subscription_revisions(session_id, subscription_type,
+                       revision, updated_at)             -- 会话+类型集合 generation
+session_policies(session_id, policy_generation,
+                 updated_at)                            -- 会话 policy generation
+session_activity(session_id, inactive_since, updated_at) -- 活跃状态兼容数据
+seen_posts(subscription_id, post_id, published_at,
+           seen_at)                                     -- subscription 级历史
+subscription_watermarks(subscription_id, history_before,
+                        legacy_post_id_floor, updated_at) -- 初始化历史界线和 legacy floor
+legacy_checkpoints(subscription_id, post_id, created_at) -- JSON last_post_id 一次性门槛
+deliveries(id, session_id, post_id, status, payload_json,
+           published_at, sort_key, lease_*, attempts,
+           error_*, timestamps)                         -- session+post 唯一投递状态
+delivery_sources(delivery_id, subscription_id,
+                 subscription_revision, policy_generation,
+                 discovered_at)                         -- 投递的实际 subscription 来源
+count_conditions(name, expression, updated_at)          -- 命名标签统计表达式
+author_blocks(session_id, kind, value, display)         -- 会话级作者屏蔽
 ```
 
-每条订阅是一个原子条件：订阅 tag A = (tag, subscribe, A)，排除 tag B = (tag, exclude, B)，互相独立可单独删除。
+不再保留旧 `sent_posts` 或会话级 `seen_posts` 表。旧业务 API 通过 v5 结构提供兼容：会话级 seen 查询聚合当前 active subscribe；兼容 `mark_sent` 写入 `accepted` delivery。
 
-## 轮询流程
+每条订阅是一个原子条件：`(tag, subscribe, A)` 与 `(tag, exclude, B)` 独立存在，可单独删除。
 
+## 数据库与实例生命周期
+
+- 同一数据库路径通过 `<db>.lock` 的非阻塞 OS advisory lock 保证单实例；锁在 DB initialize 和 scheduler start 前取得，启动失败或 terminate 时释放。
+- SQLite 设置 WAL、foreign keys 和显式 `busy_timeout`；lock/busy 错误分类为 `SQLiteBusyError`。
+- `BEGIN IMMEDIATE`、SQL/校验、COMMIT/ROLLBACK 全部位于一次同步 executor callback；transaction 不跨 `await`。
+- 空库在一个 transaction 建完整 v5；真实 v1-v4 在一个 transaction 重建迁移，写 marker 前验证严格结构和 `foreign_key_check`。
+- `subscriptions.json` 使用 `json_migration_version=2`：DB 外完整验证，transaction 内重读 marker、批量插入并写 marker；源文件保留。
+- JSON `last_post_id` 写入具体 subscription 的 `legacy_checkpoints`；首轮 discovery 在同一 fenced transaction 中消费 checkpoint、写 seen/水位并清理 checkpoint。
+
+## Session gate、revision 与 policy
+
+同一个 `SessionGateRegistry` 注入订阅服务、作者屏蔽、scheduler 和 delivery queue：
+
+- 同 session 的 mutation、fenced discovery、claim 和 ack 串行。
+- 不同 session 可以并发。
+- 网络 fetch、字段 enrich 和 adapter send 不持 gate。
+
+Generation 语义：
+
+- `subscription_revisions` 表示 session/type 的订阅集合 generation。
+- 具体 subscription row 的 `revision` 是该 row 生命周期创建时的 type revision。
+- add/remove/exclude/unexclude 实际改变集合时，对应 type revision 和 policy generation 各推进一次。
+- block/unblock 只推进 policy generation。
+- duplicate/no-op 不推进 generation。
+- 未变化 row 不因同类型其他规则变化而批量更新 revision。
+
+持久化抓取结果时同时复核：row ID、state、row revision、type generation 和 policy generation。任一不匹配，旧 snapshot 的 discovery 整体零副作用。
+
+## Fetch-first 订阅初始化
+
+runtime 订阅 mutation 统一经过 `SubscriptionService`，不使用 insert-first warmup：
+
+```text
+短暂取得 session gate并读取 snapshot
+→ 释放 gate
+→ gate 外抓取、enrich、identity/字段/publish-time 校验
+→ 重新取得 gate
+→ 一个 transaction 内复核 snapshot
+→ 创建 warming subscription
+→ 写初始化 watermark、历史继承和 actual-source seen
+→ 统一切换为 active
+→ 推进 revision/policy generation
 ```
-_poll_all → 按 (session_id, type) 分组 → 不同 session 并发
-  tag 路径：_check_tag_session(session_id, all_tag_subs)
-      → _build_tag_rule()        # subscribe → search_tags；exclude → exclude_tags
-      → fetch_tag_posts()        # 按 search_tags 逐个调 DWR，合并去重
-      → apply_filter()           # 按 exclude_tags 过滤
-      → filter_unseen_session()  # 会话级新帖检测
-      → 冷启动判断（seen_count==0）→ mark_seen_session()
-      → 作者屏蔽过滤           # 已屏蔽作者作品不推送，但已写入 seen_posts
-      → filter_unsent()          # 会话级去重
-      → _push_tag_posts()        # 最多5条，倒序
-      → mark_sent()
 
-  blog 路径：_check_blog_sub(sub) × N（每博主独立）
-      → fetch_blog_posts()       # HTML 抓取
-      → filter_unseen_session()  # 会话级（type='blog'）
-      → 冷启动判断
-      → mark_seen_session()
-      → 作者屏蔽过滤           # 已屏蔽作者作品不推送，但已写入 seen_posts
-      → filter_unsent() → _enrich_blog_posts() → 作者屏蔽过滤 → _push_blog_post() → mark_sent()
+规则：
+
+- 任一新增正向 source 抓取或 schema 校验失败，整批 subscribe/exclude 零持久副作用。
+- 合法空 feed 可以激活。
+- 纯 exclude mutation 不需要网络；纯 exclude preview 在写数据库前拒绝。
+- 新增同 session/type subscribe 在 transaction 内继承已有 active subscribe 的 canonical seen 并集；exclude 不继承。
+- 同批新 subscription 在来源 seen 全部写完前保持 `warming`，避免互相继承尚未完成的初始化状态。
+- Preview 给本次明确抓取的实际 subscription sources 写 seen，但不创建 delivery。
+- Preview 的 exclude/block 只控制显示；被过滤帖子仍按实际来源写 seen，解除规则后不补推。
+- unsubscribe 和 index remove 在 gate 内单 transaction 重读并删除当前行，避免 list/remove 竞态。
+- 作者屏蔽一次输入产生的 name/username keys 在同一个 transaction 原子更新。
+
+## 生产轮询与持久队列
+
+生产 `_poll_all()` 不再使用 `seen_count == 0` 冷启动，也不沿 tag/blog 两条路径直接发送：
+
+```text
+DeliveryQueue.session_ids()
+  → active subscribe sessions UNION pending/sending queue-only sessions
+  → 不同 session 并发执行 _poll_delivery_session
+
+每个 session：
+  capture SessionSnapshot
+  → gate 外逐个 active subscription row 抓取和 enrich
+  → 每个 row 形成 SourceBatch(actual DeliverySource, posts)
+  → gate 内 persist_discovery(snapshot, batches)
+  → drain 统一 session delivery queue
 ```
 
-## Warmup 机制
+### Actual subscription provenance
 
-新增 subscribe 记录时（`/lofter subtag`），立即抓取该 target 的当前帖子并 `mark_seen_session`，不推送。防止中途新增订阅触发全量旧帖推送。
+标签按每个具体 subscribe row/target 抓取，博主也按具体 row 抓取。`DeliverySource` 保存：
+
+- `subscription_id`
+- `subscription_revision`
+- `type`
+- `target`
+
+该 provenance 表示“哪个订阅请求实际返回了帖子”，不能从帖子 tags/author metadata 推测；它与 `Post.provenance` 的字段来源不是同一概念。
+
+在 exclude 和作者屏蔽前保留 actual source。legacy checkpoint/floor、`history_before`、exclude、block、accepted rediscovery、passive seen 和 delivery upsert 全部在最终 fenced transaction 内处理。
+
+### Discovery
+
+`persist_discovery()`：
+
+- 先严格复核 snapshot 和所有具体 source row。
+- 按 canonical `post_id` 合并兼容字段证据；冲突 fail closed。
+- eligible candidate 先完整持久化，不在 discovery 阶段截取前 5 条。
+- payload 使用 versioned JSON 保存完整 `Post` 和字段 provenance。
+- `sort_key = f"{published_at:020d}:{post_id}"`，消费按 `(published_at ASC, post_id ASC)`。
+- accepted 永不回 pending；dead 不自动恢复；cancelled 在重新发现当前有效来源时可恢复 pending。
+- accepted 历史迁移行即使 `payload_json=NULL` 也永不 claim。
+- 每 session `pending + sending` admission 上限 5000；超出的新候选不写 seen，返回 backpressure 数量并记录 warning。
+
+### Claim、发送与 ack
+
+Claim transaction：
+
+1. 恢复 expired `sending`。
+2. 若 session 已有未过期 `sending`，返回 `BUSY`。
+3. 按稳定顺序选择最早 due pending。
+4. 严格 decode payload，并按当前 subscription row、exclude 和作者屏蔽重新验证来源。
+5. 无有效来源的 delivery 转 `cancelled`；畸形 payload 也转 `cancelled`，避免永久阻塞队头。
+6. 验证通过后才生成 lease token，并原子切换为 `sending`。
+
+发送在 gate 外进行：
+
+- tag/blog 共用同一个 session queue；每轮合计最多 5 次真实 `send_func` 调用。
+- 每条成功立即独立 ack；第 N 条失败后停止本 session 本轮 drain。
+- 仅 adapter 严格返回 `True` 才 accepted，并为 ack 时仍有效的全部 sources 写 seen。
+- `False`、`None` 或普通异常：attempts + 1、清 lease、设置 backoff，不写 seen。
+- backoff：60、300、1800、7200 秒，第 5–9 次为 21600 秒；第 10 次进入 dead。
+- send timeout 为 60 秒，lease 为 5 分钟。
+- timeout 或 `CancelledError` 保持 `sending`；取消继续向上传播，等待 lease recovery。
+- stale lease token 对状态、attempts、错误、时间戳和 seen 全部零副作用。
+- claim 会在一个 transaction 中连续跳过无效 due row，寻找下一条有效 delivery。
+
+投递语义为 at-least-once：adapter 已接受但本地 ack 前崩溃，或 timeout 后底层发送实际完成，都可能在 lease 恢复后重复发送。
+
+抓取或 fenced persist 失败不会阻止当前 session 尝试 drain 已持久化 backlog；因此 feed 已空的 queue-only session 仍可继续发送历史 pending。
 
 ## DWR 请求关键参数
 
 `POST https://www.lofter.com/dwr/call/plaincall/TagBean.search.dwr`
 
-- `c0-param3=string:new`：按最新排序
-- `c0-param6=number:{limit}`：返回条数
-- `c0-param7=number:0`：固定 0（不是 limit）
-- `c0-param8=number:0`：固定 0（传时间戳会导致内容不是最新）
+- `c0-param3=string:new`：按最新排序。
+- `c0-param6=number:{limit}`：本页返回数量。
+- `c0-param7=number:{offset}`：当前分页 offset，后续页按 `offset + limit` 推进。
+- `c0-param8=number:0`：固定 0；不能传当前时间戳。
 
-## 关键设计决策
+## 标签统计
 
-- 订阅原子化：每条记录对应单一搜索条件（subscribe 或 exclude），可单独增删
-- `seen_posts` 改为会话级（session_id, type, post_id）：聚合轮询后不再绑定 subscription_id；删单条订阅不影响历史 seen 记录
-- `sent_posts` 不变（会话维度跨订阅去重）
-- tag 按 session 聚合拉取：同 session 所有 subscribe target 合并成一次多 API 调用，reduce 请求次数
-- blog 仍按行独立轮询：每个博主 URL 不同，无法聚合
-- 作者屏蔽按 session 隔离，同时支持昵称和 Lofter 用户名匹配；订阅轮询中被屏蔽作品仍写入 seen_posts，解除屏蔽后不补推旧内容
-- tag 统计独立于订阅：`/lofter count` 系列读取 `count_conditions`，不改变 `subtag` 订阅规则
-- count 表达式支持 AND / OR / NOT / 括号，用于一次性统计组合标签条件
-- `count-all` 汇总所有已保存统计条件并输出 CSV，优先通过 AstrBot 文件消息发送
-- 统计按 `post_id` 去重；分页统计无人工页数上限，仅以空页或无新候选自然停止，保证精准统计
-- `subtagpreview` 只写 `mark_seen`，不写 `mark_sent`：用户主动预览，不污染推送去重状态
-- E2E 测试用隔离 session（`__lofter_e2e_test__`）跑真实网络，20 步失败不中断，测完强制清理；`db.clear_session` 和 `db.delete_config` 专为清理新增
-- LLM 工具按场景合并为 `lofter_content`、`lofter_subscription`、`lofter_author_block`、`lofter_count`；不暴露 Cookie 更新、真实 E2E 测试和链接 parse，避免敏感凭据或重副作用被模型主动调用
+- 统计条件存储在 `count_conditions`，独立于订阅规则。
+- 表达式支持 AND / OR / NOT / 括号，由 ROBDD planner 选择扫描 cover。
+- 标签比较使用 Unicode `casefold()`。
+- 扫描按 canonical `post_id` 去重，不设人工页数上限，以空页或无新候选自然停止。
+- primary/fallback evidence 只用于完整性和身份验证，不直接计入业务结果。
+- 结果区分 `success`、`partial`、`failed`；不能证明精确完整时不会报告精确成功。
+- `count-all` 汇总所有命名条件并生成 CSV，优先通过 AstrBot 文件消息发送。
+
+## 已知生命周期边界
+
+当前版本未实现以下能力：
+
+- accepted/dead/seen 的自动 retention 或按 180 天/20000 条清理。
+- dead delivery 的管理员恢复命令。
+- ReportStore 或统一报告文件生命周期治理。
+- scheduler `start()`/`stop()` 全面幂等重构、全局 poll lock 或完整 task registry。
+
+因此数据库会随历史记录长期增长，运维侧需要监控、备份和容量规划。上述边界不得在文档或代码注释中描述为已实现。
+
+## E2E 测试边界
+
+`/lofter test` 使用隔离 session `__lofter_e2e_test__` 运行真实网络与真实发送的 20 步集成测试，失败不中断，结束时强制清理。该命令仅管理员可执行，不暴露给 LLM tool。
+
+普通 pytest 默认通过 marker 和 socket guard 隔离真实网络；只有显式 live 配置才允许真实测试。

@@ -1,0 +1,53 @@
+{
+  "sampled_at": "2026-07-26",
+  "redaction": {
+    "mode": "synthetic-replacement",
+    "removed": ["Cookie", "token", "device identifiers", "real tag", "real author", "real content", "real media URLs"],
+    "replacement_policy": "Only demo/example labels, reserved example.invalid URLs, and fixed numeric IDs"
+  },
+  "method": "POST",
+  "URL": "https://api.lofter.com/newapi/tagPosts.json",
+  "Content-Type": "application/x-www-form-urlencoded",
+  "Accept": "application/json",
+  "form": {
+    "tag": "demo",
+    "offset": "0",
+    "type": "0",
+    "recentDay": "0",
+    "range": "0",
+    "protectedFlag": "0",
+    "postTypes": "0",
+    "postYm": "",
+    "firstpermalink": "",
+    "style": "0"
+  },
+  "envelope": {
+    "code": 0,
+    "msg": "demo",
+    "data": {
+      "list": [
+        {
+          "postData": {
+            "postView": {
+              "blogId": 26,
+              "title": "Demo",
+              "permalink": "https://demo.lofter.com/post/1a_2b",
+              "photoCount": 1,
+              "publishTime": 1710000000000
+            },
+            "postCount": {
+              "blogId": 26
+            }
+          }
+        }
+      ],
+      "offset": 20
+    }
+  },
+  "variants": {
+    "business_failure": {"code": 403, "msg": "redacted"},
+    "valid_empty": {"list": [], "offset": -1},
+    "offset": ["integer", "-1 exhausted"],
+    "identifier": ["integer", "decimal string"]
+  }
+}

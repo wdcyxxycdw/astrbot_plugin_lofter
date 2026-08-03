@@ -1,4 +1,12 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from core.e2e_steps_network import NetworkStepsMixin
+from core.parser import Post
 from core.utils import extract_message_body_text
+from tests.test_command_permissions import _load_main_module
 
 
 class FakePlain:
@@ -26,6 +34,52 @@ class FakeMessageChain(list):
 class FakeAstrBotMessage:
     def __init__(self, message):
         self.message = message
+
+
+class FakePlainComponent:
+    def __init__(self, text):
+        self.text = text
+
+
+class FakeImageComponent:
+    def __init__(self, url):
+        self.url = url
+
+
+class FakeShareComponent:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+class FakeNodeComponent:
+    def __init__(self, content, **kwargs):
+        self.content = content
+        self.__dict__.update(kwargs)
+
+
+class FakeNodesComponent:
+    def __init__(self, nodes):
+        self.nodes = nodes
+
+
+def _message_components():
+    return SimpleNamespace(
+        Plain=FakePlainComponent,
+        Image=SimpleNamespace(fromURL=FakeImageComponent),
+        Share=FakeShareComponent,
+        Node=FakeNodeComponent,
+        Nodes=FakeNodesComponent,
+    )
+
+
+def _auto_event(platform="aiocqhttp", group_id="", private=True, self_id="10000"):
+    return SimpleNamespace(
+        get_platform_name=lambda: platform,
+        get_group_id=lambda: group_id,
+        is_private_chat=lambda: private,
+        get_self_id=lambda: self_id,
+        chain_result=lambda chain: chain,
+    )
 
 
 def test_message_str_is_used_instead_of_reply_text():
@@ -58,6 +112,164 @@ def test_reply_link_is_ignored_when_body_has_no_text():
     text = extract_message_body_text(message_obj, "")
 
     assert text == ""
+
+
+def test_qq_group_long_post_uses_share_then_nodes_with_self_uin():
+    main = _load_main_module()
+    main.Comp = _message_components()
+    event = _auto_event(group_id="group", private=False, self_id="12345")
+    post = Post(
+        post_id="abc_123",
+        title="secret title",
+        summary="可信摘要",
+        content="正文内容" * 150,
+        author="作者",
+        url="https://demo.lofter.com/post/abc_123",
+        source="embedded_json",
+        completeness=frozenset({
+            "title", "summary", "content", "author", "url"
+        }),
+        provenance={"content": "embedded_json", "url": "canonical_url"},
+    )
+
+    chain = main._auto_post_result(event, post, 3)
+
+    assert isinstance(chain[0], FakeShareComponent)
+    assert chain[0].url == post.url
+    assert post.url not in chain[0].content
+    assert isinstance(chain[1], FakeNodesComponent)
+    assert all(node.uin == "12345" for node in chain[1].nodes)
+    assert "正文内容" in "\n".join(
+        part.text for node in chain[1].nodes for part in node.content
+    )
+
+
+def test_qq_private_long_post_uses_share_without_group_nodes():
+    main = _load_main_module()
+    main.Comp = _message_components()
+    post = Post(
+        post_id="abc_123", title="标题", summary="摘要",
+        content="正文" * 300, url="https://demo.lofter.com/post/abc_123",
+        completeness=frozenset({"title", "summary", "content", "url"}),
+    )
+
+    chain = main._auto_post_result(_auto_event(private=True), post, 3)
+
+    assert len(chain) == 1
+    assert isinstance(chain[0], FakeShareComponent)
+
+
+def test_non_qq_auto_parse_uses_plain_and_truncated_images():
+    main = _load_main_module()
+    main.Comp = _message_components()
+    post = Post(
+        post_id="abc_123", title="标题", summary="摘要",
+        images=["https://img/1.jpg", "https://img/2.jpg", "https://img/3.jpg"],
+        url="https://demo.lofter.com/post/abc_123",
+        completeness=frozenset({"title", "summary", "images", "url"}),
+    )
+
+    chain = main._auto_post_result(
+        _auto_event(platform="telegram"), post, 2
+    )
+
+    assert isinstance(chain[0], FakePlainComponent)
+    assert [item.url for item in chain[1:]] == post.images[:2]
+    assert not any(isinstance(item, FakeShareComponent) for item in chain)
+    assert not any(isinstance(item, FakeNodesComponent) for item in chain)
+
+
+@pytest.mark.asyncio
+async def test_auto_parse_keeps_post_with_unknown_body_and_images():
+    main = _load_main_module()
+    main.Comp = _message_components()
+    post = Post(
+        post_id="abc_123",
+        title="可见标题",
+        summary="",
+        url="https://demo.lofter.com/post/abc_123",
+        source="mobile_tag",
+        completeness=frozenset({"title", "url"}),
+    )
+    plugin = object.__new__(main.LofterPlugin)
+    plugin._source = SimpleNamespace(get_post=AsyncMock(return_value=post))
+    plugin._author_blocks = SimpleNamespace(
+        list_by_session=AsyncMock(return_value=[])
+    )
+    plugin._max_images = 3
+    event = SimpleNamespace(
+        message_obj=[],
+        message_str=post.url,
+        unified_msg_origin="test:FriendMessage:sess",
+        get_platform_name=lambda: "test",
+        get_group_id=lambda: "",
+        is_private_chat=lambda: True,
+        get_self_id=lambda: "bot",
+        chain_result=lambda chain: chain,
+    )
+
+    results = [item async for item in plugin.auto_parse(event)]
+
+    assert len(results) == 1
+    assert "可见标题" in results[0][0].text
+    assert post.url in results[0][0].text
+    assert "部分字段未知" in results[0][0].text
+
+
+class _NetworkStepProbe(NetworkStepsMixin):
+    def __init__(self, post):
+        self._artifacts = {"rich_post": post, "tag_posts": [post]}
+
+    def _timed_start(self):
+        return 0
+
+    def _timed_end(self, started):
+        return 0
+
+    def _pass(self, name, duration, details):
+        return SimpleNamespace(name=name, status="pass", details=details)
+
+    def _fail(self, name, duration, error, details):
+        return SimpleNamespace(
+            name=name, status="fail", error=str(error), details=details
+        )
+
+    def _skip(self, name, reason):
+        return SimpleNamespace(name=name, status="skip", details=[reason])
+
+
+@pytest.mark.asyncio
+async def test_e2e_post_diagnostic_reports_unknown_images():
+    post = Post(
+        post_id="abc_123",
+        title="标题",
+        summary="",
+        images=["https://secret.invalid/image.jpg"],
+        url="https://demo.lofter.com/post/abc_123",
+        completeness=frozenset({"title", "url"}),
+    )
+
+    result = await _NetworkStepProbe(post)._step_08_post_parse()
+
+    assert "images=unknown" in result.details[0]
+    assert "images=1" not in result.details[0]
+
+
+@pytest.mark.asyncio
+async def test_e2e_format_step_accepts_partial_tag_post():
+    post = Post(
+        post_id="abc_123",
+        title="标签结果",
+        summary="可信摘要",
+        url="https://demo.lofter.com/post/abc_123",
+        source="mobile_tag",
+        completeness=frozenset({"title", "summary", "url"}),
+    )
+
+    result = await _NetworkStepProbe(post)._step_11_format()
+
+    assert result.status == "pass"
+    assert result.details[-1] == "format_post(include_time=True) OK"
 
 
 def test_message_object_message_list_is_used_for_plain_fallback():

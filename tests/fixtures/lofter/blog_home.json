@@ -1,0 +1,71 @@
+{
+  "sampled_at": "2026-07-26",
+  "redaction": {
+    "mode": "synthetic-replacement",
+    "removed": ["Cookie", "token", "device identifiers", "real blog", "real content", "real media URLs"],
+    "replacement_policy": "Only demo/example labels, reserved example.invalid URLs, and fixed numeric IDs"
+  },
+  "method": "POST",
+  "URL": "https://api.lofter.com/v2.0/blogHomePage.api?product=lofter-android-8.2.23",
+  "Content-Type": "application/x-www-form-urlencoded",
+  "Accept": "application/json",
+  "form": {
+    "blogdomain": "demo.lofter.com",
+    "offset": "0",
+    "limit": "20",
+    "method": "getPostLists",
+    "supportposttypes": "1,2,3,4,5,6",
+    "postdigestnew": "1",
+    "returnData": "1",
+    "checkpwd": "1",
+    "needgetpoststat": "1"
+  },
+  "envelope": {
+    "meta": {
+      "status": 200,
+      "msg": "demo"
+    },
+    "response": {
+      "archives": [],
+      "minTimeStamp": 1710000000000,
+      "isMember": false,
+      "offset": 20,
+      "firstPost": null,
+      "posts": [
+        {
+          "post": {
+            "id": 43,
+            "blogId": 26,
+            "title": "Demo",
+            "publishTime": 1710000000000,
+            "tag": ["demo", "example"],
+            "digest": "Demo",
+            "content": "Demo",
+            "photoLinks": ["https://media.example.invalid/demo.jpg"],
+            "photoCaptions": ["Demo"]
+          },
+          "blogInfo": {
+            "blogId": 26,
+            "blogName": "demo",
+            "blogNickName": "Demo",
+            "homePageUrl": "https://demo.lofter.com/"
+          },
+          "permalink": "https://demo.lofter.com/post/1a_2b",
+          "blogPageUrl": "https://demo.lofter.com/post/1a_2b"
+        }
+      ]
+    }
+  },
+  "variants": {
+    "valid_empty": {
+      "archives": [],
+      "minTimeStamp": 1710000000000,
+      "isMember": false,
+      "offset": -1,
+      "firstPost": null,
+      "posts": []
+    },
+    "offset": ["integer", "-1 exhausted"],
+    "tag": ["comma-separated string", "string list"]
+  }
+}
