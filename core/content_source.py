@@ -26,6 +26,7 @@ from .post_identity import (
     post_id_from_url,
     post_url_identity,
 )
+from .post_time import parse_publish_time
 from .source_limits import MAX_ITEMS, MAX_URL_BYTES, validate_text_bytes
 from .source_scan import ContentSource, SourcePage, collect_pages
 
@@ -151,9 +152,18 @@ class DefaultContentSource:
         source, value = _decode_cursor(cursor, "mobile_tag", {"mobile_tag", "dwr"})
         if source == "dwr":
             return await self._dwr_page(tag, value, limit, restarted=False)
-        primary, evidence = await self._mobile_tag_primary(tag, value)
-        if primary is not None and primary.complete:
+        primary: SourcePage | None = None
+        evidence: tuple[Post, ...] = ()
+        if cursor is None:
+            primary, evidence = await self._mobile_tag_primary(tag, value)
+        valid_primary = (
+            primary is not None and _valid_mobile_tag_primary(primary, sort)
+        )
+        if valid_primary:
             return primary
+        fallback_primary = (
+            primary if primary is not None and not primary.complete else None
+        )
         try:
             fallback = await self._dwr_page(
                 tag, "0", limit, restarted=cursor is not None
@@ -164,21 +174,21 @@ class DefaultContentSource:
             attach_source_evidence(exc, evidence)
             if not limit_identity_complete(exc):
                 raise
-            if primary is not None:
-                return _with_evidence(primary, _error_evidence(exc))
+            if fallback_primary is not None:
+                return _with_evidence(fallback_primary, _error_evidence(exc))
             raise
         except SourceSchemaError as exc:
             attach_source_evidence(exc, evidence)
             _raise_identity_error(exc)
-            if primary is not None:
-                return _with_evidence(primary, _error_evidence(exc))
+            if fallback_primary is not None:
+                return _with_evidence(fallback_primary, _error_evidence(exc))
             raise
         except SourceError as exc:
             attach_source_evidence(exc, evidence)
-            if primary is not None:
-                return _with_evidence(primary, _error_evidence(exc))
+            if fallback_primary is not None:
+                return _with_evidence(fallback_primary, _error_evidence(exc))
             raise
-        return _finish_tag_fallback(primary, fallback, evidence, cursor)
+        return _finish_tag_fallback(fallback_primary, fallback, evidence, cursor)
 
     async def _mobile_tag_primary(
         self, tag: str, cursor: str | None
@@ -398,6 +408,23 @@ async def _complete_html_blog_posts(
     except Exception as exc:
         attach_source_evidence(exc, observed)
         raise
+
+
+def _valid_mobile_tag_primary(page: SourcePage, sort: str) -> bool:
+    if not page.complete or page.sort != sort:
+        return False
+    if any(
+        not post.has_fields({"publish_time"}) or not post.publish_time
+        for post in page.items
+    ):
+        return False
+    times = [parse_publish_time(post.publish_time) for post in page.items]
+    if any(value is None for value in times):
+        return False
+    return all(
+        current <= previous
+        for previous, current in zip(times, times[1:])
+    )
 
 
 def _validate_newest_first(posts: list[Post]) -> None:

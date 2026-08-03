@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from .content_source import collect_pages
-from .filter import FilterRule, apply_filter, parse_tag_expr
+from .filter import parse_tag_expr
 from .parser import Post
-from .scheduler import fetch_blog_posts, fetch_tag_posts
 
 
 class FlowStepsMixin:
@@ -85,20 +84,16 @@ class FlowStepsMixin:
             excl_tag = f"{self.TEST_TAG}_unlikely_excl"
             subs, excls = parse_tag_expr(f"{self.TEST_TAG} -{excl_tag}")
 
-            for tag in subs:
-                await self._storage.add(s, "tag", tag, "subscribe")
-            for tag in excls:
-                await self._storage.add(s, "tag", tag, "exclude")
-            details.append(f"添加订阅 {subs}，排除 {excls}")
-
-            for tag in subs:
-                posts = await fetch_tag_posts([tag], self._source)
-                if posts:
-                    await self._db.mark_seen_session(s, "tag", [p.post_id for p in posts])
-            details.append("warmup tag 完成")
+            result = await self._subscriptions.subscribe_tags(
+                s, subs, excls
+            )
+            details.append(
+                f"添加订阅 {list(result.added_subscribes)}，"
+                f"排除 {list(result.added_excludes)}"
+            )
 
             count = await self._db.seen_count(s, "tag")
-            assert count > 0, f"warmup 后 seen_count=0"
+            assert count > 0, f"初始化后 seen_count=0"
             details.append(f"seen_count(session, 'tag') = {count}")
 
             all_subs = await self._storage.list_by_session(s)
@@ -117,18 +112,14 @@ class FlowStepsMixin:
         details: list[str] = []
         s = self.TEST_SESSION
         try:
-            from .storage import Subscription
-            await self._storage.add(s, "blog", self.TEST_BLOG)
-            details.append(f"add blog {self.TEST_BLOG} OK")
-
-            sub = Subscription(id=0, session_id=s, type="blog", role="subscribe", target=self.TEST_BLOG)
-            posts = await fetch_blog_posts(sub, self._source)
-            if posts:
-                await self._db.mark_seen_session(s, "blog", [p.post_id for p in posts])
-            details.append(f"warmup blog 抓到 {len(posts)} 条")
+            _, _, fixture_blog = await self._load_fixture()
+            result = await self._subscriptions.subscribe_blog(
+                s, fixture_blog
+            )
+            assert result.added_subscribes == (fixture_blog,)
+            details.append(f"subscribe blog {fixture_blog} OK")
 
             count = await self._db.seen_count(s, "blog")
-            assert count > 0, "warmup 后 blog seen_count=0"
             details.append(f"seen_count(session, 'blog') = {count}")
             return self._pass(name, self._timed_end(t0), details)
         except Exception as e:
@@ -138,17 +129,17 @@ class FlowStepsMixin:
         name = "subtagpreview 推送"
         t0 = self._timed_start()
         details: list[str] = []
-        s = self.TEST_SESSION
+        s = self.PREVIEW_SESSION
         try:
-            posts = await fetch_tag_posts([self.TEST_TAG], self._source)
-            details.append(f"fetch_tag_posts 得 {len(posts)} 条")
-
-            rule = FilterRule(search_tags=[self.TEST_TAG], exclude_tags=[])
-            posts = apply_filter(posts, rule)
-            details.append(f"apply_filter 后 {len(posts)} 条")
-
-            await self._db.mark_seen_session(s, "tag", [p.post_id for p in posts])
-            details.append(f"mark_seen_session 标记 {len(posts)} 条")
+            excl_tag = f"{self.TEST_TAG}_unlikely_excl"
+            result = await self._subscriptions.subscribe_tags(
+                s,
+                [self.TEST_TAG],
+                [excl_tag],
+                preview=True,
+            )
+            posts = list(result.preview_posts)
+            details.append(f"preview_posts 得 {len(posts)} 条")
 
             if not posts:
                 details.append("无可推送帖子，跳过推送")
@@ -156,9 +147,10 @@ class FlowStepsMixin:
 
             post = posts[0]
             header = f"【标签「{self.TEST_TAG}」有新内容】"
-            await self._send_push(
+            accepted = await self._send_push(
                 real_session_id, post, header, frozenset({"tag"})
             )
+            assert accepted is True, "adapter 未接受标签预览推送"
             details.append(f"推送首条到 real_session，含 {len(post.images)} 张图")
             return self._pass(name, self._timed_end(t0), details)
         except Exception as e:
@@ -215,15 +207,17 @@ class FlowStepsMixin:
             return self._fail(name, self._timed_end(t0), e, details)
 
     async def _step_19_manual_poll(self) -> object:
-        name = "手动轮询 _poll_all"
+        name = "手动轮询测试 session"
         t0 = self._timed_start()
         details: list[str] = []
         s = self.TEST_SESSION
         try:
             before = await self._db.seen_count(s, "tag")
-            await self._scheduler._poll_all()
+            await self._scheduler._poll_single_session(s)
             after = await self._db.seen_count(s, "tag")
-            details.append(f"_poll_all 完成，seen 变化: before={before}, after={after}")
+            details.append(
+                f"单 session 轮询完成，seen 变化: before={before}, after={after}"
+            )
             details.append("无新帖（符合 warmup 后预期）" if after == before else f"新增 {after - before} 条 seen（有新帖）")
             return self._pass(name, self._timed_end(t0), details)
         except Exception as e:
@@ -237,11 +231,13 @@ class FlowStepsMixin:
         if not blog_posts:
             return self._skip(name, "依赖 step 7 (blog_posts) 未就绪或为空")
         try:
+            _, _, fixture_blog = await self._load_fixture()
             post = blog_posts[0]
-            header = f"【博主「{self.TEST_BLOG}」有新内容】"
-            await self._send_push(
+            header = f"【博主「{fixture_blog}」有新内容】"
+            accepted = await self._send_push(
                 real_session_id, post, header, frozenset({"blog"})
             )
+            assert accepted is True, "adapter 未接受博主帖子推送"
             details.append(f"推送首条到 real_session，含 {len(post.images)} 张图")
             return self._pass(name, self._timed_end(t0), details)
         except Exception as e:

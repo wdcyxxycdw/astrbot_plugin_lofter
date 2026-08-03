@@ -1,6 +1,8 @@
+import asyncio
+
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 from core.db import LofterDB
 from core.errors import SourceSchemaError
@@ -1107,3 +1109,70 @@ async def test_blog_session_fills_push_slots_when_enriched_post_is_blocked(db):
     assert len(sent) == 7
     assert await db.filter_unseen_session("sess1", "blog", post_ids) == []
     assert await db.filter_unsent("sess1", post_ids) == ["p2"]
+
+
+@pytest.mark.asyncio
+async def test_poll_single_session_only_delegates_target_session():
+    gates = AsyncMock()
+    service = AsyncMock()
+    queue = AsyncMock()
+    scheduler = SubscriptionScheduler(
+        AsyncMock(), AsyncMock(), AsyncMock(), AsyncMock(),
+        block_storage=AsyncMock(),
+        gates=gates,
+        subscription_service=service,
+        delivery_queue=queue,
+    )
+
+    with patch("core.scheduler._poll_delivery_session") as poll:
+        await scheduler._poll_single_session("target")
+
+    poll.assert_awaited_once_with(
+        "target",
+        scheduler._source,
+        service,
+        gates,
+        queue,
+        scheduler._send_func,
+    )
+
+
+@pytest.mark.asyncio
+async def test_poll_all_delegates_every_session_and_isolates_errors():
+    queue = AsyncMock()
+    queue.session_ids.return_value = ["first", "second"]
+    scheduler = SubscriptionScheduler(
+        AsyncMock(), AsyncMock(), AsyncMock(), AsyncMock(),
+        block_storage=AsyncMock(),
+        gates=AsyncMock(),
+        subscription_service=AsyncMock(),
+        delivery_queue=queue,
+    )
+    scheduler._poll_single_session = AsyncMock(
+        side_effect=[RuntimeError("first failed"), None]
+    )
+
+    await scheduler._poll_all()
+
+    assert scheduler._poll_single_session.await_args_list == [
+        call("first"), call("second")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_poll_all_propagates_session_cancellation():
+    queue = AsyncMock()
+    queue.session_ids.return_value = ["cancelled"]
+    scheduler = SubscriptionScheduler(
+        AsyncMock(), AsyncMock(), AsyncMock(), AsyncMock(),
+        block_storage=AsyncMock(),
+        gates=AsyncMock(),
+        subscription_service=AsyncMock(),
+        delivery_queue=queue,
+    )
+    scheduler._poll_single_session = AsyncMock(
+        side_effect=asyncio.CancelledError
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await scheduler._poll_all()

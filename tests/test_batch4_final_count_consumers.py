@@ -128,13 +128,12 @@ async def test_count_deadline_preserves_completed_cover():
 
 
 @pytest.mark.asyncio
-async def test_count_real_chain_json_midscan_preserves_lower_bound():
+async def test_count_real_chain_dwr_restart_preserves_lower_bound():
     result, session = await _count_real_chain(
         "A",
         [
             _tag_response(exhausted=False),
             _detail_response("A"),
-            _deep_json_response(),
             FakeResponse(status=404),
         ],
     )
@@ -149,11 +148,9 @@ async def test_count_real_chain_json_midscan_preserves_lower_bound():
     assert [url for _, url, _ in session.requests] == [
         TAG_POSTS_URL,
         POST_DETAIL_URL,
-        TAG_POSTS_URL,
         DWR_SEARCH_URL,
     ]
-    assert session.requests[2][2]["data"]["offset"] == "20"
-    assert "c0-param7=number:0" in session.requests[3][2]["data"]
+    assert "c0-param7=number:0" in session.requests[2][2]["data"]
 
 
 @pytest.mark.asyncio
