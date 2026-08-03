@@ -39,11 +39,12 @@ async def filter_blocked_with_fields(
 
 
 async def ensure_subscription_posts(
-    posts: list[Post], source: ContentSource
+    posts: list[Post],
+    source: ContentSource,
+    required_fields: set[str] | None = None,
 ) -> list[Post]:
-    enriched = await ensure_posts_fields(
-        posts, source, {"url", "publish_time"}
-    )
+    required = {"url", "publish_time"} | set(required_fields or ())
+    enriched = await ensure_posts_fields(posts, source, required)
     for post in enriched:
         _validate_subscription_post(post)
     return enriched

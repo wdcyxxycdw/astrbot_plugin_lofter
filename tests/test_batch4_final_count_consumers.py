@@ -309,6 +309,7 @@ def test_auto_post_zero_images_limit_falls_back_to_body():
     )
     event = SimpleNamespace(
         unified_msg_origin="FriendMessage:session",
+        get_platform_name=lambda: "test",
         chain_result=lambda chain: chain,
     )
     post = Post(
@@ -321,7 +322,7 @@ def test_auto_post_zero_images_limit_falls_back_to_body():
         completeness=frozenset({"title", "content", "images", "url"}),
     )
 
-    chain = main._auto_post_result(event, post, post.url, 0)
+    chain = main._auto_post_result(event, post, 0)
 
     assert len(chain) == 1
     assert "FULL-CONTENT" in chain[0].text

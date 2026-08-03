@@ -260,7 +260,7 @@ async def test_default_post_completeness_does_not_skip_tag_enrich():
     source.get_post.assert_awaited_once_with(ALICE_URL)
 
 
-def test_dwr_serialized_empty_image_list_is_known_empty():
+def test_dwr_serialized_empty_image_list_remains_incomplete():
     post = _map_post({
         "post": {
             "blogPageUrl": ALICE_URL,
@@ -271,7 +271,7 @@ def test_dwr_serialized_empty_image_list_is_known_empty():
     })
     assert post is not None
     assert post.images == []
-    assert "images" in post.completeness
+    assert "images" not in post.completeness
 
 
 def test_planner_normalizes_case_insensitive_cover_tags():

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 
 import pytest
 import pytest_asyncio
@@ -21,6 +22,7 @@ class FakeSource:
         self.blogs: dict[str, list[Post]] = {}
         self.failures: dict[tuple[str, str], Exception] = {}
         self.calls: list[tuple[str, str]] = []
+        self.detail_calls: list[str] = []
         self.hook: Hook | None = None
 
     async def list_tag(self, tag, cursor, limit, sort):
@@ -30,7 +32,24 @@ class FakeSource:
         return await self._page("blog", username, self.blogs.get(username, []), "new")
 
     async def get_post(self, url):
-        raise AssertionError(f"unexpected detail fetch: {url}")
+        self.detail_calls.append(url)
+        post = next((
+            post
+            for feeds in (self.tags, self.blogs)
+            for posts in feeds.values()
+            for post in posts
+            if post.url == url
+        ), None)
+        if post is None:
+            raise AssertionError(f"missing fake detail post: {url}")
+        return replace(
+            post,
+            images=[
+                f"https://img.example/{post.post_id}-1.jpg",
+                f"https://img.example/{post.post_id}-2.jpg",
+            ],
+            completeness=post.completeness | {"images"},
+        )
 
     async def _page(self, kind, target, posts, sort):
         self.calls.append((kind, target))
@@ -134,6 +153,12 @@ async def test_tag_subscribe_fetches_before_atomic_initialization(db):
         ("b", "a_2", 1709210096),
         ("b", "a_3", 1709210096),
     ]
+    assert source.detail_calls == [
+        "https://user.lofter.com/post/a_1",
+        "https://user.lofter.com/post/a_2",
+        "https://user.lofter.com/post/a_2",
+        "https://user.lofter.com/post/a_3",
+    ]
 
 
 @pytest.mark.asyncio
@@ -193,6 +218,10 @@ async def test_preview_marks_actual_source_seen_before_filtering(db):
     )
 
     assert [post.post_id for post in result.preview_posts] == ["a_4"]
+    assert result.preview_posts[0].images == [
+        "https://img.example/a_4-1.jpg",
+        "https://img.example/a_4-2.jpg",
+    ]
     assert await seen_by_target(db) == [
         ("a", "a_1", 1709210096),
         ("a", "a_2", 1709210096),

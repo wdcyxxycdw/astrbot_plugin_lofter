@@ -35,13 +35,14 @@ def _post(
     url: str = POST_URL,
     publish_time: str = "2026-01-01 00:00:00",
 ) -> Post:
-    known = {"title", "url", "publish_time", "author_username"}
+    known = {"title", "url", "publish_time", "author_username", "images"}
     if tags is not None:
         known.add("tags")
     return Post(
         post_id=post_id,
         title="Demo",
         summary="",
+        images=["https://img.example/a.jpg"],
         author_username="demo",
         tags=tags or [],
         url=url,

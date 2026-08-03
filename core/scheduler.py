@@ -23,7 +23,6 @@ from .errors import (
     attach_source_evidence,
 )
 from .filter import FilterRule, apply_filter
-from .formatter import format_post, visible_images
 from .parser import POST_FIELDS, Post, post_owner_identity
 from .post_consumers import (
     ensure_subscription_posts,
@@ -45,7 +44,9 @@ from .subscription_service import (
     SubscriptionService,
 )
 
-SendFunc = Callable[[str, str, list], Awaitable[bool]]
+SendFunc = Callable[
+    [str, Post, str, frozenset[str]], Awaitable[bool]
+]
 TagSources = dict[str, set[str]]
 
 BLOG_URL = "https://{username}.lofter.com"
@@ -85,7 +86,9 @@ async def fetch_tag_posts(
     validate_post_evidence([*evidence, *occurrences])
     enriched: list[Post] = []
     for post in occurrences:
-        complete = (await ensure_subscription_posts([post], source))[0]
+        complete = (
+            await ensure_subscription_posts([post], source, {"images"})
+        )[0]
         enriched.append(await _ensure_post_owner(complete, source))
     validate_post_evidence([*evidence, *enriched])
     return _EvidencePosts(_merge_posts_by_id(enriched), tuple(evidence))
@@ -166,7 +169,9 @@ async def _push_tag_posts(
             post, rule.search_tags, (sources or {}).get(post.post_id)
         )
         header = f"【标签「{display_tag}」有新内容】"
-        if not await _send_post(session_id, post, header, send_func):
+        if not await _send_post(
+            session_id, post, header, frozenset({"tag"}), send_func
+        ):
             break
         accepted.append(post.post_id)
     return accepted
@@ -176,17 +181,20 @@ async def _push_blog_post(
     session_id: str, post: Post, username: str, send_func: SendFunc
 ) -> bool:
     header = f"【博主「{username}」有新内容】"
-    return await _send_post(session_id, post, header, send_func)
+    return await _send_post(
+        session_id, post, header, frozenset({"blog"}), send_func
+    )
 
 
 async def _send_post(
-    session_id: str, post: Post, header: str, send_func: SendFunc
+    session_id: str,
+    post: Post,
+    header: str,
+    source_types: frozenset[str],
+    send_func: SendFunc,
 ) -> bool:
     try:
-        images = visible_images(post)
-        return await send_func(
-            session_id, format_post(post, header=header), images
-        ) is True
+        return await send_func(session_id, post, header, source_types) is True
     except Exception as exc:
         logger.error("发送订阅推送失败 session=%s post=%s: %s", session_id, post.post_id, exc)
         return False
@@ -736,10 +744,13 @@ def _consume_send_result(task: asyncio.Task) -> None:
 
 
 async def _send_claim(claim, send_func: SendFunc):
+    header = _delivery_header(claim.sources)
+    source_types = frozenset(source.type for source in claim.sources)
     task = asyncio.create_task(send_func(
         claim.session_id,
-        format_post(claim.post, header=_delivery_header(claim.sources)),
-        visible_images(claim.post),
+        claim.post,
+        header,
+        source_types,
     ))
     task.add_done_callback(_consume_send_result)
     try:

@@ -212,6 +212,37 @@ def _dwr_post(
     }}
 
 
+def _mobile_detail_payload(post_id: str) -> dict:
+    title = "Demo" if post_id == "1a_2b" else "WITNESS_MUST_NOT_SEND"
+    tags = "A" if post_id == "1a_2b" else "A, X"
+    post_number = int(post_id.split("_")[1], 16)
+    url = f"https://demo.lofter.com/post/{post_id}"
+    return {
+        "meta": {"status": 200, "msg": "demo"},
+        "response": {"posts": [{
+            "post": {
+                "id": post_number,
+                "blogId": 26,
+                "title": title,
+                "publishTime": 1710000000000,
+                "tag": tags,
+                "digest": f"Content {post_id}",
+                "content": f"Content {post_id}",
+                "photoLinks": [f"https://media.example.invalid/{post_id}.jpg"],
+                "photoCaptions": [title],
+            },
+            "blogInfo": {
+                "blogId": 26,
+                "blogName": "demo",
+                "blogNickName": "Demo",
+                "homePageUrl": "https://demo.lofter.com/",
+            },
+            "permalink": url,
+            "blogPageUrl": url,
+        }]},
+    }
+
+
 def _dwr_callback(items: list[dict]) -> str:
     value = json.dumps(items, ensure_ascii=False)
     return f'dwr.engine._remoteHandleCallback("0", "0", {value});'
@@ -227,7 +258,16 @@ async def _run_mobile_witness_poll(db, mode: str):
         owner = "other" if mode == "owner_conflict" else "demo"
         posts.append(_dwr_post("1a_2c", owner=owner, tags="A, X"))
     client = AsyncMock()
-    client.request_json.return_value = _mobile_witness_payload()
+    tag_payload = _mobile_witness_payload()
+
+    def request_json(_method, url, **kwargs):
+        if "tagPosts.json" in url:
+            return tag_payload
+        form = kwargs["data"]
+        post_id = f"{int(form['targetblogid']):x}_{int(form['postid']):x}"
+        return _mobile_detail_payload(post_id)
+
+    client.request_json.side_effect = request_json
     client.search_tag.side_effect = [_dwr_callback(posts), _dwr_callback([])]
     send = AsyncMock(return_value=True)
     scheduler = SubscriptionScheduler(
@@ -270,14 +310,15 @@ async def test_scheduler_mobile_identity_witness_is_validation_only(db):
     assert selected == ["1a_2b", "1a_2c"]
     fetch_spy.assert_awaited_once()
     send.assert_awaited_once()
-    assert "/post/1a_2b" in send.await_args.args[1]
-    assert "1a_2c" not in send.await_args.args[1]
-    assert "WITNESS_MUST_NOT_SEND" not in send.await_args.args[1]
+    sent_post = send.await_args.args[1]
+    assert sent_post.url.endswith("/post/1a_2b")
+    assert sent_post.post_id != "1a_2c"
+    assert "WITNESS_MUST_NOT_SEND" not in sent_post.title
     assert await db.filter_unseen_targets(
         "session", "tag", {"A": ["1a_2b", "1a_2c"]}
     ) == []
     assert await db.filter_unsent("session", ["1a_2b", "1a_2c"]) == ["1a_2c"]
-    client.request_json.assert_awaited_once()
+    assert client.request_json.await_count == 3
     assert client.search_tag.await_count == 2
     client.get.assert_not_awaited()
 
@@ -446,7 +487,7 @@ async def test_blog_author_enrichment_failure_isolates_target(db):
         )
 
     send.assert_awaited_once()
-    assert "bob" in send.await_args.args[1]
+    assert send.await_args.args[1].author_username == "bob"
     assert await db.filter_unseen_session(
         "session", "blog", ["1a_2b"]
     ) == ["1a_2b"]

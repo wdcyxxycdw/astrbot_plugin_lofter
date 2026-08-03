@@ -54,6 +54,17 @@ def _blog_payload(posts, **changes):
     return {"meta": {"status": 200, "msg": "demo"}, "response": response}
 
 
+def _nested_detail_item(**post_changes):
+    item = _detail_item()
+    post = item["post"]
+    post["blogInfo"] = item.pop("blogInfo")
+    post["permalink"] = "1a_2b"
+    post["blogPageUrl"] = item.pop("blogPageUrl")
+    item.pop("permalink")
+    post.update(post_changes)
+    return item
+
+
 def _tag_item(**view_changes):
     item = _fixture("tag_posts.json")["envelope"]["data"]["list"][0]
     item = json.loads(json.dumps(item))
@@ -77,6 +88,87 @@ def test_detail_fixture_maps_exact_sibling_contract_to_shared_post():
     assert post.author_username == "demo"
     assert post.tags == ["demo", "example"]
     assert post.images == ["https://media.example.invalid/demo.jpg"]
+
+
+def test_detail_maps_current_nested_contract():
+    payload = {
+        "meta": {"status": 200, "msg": "demo"},
+        "response": {"posts": [_nested_detail_item()]},
+    }
+
+    post = parse_mobile_post_detail(payload)
+
+    assert post.post_id == "1a_2b"
+    assert post.url == "https://demo.lofter.com/post/1a_2b"
+    assert post.author_username == "demo"
+    assert {"url", "author_username", "publish_time"} <= post.completeness
+
+
+def test_detail_nested_slug_must_match_numeric_identity():
+    item = _nested_detail_item(
+        permalink="1a_2c",
+        blogPageUrl="https://demo.lofter.com/post/1a_2c",
+    )
+    payload = {
+        "meta": {"status": 200, "msg": "demo"},
+        "response": {"posts": [item]},
+    }
+
+    with pytest.raises(SourceSchemaError) as exc_info:
+        parse_mobile_post_detail(payload)
+
+    assert exc_info.value.location == "post.id"
+
+
+def test_detail_duplicate_locations_must_not_conflict():
+    item = _detail_item()
+    item["post"]["permalink"] = "1a_2c"
+    item["post"]["blogPageUrl"] = "https://other.lofter.com/post/1a_2c"
+    item["post"]["blogInfo"] = dict(item["blogInfo"])
+    payload = {
+        "meta": {"status": 200, "msg": "demo"},
+        "response": {"posts": [item]},
+    }
+
+    with pytest.raises(SourceSchemaError) as exc_info:
+        parse_mobile_post_detail(payload)
+
+    assert exc_info.value.location in {"post.id", "post.url"}
+
+
+def test_detail_maps_json_encoded_photo_fields():
+    item = _nested_detail_item(
+        photoLinks=json.dumps([
+            {
+                "orign": "https://media.example.invalid/original.jpg",
+                "raw": "https://media.example.invalid/raw.jpg",
+                "middle": "https://media.example.invalid/middle.jpg",
+            }
+        ]),
+        photoCaptions=json.dumps(["Demo"]),
+    )
+    payload = {
+        "meta": {"status": 200, "msg": "demo"},
+        "response": {"posts": [item]},
+    }
+
+    post = parse_mobile_post_detail(payload)
+
+    assert post.images == ["https://media.example.invalid/original.jpg"]
+    assert "images" in post.completeness
+
+
+def test_detail_rejects_malformed_json_encoded_photo_fields():
+    item = _nested_detail_item(photoLinks="[not-json")
+    payload = {
+        "meta": {"status": 200, "msg": "demo"},
+        "response": {"posts": [item]},
+    }
+
+    with pytest.raises(SourceSchemaError) as exc_info:
+        parse_mobile_post_detail(payload)
+
+    assert exc_info.value.location == "photoLinks"
 
 
 def test_detail_nullable_optional_fields_remain_unknown():
@@ -131,6 +223,29 @@ def test_tag_fixture_maps_exact_post_data_contract():
     assert page.items[0].author_username == "demo"
     assert page.items[0].summary == ""
     assert page.next_cursor == "20"
+
+
+def test_tag_maps_current_permalink_slug():
+    page = parse_mobile_tag_page(_tag_payload([_tag_item(
+        id=43,
+        permalink="1a_2b",
+    )], offset=20))
+
+    post = page.items[0]
+    assert post.post_id == "1a_2b"
+    assert post.url == "https://lofter.com/post/1a_2b"
+    assert post.author_username == ""
+    assert "author_username" not in post.completeness
+    assert page.next_cursor == "20"
+
+
+def test_tag_permalink_slug_must_match_numeric_ids():
+    item = _tag_item(id=44, permalink="1a_2b")
+
+    with pytest.raises(SourceSchemaError) as exc_info:
+        parse_mobile_tag_page(_tag_payload([item]))
+
+    assert exc_info.value.location == "post.id"
 
 
 @pytest.mark.parametrize(

@@ -19,7 +19,10 @@ POST_DETAIL_URL = (
     "https://api.lofter.com/oldapi/post/detail.api"
     "?product=lofter-android-8.2.23"
 )
-BLOG_HOME_URL = "https://api.lofter.com/v2.0/blogHomePage.api"
+BLOG_HOME_URL = (
+    "https://api.lofter.com/v2.0/blogHomePage.api"
+    "?product=lofter-android-8.2.23"
+)
 MOBILE_HEADERS = {
     **JSON_HEADERS,
     "Content-Type": "application/x-www-form-urlencoded",
@@ -72,10 +75,10 @@ def build_blog_request(
         url=BLOG_HOME_URL,
         headers=MOBILE_HEADERS,
         form={
-            "blogdomain": username,
+            "blogdomain": f"{username}.lofter.com",
             "offset": offset or "0",
             "limit": str(limit),
-            "method": "0",
+            "method": "getPostLists",
             "supportposttypes": "1,2,3,4,5,6",
             "postdigestnew": "1",
             "returnData": "1",

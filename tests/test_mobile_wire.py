@@ -20,7 +20,7 @@ EXPECTED_WIRES = {
         {"targetblogid", "postid"},
     ),
     "blog_home.json": (
-        "https://api.lofter.com/v2.0/blogHomePage.api",
+        "https://api.lofter.com/v2.0/blogHomePage.api?product=lofter-android-8.2.23",
         {
             "blogdomain", "offset", "limit", "method", "supportposttypes",
             "postdigestnew", "returnData", "checkpwd", "needgetpoststat",

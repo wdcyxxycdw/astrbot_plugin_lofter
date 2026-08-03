@@ -95,6 +95,7 @@ async def test_parse_dwr_response_reports_partial_malformed_items():
     assert result.posts[0].author_username == "someuser"
     assert result.posts[0].tags == ["tag-a", "tag-b"]
     assert result.posts[0].images == ["https://img.example/a.jpg"]
+    assert "images" not in result.posts[0].completeness
 
 
 @pytest.mark.asyncio

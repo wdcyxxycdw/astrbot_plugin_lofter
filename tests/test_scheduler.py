@@ -19,6 +19,7 @@ from core.scheduler import (
 )
 from core.author_block import AuthorBlockStorage
 from core.filter import FilterRule
+from core.formatter import format_post, visible_images
 from core.storage import Subscription, SubscriptionStorage
 
 RICH_HTML = """\
@@ -198,8 +199,10 @@ FULL_POST = Post(
 async def test_push_tag_label():
     send = AsyncMock(return_value=True)
     await _push_tag_posts("sess1", [FULL_POST], TAG_RULE, send)
-    text = send.call_args[0][1]
-    assert "【标签「原创」有新内容】" in text
+    header = send.call_args.args[2]
+    assert header == "【标签「原创」有新内容】"
+    assert send.call_args.args[1] is FULL_POST
+    assert send.call_args.args[3] == frozenset({"tag"})
 
 
 @pytest.mark.asyncio
@@ -212,24 +215,25 @@ async def test_push_tag_label_uses_actual_target_source():
         sources={FULL_POST.post_id: {"B"}},
     )
 
-    text = send.call_args[0][1]
-    assert "【标签「B」有新内容】" in text
-    assert "【标签「A」有新内容】" not in text
+    header = send.call_args.args[2]
+    assert header == "【标签「B」有新内容】"
 
 
 @pytest.mark.asyncio
 async def test_push_blog_label():
     send = AsyncMock(return_value=True)
     await _push_blog_post("sess1", FULL_POST, "someuser", send)
-    text = send.call_args[0][1]
-    assert "【博主「someuser」有新内容】" in text
+    assert send.call_args.args[2] == "【博主「someuser」有新内容】"
+    assert send.call_args.args[1] is FULL_POST
+    assert send.call_args.args[3] == frozenset({"blog"})
 
 
 @pytest.mark.asyncio
 async def test_push_includes_author_summary_tags_url():
     send = AsyncMock(return_value=True)
     await _push_tag_posts("sess1", [FULL_POST], TAG_RULE, send)
-    text = send.call_args[0][1]
+    post = send.call_args.args[1]
+    text = format_post(post, header=send.call_args.args[2])
     assert "作者：作者名" in text
     assert "这是摘要" in text
     assert "#原创" in text
@@ -240,8 +244,8 @@ async def test_push_includes_author_summary_tags_url():
 async def test_push_includes_images():
     send = AsyncMock(return_value=True)
     await _push_tag_posts("sess1", [FULL_POST], TAG_RULE, send)
-    images = send.call_args[0][2]
-    assert images == FULL_POST.images
+    post = send.call_args.args[1]
+    assert visible_images(post) == FULL_POST.images
 
 
 @pytest.mark.asyncio
@@ -258,7 +262,7 @@ async def test_push_does_not_send_unknown_images():
 
     await _push_tag_posts("sess1", [post], TAG_RULE, send)
 
-    assert send.call_args[0][2] == []
+    assert visible_images(send.call_args.args[1]) == []
 
 
 @pytest.mark.asyncio
@@ -272,7 +276,8 @@ async def test_push_no_title_shows_placeholder():
         completeness=frozenset({"title", "summary", "url"}),
     )
     await _push_tag_posts("sess1", [post], TAG_RULE, send)
-    text = send.call_args[0][1]
+    sent_post = send.call_args.args[1]
+    text = format_post(sent_post, header=send.call_args.args[2])
     assert "(无标题)" in text
 
 
@@ -285,9 +290,8 @@ async def test_push_reversed_order():
     ]
     await _push_tag_posts("sess1", posts, TAG_RULE, send)
     calls = send.call_args_list
-    titles = [c[0][1] for c in calls]
-    assert "帖子2" in titles[0]
-    assert "帖子0" in titles[2]
+    titles = [call.args[1].title for call in calls]
+    assert titles == ["帖子2", "帖子1", "帖子0"]
 
 
 @pytest.mark.asyncio
@@ -347,17 +351,36 @@ def _source_page(
 
 
 @pytest.mark.asyncio
-async def test_fetch_tag_posts_follows_cursor_and_dedupes():
+async def test_fetch_tag_posts_follows_cursor_and_fetches_complete_images():
     source = AsyncMock()
     source.list_tag.side_effect = [
         _source_page(["p1", "p2"], "next"),
         _source_page(["p2", "p3"], exhausted=True),
     ]
 
+    def detail(url):
+        post_id = url.rsplit("/", 1)[-1]
+        return Post(
+            post_id=post_id,
+            title="",
+            summary="",
+            images=[
+                f"https://img.example/{post_id}-1.jpg",
+                f"https://img.example/{post_id}-2.jpg",
+            ],
+            url=url,
+            completeness=frozenset({"images", "url"}),
+        )
+
+    source.get_post.side_effect = detail
+
     posts = await fetch_tag_posts(["A"], source, limit=3)
 
     assert [post.post_id for post in posts] == ["p1", "p2", "p3"]
+    assert all(len(post.images) == 2 for post in posts)
+    assert all("images" in post.completeness for post in posts)
     assert [call.args[1] for call in source.list_tag.await_args_list] == [None, "next"]
+    assert source.get_post.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -373,7 +396,9 @@ async def test_fetch_blog_posts_follows_cursor_and_dedupes():
     )
 
     assert [post.post_id for post in posts] == ["p1", "p2", "p3"]
+    assert all("images" not in post.completeness for post in posts)
     assert [call.args[1] for call in source.list_blog.await_args_list] == [None, "next"]
+    source.get_post.assert_not_awaited()
 
 
 # ── 聚合标签轮询 ──────────────────────────────────────────────────────────────
@@ -458,8 +483,8 @@ async def test_aggregate_tag_session(db):
 
     sent: list[str] = []
 
-    async def send_func(session_id, text, images):
-        sent.append(text)
+    async def send_func(session_id, post, header, source_types):
+        sent.append(format_post(post, header=header))
         return True
 
     client = AsyncMock()
@@ -493,9 +518,9 @@ async def test_poll_all_stops_same_session_blog_after_tag_send_failure(db, failu
         same_blog_fetches += sub.session_id == "same"
         return _make_posts([f"{sub.session_id}-blog"])
 
-    async def send(session_id, text, images):
+    async def send(session_id, post, header, source_types):
         if session_id == "same":
-            same_send_texts.append(text)
+            same_send_texts.append(format_post(post, header=header))
             if isinstance(failure, Exception):
                 raise failure
             return failure
@@ -542,8 +567,8 @@ async def test_tag_checkpoint_isolated_by_actual_target_provenance(db):
     async def fetch(search_tags, client):
         return posts_by_target[search_tags[0]]
 
-    async def send(session_id, text, images):
-        sent.append(text)
+    async def send(session_id, post, header, source_types):
+        sent.append(format_post(post, header=header))
         return True
 
     with patch("core.scheduler.fetch_tag_posts", side_effect=fetch):
@@ -734,8 +759,8 @@ async def test_warmup_no_push(db):
 
     sent: list[str] = []
 
-    async def send_func(session_id, text, images):
-        sent.append(text)
+    async def send_func(session_id, post, header, source_types):
+        sent.append(format_post(post, header=header))
         return True
 
     client = AsyncMock()
@@ -764,8 +789,8 @@ async def test_new_post_pushed_after_warmup(db):
 
     sent: list[str] = []
 
-    async def send_func(session_id, text, images):
-        sent.append(text)
+    async def send_func(session_id, post, header, source_types):
+        sent.append(format_post(post, header=header))
         return True
 
     client = AsyncMock()
@@ -794,8 +819,8 @@ async def test_tag_session_blocks_author_but_marks_seen(db):
     ]
     sent: list[str] = []
 
-    async def send_func(session_id, text, images):
-        sent.append(text)
+    async def send_func(session_id, post, header, source_types):
+        sent.append(format_post(post, header=header))
         return True
 
     with patch("core.scheduler.fetch_tag_posts", return_value=posts):
@@ -815,8 +840,8 @@ async def test_tag_session_overflow_posts_remain_pending_until_next_poll(db):
     posts = _make_posts([f"p{i}" for i in range(8)])
     sent: list[str] = []
 
-    async def send_func(session_id, text, images):
-        sent.append(text)
+    async def send_func(session_id, post, header, source_types):
+        sent.append(format_post(post, header=header))
         return True
 
     blocks = AuthorBlockStorage(db)
@@ -853,8 +878,8 @@ async def test_blog_session_blocks_username_before_push(db):
     ]
     sent: list[str] = []
 
-    async def send_func(session_id, text, images):
-        sent.append(text)
+    async def send_func(session_id, post, header, source_types):
+        sent.append(format_post(post, header=header))
         return True
 
     with patch("core.scheduler.fetch_blog_posts", return_value=posts):
@@ -873,8 +898,8 @@ async def test_blog_session_overflow_posts_remain_pending_until_next_poll(db):
     posts = _make_posts([f"p{i}" for i in range(8)])
     sent: list[str] = []
 
-    async def send_func(session_id, text, images):
-        sent.append(text)
+    async def send_func(session_id, post, header, source_types):
+        sent.append(format_post(post, header=header))
         return True
 
     blocks = AuthorBlockStorage(db)
@@ -1055,8 +1080,8 @@ async def test_blog_session_fills_push_slots_when_enriched_post_is_blocked(db):
         post.completeness |= {"author_username"}
     sent: list[str] = []
 
-    async def send_func(session_id, text, images):
-        sent.append(text)
+    async def send_func(session_id, post, header, source_types):
+        sent.append(format_post(post, header=header))
         return True
 
     post_ids = [p.post_id for p in posts]

@@ -21,7 +21,7 @@ def _post(
     publish_time: str | None = "2026-01-01 00:00:00",
 ) -> Post:
     host = f"{owner}.lofter.com" if owner else "lofter.com"
-    known = {"title", "url"}
+    known = {"title", "url", "images"}
     if owner:
         known.add("author_username")
     if tags is not None:
@@ -32,6 +32,7 @@ def _post(
         post_id=post_id,
         title="Demo",
         summary="",
+        images=["https://img.example/a.jpg"],
         author_username=owner,
         tags=tags or [],
         url=f"https://{host}/post/{post_id}",

@@ -321,7 +321,7 @@ async def test_blog_session_validates_all_targets_before_first_send(db):
         events.append(f"fetch:{sub.target}")
         return [_post()]
 
-    async def send(session_id, text, images):
+    async def send(session_id, post, header, source_types):
         events.append("send")
         return True
 

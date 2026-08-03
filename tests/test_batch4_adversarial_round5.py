@@ -27,7 +27,7 @@ def _post(
     source: str = "mobile_tag",
     publish_time: str = "2026-01-01 00:00:00",
 ) -> Post:
-    known = {"title", "url", "publish_time"}
+    known = {"title", "url", "publish_time", "images"}
     if owner:
         known.add("author_username")
     if tags is not None:
@@ -37,6 +37,7 @@ def _post(
         post_id=post_id,
         title="Demo",
         summary="",
+        images=["https://img.example/a.jpg"],
         tags=tags or [],
         author_username=owner,
         url=f"https://{host}/post/{post_id}",

@@ -11,6 +11,7 @@ from core.author_block import AuthorBlockStorage
 from core.db import LofterDB
 from core.delivery import DeliveryQueue, SourceBatch, source_for_subscription
 from core.parser import Post
+from core.formatter import format_post
 from core.scheduler import SubscriptionScheduler
 from core.session_gate import SessionGateRegistry
 from core.storage import SubscriptionStorage
@@ -126,9 +127,56 @@ async def test_poll_all_shares_five_send_slots_between_tag_and_blog(db):
     assert [row[1] for row in await _delivery_states(db)] == [
         "accepted", "accepted", "accepted", "accepted", "accepted", "pending",
     ]
-    sent_text = "\n".join(call.args[1] for call in send.await_args_list)
+    sent_text = "\n".join(
+        format_post(call.args[1], header=call.args[2])
+        for call in send.await_args_list
+    )
     assert sent_text.count("【标签") == 3
     assert sent_text.count("【博主") == 2
+    assert [call.args[3] for call in send.await_args_list] == [
+        frozenset({"tag"}),
+        frozenset({"tag"}),
+        frozenset({"tag"}),
+        frozenset({"blog"}),
+        frozenset({"blog"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_poll_all_passes_full_post_header_and_all_source_types(db):
+    send = AsyncMock(return_value=True)
+    scheduler, snapshot = await _scheduler(
+        db, send, ("tag", "tag"), ("blog", "user")
+    )
+    sources = {sub.type: source_for_subscription(sub) for sub in snapshot.subscriptions}
+    post = _post(0)
+
+    with patch(
+        "core.scheduler._fetch_snapshot_batches",
+        AsyncMock(return_value=[
+            SourceBatch(sources["tag"], (post,)),
+            SourceBatch(sources["blog"], (post,)),
+        ]),
+    ):
+        await scheduler._poll_all()
+
+    send.assert_awaited_once()
+    session_id, sent_post, header, source_types = send.await_args.args
+    assert session_id == "session"
+    assert isinstance(sent_post, Post)
+    assert sent_post.post_id == post.post_id
+    assert sent_post.title == post.title
+    assert sent_post.summary == post.summary
+    assert sent_post.content == post.content
+    assert sent_post.images == post.images
+    assert sent_post.author == post.author
+    assert sent_post.author_username == post.author_username
+    assert sent_post.url == post.url
+    assert sent_post.tags == post.tags
+    assert sent_post.publish_time == post.publish_time
+    assert header == "【标签「tag」有新内容】"
+    assert source_types == frozenset({"tag", "blog"})
+    assert isinstance(source_types, frozenset)
 
 
 @pytest.mark.asyncio
@@ -160,7 +208,7 @@ async def test_poll_all_acks_each_post_and_stops_after_failure(db):
 async def test_poll_all_timeout_keeps_sending_lease(db, monkeypatch):
     release = asyncio.Event()
 
-    async def send_func(session_id, text, images):
+    async def send_func(session_id, post, header, source_types):
         await release.wait()
         return True
 
@@ -182,7 +230,7 @@ async def test_poll_all_timeout_keeps_sending_lease(db, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_poll_all_cancellation_keeps_sending_and_propagates(db):
-    async def send_func(session_id, text, images):
+    async def send_func(session_id, post, header, source_types):
         raise asyncio.CancelledError
 
     scheduler, snapshot = await _scheduler(db, send_func, ("tag", "tag"))

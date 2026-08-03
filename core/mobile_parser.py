@@ -20,11 +20,9 @@ from .errors import (
 )
 from .parser import Post, extract_lofter_username, post_field_metadata
 from .post_identity import (
-    canonical_post_url as normalize_post_url,
     consistent_blog_owner,
     decimal_post_id,
     mobile_decimal_ids,
-    post_id_from_url,
     post_url_identity,
 )
 from .post_time import format_publish_time
@@ -213,18 +211,44 @@ def _map_blog_post(item: Mapping[str, Any]) -> Post:
     return _map_detail_post(item, "mobile_blog")
 
 
+def _detail_blog(
+    item: Mapping[str, Any], post: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    aliases = [
+        value for value in (item.get("blogInfo", _MISSING), post.get("blogInfo", _MISSING))
+        if value is not _MISSING
+    ]
+    if not aliases:
+        raise SourceSchemaError("blogInfo")
+    if any(not isinstance(value, Mapping) for value in aliases):
+        raise SourceSchemaError("blogInfo")
+    merged: dict[str, Any] = {}
+    locations = {
+        "blogId": "blogInfo.blogId",
+        "blogName": "blogInfo.blogName",
+        "blogNickName": "author",
+        "homePageUrl": "post.url",
+    }
+    for key, location in locations.items():
+        values = [value[key] for value in aliases if key in value]
+        if any(value != values[0] for value in values[1:]):
+            raise SourceSchemaError(location)
+        if values:
+            merged[key] = values[0]
+    return merged
+
+
 def _map_detail_post(
     item: Mapping[str, Any], source: str = "mobile_detail"
 ) -> Post:
     raw_post = item.get("post")
-    raw_blog = item.get("blogInfo")
-    identity = _preflight_detail_identity(
-        item,
-        raw_post if isinstance(raw_post, Mapping) else {},
-        raw_blog if isinstance(raw_blog, Mapping) else {},
-    )
+    post = raw_post if isinstance(raw_post, Mapping) else {}
+    blog = _detail_blog(item, post)
+    identity = _preflight_detail_identity(item, post, blog)
     try:
-        return _map_detail_fields(item, source)
+        if not isinstance(raw_post, Mapping):
+            raise SourceSchemaError("post")
+        return _map_detail_fields(post, blog, identity, source)
     except SourceLimitError as exc:
         _attach_identity_witness(exc, identity, source)
         if identity is not None:
@@ -235,11 +259,18 @@ def _map_detail_post(
         raise
 
 
-def _map_detail_fields(item: Mapping[str, Any], source: str) -> Post:
-    post = _required_mapping(item, "post")
-    blog = _required_mapping(item, "blogInfo")
+def _map_detail_fields(
+    post: Mapping[str, Any],
+    blog: Mapping[str, Any],
+    identity: _MobileIdentity | None,
+    source: str,
+) -> Post:
     post_id = _canonical_decimal_id(post, blog)
-    url = _detail_url(item, post_id)
+    if identity is None or not identity.url:
+        raise SourceSchemaError("post.url")
+    if identity.post_id != post_id:
+        raise SourceSchemaError("post.id")
+    url = identity.url
     title = _required_string(post, "title", MAX_TITLE_BYTES, "title")
     content_known = isinstance(post.get("content"), str)
     digest_known = isinstance(post.get("digest"), str)
@@ -287,7 +318,7 @@ def _map_tag_post(item: Mapping[str, Any]) -> Post:
         raw_count if isinstance(raw_count, Mapping) else {},
     )
     try:
-        return _map_tag_fields(post_data)
+        return _map_tag_fields(post_data, identity)
     except SourceLimitError as exc:
         _attach_identity_witness(exc, identity, "mobile_tag")
         if identity is not None:
@@ -298,32 +329,31 @@ def _map_tag_post(item: Mapping[str, Any]) -> Post:
         raise
 
 
-def _map_tag_fields(post_data: Mapping[str, Any]) -> Post:
+def _map_tag_fields(
+    post_data: Mapping[str, Any], identity: _MobileIdentity | None
+) -> Post:
     view = _required_mapping(post_data, "postView")
     count = _required_mapping(post_data, "postCount")
     blog_id = _required_id(view, "blogId")
     if _required_id(count, "blogId") != blog_id:
         raise SourceSchemaError("postData.postCount.blogId")
-    url = _canonical_post_url(
-        _required_string(view, "permalink", MAX_URL_BYTES, "url")
-    )
-    post_id = post_id_from_url(url)
-    ids = mobile_decimal_ids(post_id)
+    if identity is None or not identity.url:
+        raise SourceSchemaError("post.url")
+    ids = mobile_decimal_ids(identity.post_id)
     if ids is None or int(ids[0]) != blog_id:
         raise SourceSchemaError("postData.postView.blogId")
     photo_count = _required_int(view, "photoCount")
     if photo_count < 0:
         raise SourceSchemaError("postData.postView.photoCount")
-    username = extract_lofter_username(url)
     known = {"title", "publish_time", "url"}
-    if username:
+    if identity.owner:
         known.add("author_username")
     return Post(
-        post_id=post_id,
+        post_id=identity.post_id,
         title=_required_string(view, "title", MAX_TITLE_BYTES, "title"),
         summary="",
-        author_username=username,
-        url=url,
+        author_username=identity.owner,
+        url=identity.url,
         publish_time=_publish_time(view.get("publishTime", _MISSING)),
         **post_field_metadata("mobile_tag", known),
     )
@@ -377,6 +407,8 @@ def _preflight_detail_identity(
         identity for identity in (
             _optional_post_url_identity(item.get("permalink", _MISSING)),
             _optional_post_url_identity(item.get("blogPageUrl", _MISSING)),
+            _optional_post_url_identity(post.get("permalink", _MISSING)),
+            _optional_post_url_identity(post.get("blogPageUrl", _MISSING)),
         ) if identity is not None
     ]
     if len({identity.post_id for identity in identities}) > 1:
@@ -507,9 +539,20 @@ def _optional_post_url_identity(value: Any) -> _MobileIdentity | None:
     except SourceSchemaError:
         raise SourceSchemaError("post.url") from None
     try:
+        ids = mobile_decimal_ids(value)
+    except ValueError:
+        raise SourceSchemaError("post.url") from None
+    if ids is not None:
+        post_id = decimal_post_id(*ids)
+        return _MobileIdentity(
+            post_id, f"https://lofter.com/post/{post_id}"
+        )
+    try:
         canonical, post_id, owner = post_url_identity(value)
     except ValueError:
         raise SourceSchemaError("post.url") from None
+    if mobile_decimal_ids(post_id) is None:
+        raise SourceSchemaError("post.url")
     return _MobileIdentity(post_id, canonical, owner)
 
 
@@ -521,32 +564,6 @@ def _canonical_decimal_id(post: Mapping[str, Any], blog: Mapping[str, Any]) -> s
         return decimal_post_id(post_blog_id, _required_id(post, "id"))
     except ValueError as exc:
         raise SourceSchemaError("post_id") from exc
-
-
-def _detail_url(item: Mapping[str, Any], post_id: str) -> str:
-    permalink = _canonical_post_url(
-        _required_string(item, "permalink", MAX_URL_BYTES, "url")
-    )
-    blog_url = _canonical_post_url(
-        _required_string(item, "blogPageUrl", MAX_URL_BYTES, "url")
-    )
-    if post_id_from_url(permalink) != post_id or post_id_from_url(blog_url) != post_id:
-        raise SourceSchemaError("post.url")
-    try:
-        consistent_blog_owner(
-            post_url_identity(permalink)[2],
-            post_url_identity(blog_url)[2],
-        )
-    except ValueError:
-        raise SourceSchemaError("post.url") from None
-    return permalink
-
-
-def _canonical_post_url(url: str) -> str:
-    try:
-        return normalize_post_url(url)
-    except ValueError:
-        raise SourceSchemaError("url") from None
 
 
 def _blog_username(blog: Mapping[str, Any], post_url: str) -> str:
@@ -573,10 +590,19 @@ def _tags(value: Any) -> list[str]:
 
 
 def _url_list(value: Any, location: str) -> list[str]:
-    values = _string_list(value, location)
+    values = _decoded_list(value, location)
     result: list[str] = []
-    for url in values:
-        url = _bounded_string(url, MAX_URL_BYTES, "url")
+    for entry in values:
+        if isinstance(entry, Mapping):
+            entry = next(
+                (
+                    entry[key]
+                    for key in ("origin", "orign", "raw", "url", "middle")
+                    if isinstance(entry.get(key), str)
+                ),
+                _MISSING,
+            )
+        url = _bounded_string(entry, MAX_URL_BYTES, "url")
         try:
             scheme = urlparse(url).scheme
         except ValueError:
@@ -589,9 +615,21 @@ def _url_list(value: Any, location: str) -> list[str]:
 
 
 def _string_list(value: Any, location: str) -> list[str]:
+    return [
+        _bounded_string(item, MAX_CONTENT_BYTES, "content")
+        for item in _decoded_list(value, location)
+    ]
+
+
+def _decoded_list(value: Any, location: str) -> list[Any]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, RecursionError):
+            raise SourceSchemaError(location) from None
     if not isinstance(value, list):
         raise SourceSchemaError(location)
-    return [_bounded_string(item, MAX_CONTENT_BYTES, "content") for item in value]
+    return value
 
 
 def _cursor(value: Any) -> str | None:

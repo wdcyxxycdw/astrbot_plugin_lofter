@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from .content_source import collect_pages
 from .filter import FilterRule, apply_filter, parse_tag_expr
-from .formatter import format_post, visible_images
 from .parser import Post
 from .scheduler import fetch_blog_posts, fetch_tag_posts
 
@@ -157,10 +156,10 @@ class FlowStepsMixin:
 
             post = posts[0]
             header = f"【标签「{self.TEST_TAG}」有新内容】"
-            text = format_post(post, header=header)
-            images = visible_images(post)
-            await self._send_push(real_session_id, text, images)
-            details.append(f"推送首条到 real_session，含 {len(images)} 张图")
+            await self._send_push(
+                real_session_id, post, header, frozenset({"tag"})
+            )
+            details.append(f"推送首条到 real_session，含 {len(post.images)} 张图")
             return self._pass(name, self._timed_end(t0), details)
         except Exception as e:
             return self._fail(name, self._timed_end(t0), e, details)
@@ -240,10 +239,10 @@ class FlowStepsMixin:
         try:
             post = blog_posts[0]
             header = f"【博主「{self.TEST_BLOG}」有新内容】"
-            text = format_post(post, header=header)
-            images = visible_images(post)
-            await self._send_push(real_session_id, text, images)
-            details.append(f"推送首条到 real_session，含 {len(images)} 张图")
+            await self._send_push(
+                real_session_id, post, header, frozenset({"blog"})
+            )
+            details.append(f"推送首条到 real_session，含 {len(post.images)} 张图")
             return self._pass(name, self._timed_end(t0), details)
         except Exception as e:
             return self._fail(name, self._timed_end(t0), e, details)

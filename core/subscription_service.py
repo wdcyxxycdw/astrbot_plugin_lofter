@@ -161,7 +161,9 @@ class SubscriptionService:
                 ),
                 limit=20,
             )
-            posts = await ensure_subscription_posts(page.items, self._source)
+            posts = await ensure_subscription_posts(
+                page.items, self._source, {"images"}
+            )
             result[target] = posts
             evidence.extend(page.evidence_items)
             evidence.extend(posts)

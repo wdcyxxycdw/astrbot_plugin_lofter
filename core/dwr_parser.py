@@ -313,18 +313,7 @@ def _image_field(post: dict[str, object]) -> tuple[list[str], bool]:
     value = post.get("firstImageUrl")
     if not isinstance(value, (str, list)):
         return [], False
-    images = _extract_images(value)
-    valid_empty = value == "" or value == [] or _serialized_empty_list(value)
-    return images, bool(images) or valid_empty
-
-
-def _serialized_empty_list(value: object) -> bool:
-    if not isinstance(value, str) or not value.lstrip().startswith("["):
-        return False
-    try:
-        return json.loads(value) == []
-    except (ValueError, RecursionError):
-        return False
+    return _extract_images(value), False
 
 
 def _author_fields(

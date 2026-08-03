@@ -18,6 +18,7 @@ from .core.filter import parse_tag_expr
 from .core.formatter import format_post, visible_images
 from .core.instance_lock import InstanceLock
 from .core.permissions import ADMIN_ONLY_MESSAGE, is_admin_event
+from .core.parser import Post
 from .core.post_consumers import filter_blocked_with_fields
 from .core.scheduler import SubscriptionScheduler
 from .core.session_gate import SessionGateRegistry
@@ -45,31 +46,78 @@ def _validated_int_config(
     return clamped
 
 
-def _auto_post_result(event: AstrMessageEvent, post, url: str, max_images: int):
-    images = visible_images(post)[:max_images]
-    content = post.content if post.has_fields({"content"}) else ""
-    if images:
-        chain = [Comp.Plain(format_post(post))]
-        chain += [Comp.Image.fromURL(item) for item in images]
-        return event.chain_result(chain)
-    if not content:
-        return event.chain_result([Comp.Plain(format_post(post))])
-    author_name = post.author if post.has_fields({"author"}) and post.author else "Lofter"
-    if "FriendMessage" in event.unified_msg_origin:
-        suffix = "…\n（全文请点击链接）" if len(content) > 500 else ""
-        return event.chain_result([Comp.Plain(format_post(post, body=content[:500] + suffix))])
-    nodes = [
-        Comp.Node(
-            content=[Comp.Plain(format_post(post, body=""))],
-            name=author_name,
-            uin="0",
-        )
-    ]
-    nodes.extend(
-        Comp.Node(content=[Comp.Plain(chunk)], name=author_name, uin="0")
-        for chunk in _split_text(content)
+def _qq_share(post: Post, header: str = ""):
+    title = "Lofter"
+    if post.has_fields({"title"}):
+        title = post.title or "(无标题)"
+    content = [header] if header else []
+    if post.has_fields({"author"}) and post.author:
+        content.append(f"作者：{post.author}")
+    if post.has_fields({"tags"}) and post.tags:
+        content.append(f"#{' #'.join(post.tags)}")
+    if post.has_fields({"summary"}) and post.summary:
+        content.append(post.summary)
+    images = visible_images(post)
+    content_text = "\n".join(content)
+    if post.has_fields({"url"}) and post.url:
+        content_text = content_text.replace(post.url, "").strip()
+    return Comp.Share(
+        url=post.url if post.has_fields({"url"}) else "",
+        title=title,
+        content=content_text,
+        image=images[0] if images else "",
     )
-    return event.chain_result([Comp.Nodes(nodes=nodes)])
+
+
+def _qq_image_nodes(post: Post):
+    name = post.author if post.has_fields({"author"}) and post.author else "Lofter"
+    return Comp.Nodes(nodes=[
+        Comp.Node(content=[Comp.Image.fromURL(url)], name=name, uin="0")
+        for url in visible_images(post)
+    ])
+
+
+def _post_components(
+    post: Post, header: str, source_types: frozenset[str],
+    is_qq: bool, max_images: int,
+):
+    if not is_qq:
+        chain = [Comp.Plain(format_post(post, header=header))]
+        chain.extend(
+            Comp.Image.fromURL(url)
+            for url in visible_images(post)[:max_images]
+        )
+        return chain
+    chain = [_qq_share(post, header)]
+    if "tag" in source_types and visible_images(post):
+        chain.append(_qq_image_nodes(post))
+    return chain
+
+
+def _auto_post_result(event: AstrMessageEvent, post: Post, max_images: int):
+    if event.get_platform_name() != "aiocqhttp":
+        content = post.content if post.has_fields({"content"}) else ""
+        images = visible_images(post)[:max_images]
+        if content and not images:
+            suffix = "…\n（全文请点击链接）" if len(content) > 500 else ""
+            text = format_post(post, body=content[:500] + suffix)
+        else:
+            text = format_post(post)
+        chain = [Comp.Plain(text)]
+        chain.extend(Comp.Image.fromURL(url) for url in images)
+        return event.chain_result(chain)
+    chain = [_qq_share(post)]
+    content = post.content if post.has_fields({"content"}) else ""
+    if content and len(content) > 500 and event.get_group_id() and not event.is_private_chat():
+        name = post.author if post.has_fields({"author"}) and post.author else "Lofter"
+        nodes = [
+            Comp.Node(
+                content=[Comp.Plain(chunk)], name=name, uin=event.get_self_id()
+            )
+            for chunk in _split_text(content)
+        ]
+        chain.append(Comp.Nodes(nodes=nodes))
+    return event.chain_result(chain)
 
 
 async def _search_unique_posts(source: ContentSource, keyword: str, limit: int):
@@ -84,7 +132,7 @@ async def _search_unique_posts(source: ContentSource, keyword: str, limit: int):
     "astrbot_plugin_lofter",
     "user",
     "解析 Lofter 链接，订阅 Lofter 标签/博主，搜索 Lofter 内容，支持标签表达式统计",
-    "v1.4.3",
+    "v2.0.0",
 )
 class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -171,13 +219,23 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             )
 
 
-    async def _send_push(self, session_id: str, text: str, images: list[str]) -> bool:
-        mc = MessageChain()
-        mc.message(text)
-        for u in images[:self._max_images]:
-            mc.url_image(u)
+    async def _send_push(
+        self,
+        session_id: str,
+        post: Post,
+        header: str,
+        source_types: frozenset[str],
+    ) -> bool:
+        platform_id = session_id.split(":", 1)[0]
+        platform = self.context.get_platform_inst(platform_id)
+        is_qq = platform is not None and platform.meta().name == "aiocqhttp"
+        components = _post_components(
+            post, header, source_types, is_qq, self._max_images
+        )
         try:
-            result = await self.context.send_message(session_id, mc)
+            result = await self.context.send_message(
+                session_id, MessageChain(components)
+            )
             return result is True
         except Exception as e:
             logger.error("推送消息失败 session=%s: %s", session_id, e)
@@ -210,7 +268,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         if not visible:
             return
         post = visible[0]
-        yield _auto_post_result(event, post, url, self._max_images)
+        yield _auto_post_result(event, post, self._max_images)
 
     # ──────────────────────────────────────────
     # /lofter 命令组
@@ -427,10 +485,12 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
 
         msg = f"已订阅标签「{subscribes[0]}」，以下是最新 {min(3, len(posts))} 条内容："
         yield event.plain_result(msg)
+        is_qq = event.get_platform_name() == "aiocqhttp"
         for post in posts[:3]:
             header = f"【标签「{subscribes[0]}」有新内容】"
-            chain = [Comp.Plain(format_post(post, header=header))]
-            chain += [Comp.Image.fromURL(u) for u in visible_images(post)[:self._max_images]]
+            chain = _post_components(
+                post, header, frozenset({"tag"}), is_qq, self._max_images
+            )
             yield event.chain_result(chain)
 
     @filter.permission_type(filter.PermissionType.ADMIN)

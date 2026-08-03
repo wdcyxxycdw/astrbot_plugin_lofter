@@ -41,7 +41,8 @@ def _load_main_module():
     sys.modules["lofter_permission_test"] = package
 
     components = types.ModuleType("astrbot.api.message_components")
-    components.Plain = components.Image = components.Node = components.Nodes = MagicMock
+    components.Plain = components.Image = components.Node = MagicMock
+    components.Nodes = components.Share = MagicMock
     event_module = types.ModuleType("astrbot.api.event")
     event_module.AstrMessageEvent = event_module.MessageChain = MagicMock
     event_module.filter = MagicMock()

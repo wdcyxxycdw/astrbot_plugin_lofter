@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,11 +14,15 @@ from tests.test_command_permissions import _load_main_module
 class _AdminCommandEvent:
     unified_msg_origin = "sess"
 
-    def __init__(self, message_str: str):
+    def __init__(self, message_str: str, platform_name: str = "test"):
         self.message_str = message_str
+        self._platform_name = platform_name
 
     def is_admin(self):
         return True
+
+    def get_platform_name(self):
+        return self._platform_name
 
     def plain_result(self, text):
         return text
@@ -56,7 +61,19 @@ class _FakeSubscriptionSource:
         )
 
     async def get_post(self, url):
-        raise AssertionError(f"unexpected detail fetch: {url}")
+        post = next((
+            post
+            for posts in self.tags.values()
+            for post in posts
+            if post.url == url
+        ), None)
+        if post is None:
+            raise AssertionError(f"missing fake detail post: {url}")
+        return replace(
+            post,
+            images=[f"https://img.example/{post.post_id}.jpg"],
+            completeness=post.completeness | {"images"},
+        )
 
 
 async def _make_command_plugin(main, tmp_path):
@@ -138,20 +155,185 @@ async def test_send_push_returns_adapter_acceptance_and_false_on_error():
     main = _load_main_module()
     plugin = object.__new__(main.LofterPlugin)
     plugin._max_images = 2
-    plugin.context = SimpleNamespace(send_message=AsyncMock(return_value=True))
-    assert await main.LofterPlugin._send_push(plugin, "sess", "text", []) is True
+    platform = SimpleNamespace(meta=lambda: SimpleNamespace(name="test"))
+    plugin.context = SimpleNamespace(
+        get_platform_inst=MagicMock(return_value=platform),
+        send_message=AsyncMock(return_value=True),
+    )
+    post = Post(
+        post_id="send", title="text", summary="",
+        url="https://u.lofter.com/post/send",
+    )
+    args = ("adapter:FriendMessage:sess", post, "【header】", frozenset({"tag"}))
+    assert await main.LofterPlugin._send_push(plugin, *args) is True
+    plugin.context.get_platform_inst.assert_called_with("adapter")
     plugin.context.send_message.return_value = False
-    assert await main.LofterPlugin._send_push(plugin, "sess", "text", []) is False
+    assert await main.LofterPlugin._send_push(plugin, *args) is False
     plugin.context.send_message.return_value = None
-    assert await main.LofterPlugin._send_push(plugin, "sess", "text", []) is False
+    assert await main.LofterPlugin._send_push(plugin, *args) is False
     plugin.context.send_message.side_effect = RuntimeError("send failed")
-    assert await main.LofterPlugin._send_push(plugin, "sess", "text", []) is False
+    assert await main.LofterPlugin._send_push(plugin, *args) is False
+
+
+@pytest.mark.asyncio
+async def test_send_push_qq_tag_uses_share_and_all_image_nodes():
+    main = _load_main_module()
+    main.Comp = SimpleNamespace(
+        Plain=lambda text: SimpleNamespace(kind="plain", text=text),
+        Image=SimpleNamespace(
+            fromURL=lambda url: SimpleNamespace(kind="image", url=url)
+        ),
+        Share=lambda **kwargs: SimpleNamespace(kind="share", **kwargs),
+        Node=lambda **kwargs: SimpleNamespace(kind="node", **kwargs),
+        Nodes=lambda **kwargs: SimpleNamespace(kind="nodes", **kwargs),
+    )
+    main.MessageChain = lambda components: SimpleNamespace(chain=components)
+    platform = SimpleNamespace(meta=lambda: SimpleNamespace(name="aiocqhttp"))
+    context = SimpleNamespace(
+        get_platform_inst=MagicMock(return_value=platform),
+        send_message=AsyncMock(return_value=True),
+    )
+    plugin = object.__new__(main.LofterPlugin)
+    plugin._max_images = 1
+    plugin.context = context
+    images = [f"https://img.example/{index}.jpg" for index in range(3)]
+    post = Post(
+        post_id="send", title="标题", summary="摘要", author="作者",
+        tags=["标签"], images=images,
+        url="https://u.lofter.com/post/send",
+        completeness=frozenset({
+            "title", "summary", "author", "tags", "images", "url"
+        }),
+    )
+
+    accepted = await main.LofterPlugin._send_push(
+        plugin, "qq-id:GroupMessage:sess", post, "【标签新内容】",
+        frozenset({"tag"}),
+    )
+
+    assert accepted is True
+    chain = context.send_message.await_args.args[1].chain
+    assert [item.kind for item in chain] == ["share", "nodes"]
+    assert chain[0].url == post.url
+    assert chain[0].title == "标题"
+    assert chain[0].image == images[0]
+    assert "【标签新内容】" in chain[0].content
+    assert "作者：作者" in chain[0].content
+    assert "#标签" in chain[0].content
+    assert "摘要" in chain[0].content
+    assert post.url not in chain[0].content
+    assert [node.content[0].url for node in chain[1].nodes] == images
+
+
+@pytest.mark.asyncio
+async def test_send_push_qq_tag_without_images_uses_share_only():
+    main = _load_main_module()
+    main.Comp = SimpleNamespace(
+        Share=lambda **kwargs: SimpleNamespace(kind="share", **kwargs),
+    )
+    main.MessageChain = lambda components: SimpleNamespace(chain=components)
+    platform = SimpleNamespace(meta=lambda: SimpleNamespace(name="aiocqhttp"))
+    context = SimpleNamespace(
+        get_platform_inst=MagicMock(return_value=platform),
+        send_message=AsyncMock(return_value=True),
+    )
+    plugin = object.__new__(main.LofterPlugin)
+    plugin._max_images = 1
+    plugin.context = context
+    post = Post(
+        post_id="send", title="标题", summary="摘要",
+        url="https://u.lofter.com/post/send",
+        completeness=frozenset({"title", "summary", "images", "url"}),
+    )
+
+    await main.LofterPlugin._send_push(
+        plugin, "qq-id:GroupMessage:sess", post, "【标签新内容】",
+        frozenset({"tag"}),
+    )
+
+    chain = context.send_message.await_args.args[1].chain
+    assert len(chain) == 1
+    assert chain[0].kind == "share"
+
+
+@pytest.mark.asyncio
+async def test_send_push_qq_blog_uses_share_only():
+    main = _load_main_module()
+    main.Comp = SimpleNamespace(
+        Share=lambda **kwargs: SimpleNamespace(kind="share", **kwargs),
+    )
+    main.MessageChain = lambda components: SimpleNamespace(chain=components)
+    platform = SimpleNamespace(meta=lambda: SimpleNamespace(name="aiocqhttp"))
+    context = SimpleNamespace(
+        get_platform_inst=MagicMock(return_value=platform),
+        send_message=AsyncMock(return_value=True),
+    )
+    plugin = object.__new__(main.LofterPlugin)
+    plugin._max_images = 1
+    plugin.context = context
+    post = Post(
+        post_id="send", title="标题", summary="摘要",
+        images=["https://img.example/1.jpg"],
+        url="https://u.lofter.com/post/send",
+        completeness=frozenset({"title", "summary", "images", "url"}),
+    )
+
+    await main.LofterPlugin._send_push(
+        plugin, "qq-id:GroupMessage:sess", post, "【博主新内容】",
+        frozenset({"blog"}),
+    )
+
+    chain = context.send_message.await_args.args[1].chain
+    assert len(chain) == 1
+    assert chain[0].kind == "share"
+
+
+@pytest.mark.asyncio
+async def test_send_push_non_qq_uses_plain_and_image_limit():
+    main = _load_main_module()
+    main.Comp = SimpleNamespace(
+        Plain=lambda text: SimpleNamespace(kind="plain", text=text),
+        Image=SimpleNamespace(
+            fromURL=lambda url: SimpleNamespace(kind="image", url=url)
+        ),
+    )
+    main.MessageChain = lambda components: SimpleNamespace(chain=components)
+    platform = SimpleNamespace(meta=lambda: SimpleNamespace(name="telegram"))
+    context = SimpleNamespace(
+        get_platform_inst=MagicMock(return_value=platform),
+        send_message=AsyncMock(return_value=True),
+    )
+    plugin = object.__new__(main.LofterPlugin)
+    plugin._max_images = 2
+    plugin.context = context
+    images = [f"https://img.example/{index}.jpg" for index in range(3)]
+    post = Post(
+        post_id="send", title="标题", summary="摘要", images=images,
+        url="https://u.lofter.com/post/send",
+        completeness=frozenset({"title", "summary", "images", "url"}),
+    )
+
+    await main.LofterPlugin._send_push(
+        plugin, "tg-id:GroupMessage:sess", post, "【标签新内容】",
+        frozenset({"tag"}),
+    )
+
+    chain = context.send_message.await_args.args[1].chain
+    assert chain[0].kind == "plain"
+    assert [item.url for item in chain[1:]] == images[:2]
 
 
 @pytest.mark.asyncio
 async def test_scheduler_uses_production_send_push_acceptance_boundary(tmp_path):
     main = _load_main_module()
-    context = SimpleNamespace(send_message=AsyncMock(return_value=False))
+    context = SimpleNamespace(
+        get_platform_inst=MagicMock(
+            return_value=SimpleNamespace(
+                meta=lambda: SimpleNamespace(name="test")
+            )
+        ),
+        send_message=AsyncMock(return_value=False),
+    )
     config = {"max_images": 2, "search_limit": 3, "poll_interval": 30}
     with patch.object(
         main.StarTools, "get_data_dir", return_value=str(tmp_path), create=True
@@ -246,6 +428,47 @@ async def test_cli_preview_then_subscription_replacement_keeps_seen(tmp_path):
         ) == []
     finally:
         await plugin._db.close()
+
+
+@pytest.mark.asyncio
+async def test_cli_preview_qq_reuses_share_and_all_image_nodes(tmp_path):
+    main = _load_main_module()
+    main.Comp = SimpleNamespace(
+        Plain=lambda text: SimpleNamespace(kind="plain", text=text),
+        Image=SimpleNamespace(
+            fromURL=lambda url: SimpleNamespace(kind="image", url=url)
+        ),
+        Share=lambda **kwargs: SimpleNamespace(kind="share", **kwargs),
+        Node=lambda **kwargs: SimpleNamespace(kind="node", **kwargs),
+        Nodes=lambda **kwargs: SimpleNamespace(kind="nodes", **kwargs),
+    )
+    plugin = await _make_command_plugin(main, tmp_path)
+    images = [f"https://img.example/{index}.jpg" for index in range(3)]
+    post = Post(
+        post_id="old", title="标题", summary="摘要", images=images,
+        url="https://u.lofter.com/post/old",
+        publish_time="2026-07-29 05:00:00",
+        completeness=frozenset({
+            "title", "summary", "images", "url", "publish_time"
+        }),
+    )
+    plugin._source.tags["A"] = [post]
+    plugin._source.get_post = AsyncMock(return_value=post)
+    try:
+        event = _AdminCommandEvent(
+            "/lofter subtagpreview A", platform_name="aiocqhttp"
+        )
+        results = [
+            item async for item in main.LofterPlugin.sub_tag_preview(
+                plugin, event
+            )
+        ]
+    finally:
+        await plugin._db.close()
+
+    chain = results[1]
+    assert [item.kind for item in chain] == ["share", "nodes"]
+    assert [node.content[0].url for node in chain[1].nodes] == images
 
 
 @pytest.mark.asyncio

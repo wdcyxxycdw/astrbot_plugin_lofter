@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Awaitable, Literal
+from typing import Literal
 
 from .db import LofterDB
-from .scheduler import SubscriptionScheduler
+from .scheduler import SendFunc, SubscriptionScheduler
 from .source_scan import ContentSource
 from .storage import SubscriptionStorage
 from .e2e_steps_network import NetworkStepsMixin
@@ -34,7 +34,7 @@ class E2ETestRunner(NetworkStepsMixin, FlowStepsMixin):
         source: ContentSource,
         storage: SubscriptionStorage,
         scheduler: SubscriptionScheduler,
-        send_push: Callable[[str, str, list], Awaitable[None]],
+        send_push: SendFunc,
     ):
         self._db = db
         self._source = source
