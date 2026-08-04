@@ -143,7 +143,7 @@ async def _fetch_with_deadline(
         raise _deadline_error(state, reason="deadline_before_fetch")
     try:
         page = await asyncio.wait_for(fetch_page(cursor), remaining)
-    except TimeoutError as exc:
+    except asyncio.TimeoutError as exc:
         raise _deadline_error(state, reason="fetch_timeout") from exc
     except SourceClosingError:
         raise
