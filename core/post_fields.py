@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Iterable
 
-from .errors import SourceSchemaError, attach_source_evidence
+from .errors import PostEvidenceError, SourceSchemaError, attach_source_evidence
 from .parser import POST_FIELDS, Post, post_owner_identity
 from .post_identity import consistent_blog_owner, post_url_identity
 
@@ -45,8 +45,11 @@ class PostEvidenceLedger:
         )
         for name in _EVIDENCE_FIELDS:
             _merge_field_ledgers(
-                self.fields[name], other.fields.get(name, {}),
-                self.conflicted_ids, collect_conflicts,
+                name,
+                self.fields[name],
+                other.fields.get(name, {}),
+                self.conflicted_ids,
+                collect_conflicts,
             )
 
     def copy(self) -> "PostEvidenceLedger":
@@ -131,27 +134,40 @@ def _remember_known_fields(
     for field_name in ("title", "summary", "content", "author"):
         if post.has_fields({field_name}):
             _remember_evidence(
-                ledgers[field_name], post.post_id, getattr(post, field_name),
-                conflicts, collect_conflicts,
+                field_name,
+                ledgers[field_name],
+                post.post_id,
+                getattr(post, field_name),
+                conflicts,
+                collect_conflicts,
             )
     if post.has_fields({"images"}):
         _remember_evidence(
-            ledgers["images"], post.post_id, tuple(post.images),
-            conflicts, collect_conflicts,
+            "images",
+            ledgers["images"],
+            post.post_id,
+            tuple(post.images),
+            conflicts,
+            collect_conflicts,
         )
     if post.has_fields({"tags"}):
         value = frozenset(tag.casefold() for tag in post.tags)
         _remember_evidence(
-            ledgers["tags"], post.post_id, value, conflicts, collect_conflicts
+            "tags", ledgers["tags"], post.post_id, value, conflicts, collect_conflicts
         )
     if post.has_fields({"publish_time"}) and post.publish_time:
         _remember_evidence(
-            ledgers["publish_time"], post.post_id, post.publish_time,
-            conflicts, collect_conflicts,
+            "publish_time",
+            ledgers["publish_time"],
+            post.post_id,
+            post.publish_time,
+            conflicts,
+            collect_conflicts,
         )
 
 
 def _remember_evidence(
+    field_name: str,
     ledger: dict,
     post_id: str,
     value: object,
@@ -165,7 +181,7 @@ def _remember_evidence(
     if collect_conflicts:
         conflicts.add(post_id)
         return
-    raise SourceSchemaError("post.evidence")
+    raise PostEvidenceError("field_conflict", field_name, "post_ledger")
 
 
 def _remember_url_evidence(
@@ -201,7 +217,7 @@ def _remember_canonical_url(
     if collect_conflicts:
         conflicts.add(post_id)
         return
-    raise SourceSchemaError("post.evidence")
+    raise PostEvidenceError("canonical_url_conflict", "url", "post_ledger")
 
 
 def _merge_owner_ledgers(
@@ -229,6 +245,7 @@ def _merge_url_ledgers(
 
 
 def _merge_field_ledgers(
+    field_name: str,
     target: dict[str, object],
     incoming: dict[str, object],
     conflicts: set[str],
@@ -236,7 +253,7 @@ def _merge_field_ledgers(
 ) -> None:
     for post_id, value in incoming.items():
         _remember_evidence(
-            target, post_id, value, conflicts, collect_conflicts
+            field_name, target, post_id, value, conflicts, collect_conflicts
         )
 
 

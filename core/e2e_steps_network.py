@@ -72,6 +72,15 @@ class NetworkStepsMixin:
         name = "Mobile 标签直连"
         started = self._timed_start()
         details: list[str] = []
+        facts: dict[str, str | int | bool] = {
+            "mobile_eligible": False,
+            "mobile_fallback_reason": "mobile_source_error",
+            "mobile_item_count": 0,
+            "mobile_time_count": 0,
+            "mobile_regression_count": 0,
+            "mobile_equal_count": 0,
+            "mobile_first_regression_pair_ordinal": 0,
+        }
         diagnose = getattr(self._source, "diagnose_mobile_tag", None)
         if not callable(diagnose):
             return self._fail(
@@ -80,25 +89,39 @@ class NetworkStepsMixin:
                 self._timed_end(started),
                 SourceSchemaError("response"),
                 ["source 未提供 Mobile-only 诊断入口"],
-                facts={
-                    "mobile_eligible": False,
-                    "mobile_fallback_reason": "mobile_source_error",
-                },
+                facts=facts,
             )
         try:
             diagnostic = await diagnose(self.TEST_TAG, 20, "new")
             reason = _safe_mobile_reason(diagnostic.fallback_reason)
-            facts = {
+            facts.update({
                 "mobile_eligible": reason is None,
                 "mobile_fallback_reason": reason or "无",
-            }
+                "mobile_item_count": _safe_count(
+                    diagnostic.item_count
+                ),
+                "mobile_time_count": _safe_count(
+                    diagnostic.time_count
+                ),
+                "mobile_regression_count": _safe_count(
+                    diagnostic.regression_count
+                ),
+                "mobile_equal_count": _safe_count(
+                    diagnostic.equal_count
+                ),
+                "mobile_first_regression_pair_ordinal": _safe_count(
+                    diagnostic.first_regression_pair_ordinal
+                ),
+            })
+            if reason == "mobile_order_regressed":
+                details.extend(_mobile_order_details(facts))
             if diagnostic.error is not None:
                 return self._fail(
                     key,
                     name,
                     self._timed_end(started),
                     diagnostic.error,
-                    [f"fallback={reason}"],
+                    [*details, f"fallback={reason}"],
                     facts=facts,
                 )
             page = diagnostic.page
@@ -112,7 +135,7 @@ class NetworkStepsMixin:
                     name,
                     self._timed_end(started),
                     SourceSchemaError("response"),
-                    [f"fallback={reason}"],
+                    [*details, f"fallback={reason}"],
                     facts=facts,
                 )
             _validate_page(page)
@@ -127,16 +150,17 @@ class NetworkStepsMixin:
                 facts,
             )
         except Exception as exc:
+            facts.update({
+                "mobile_eligible": False,
+                "mobile_fallback_reason": _exception_mobile_reason(exc),
+            })
             return self._fail(
                 key,
                 name,
                 self._timed_end(started),
                 exc,
                 details,
-                facts={
-                    "mobile_eligible": False,
-                    "mobile_fallback_reason": _exception_mobile_reason(exc),
-                },
+                facts=facts,
             )
 
     async def _step_03_dwr_direct(self) -> object:
@@ -201,6 +225,7 @@ class NetworkStepsMixin:
                     "production_source": source,
                     "production_restarted": page.restarted,
                     "production_fallback_reason": reason or "无",
+                    "production_partial_reason": "无",
                 },
             )
         except Exception as exc:
@@ -209,17 +234,15 @@ class NetworkStepsMixin:
                 reason = "mobile_source_error" if hasattr(
                     exc, "mobile_fallback_reason"
                 ) else "无"
+            facts = _production_failure_facts(exc, reason)
+            details.extend(_production_partial_details(facts))
             return self._fail(
                 key,
                 name,
                 self._timed_end(started),
                 exc,
                 details,
-                facts={
-                    "production_source": "未验证",
-                    "production_restarted": False,
-                    "production_fallback_reason": reason,
-                },
+                facts=facts,
             )
 
     async def _step_05_fixture_detail(self) -> object:
@@ -228,6 +251,9 @@ class NetworkStepsMixin:
         started = self._timed_start()
         details: list[str] = []
         provider = "未建立"
+        phase = "candidate_selection"
+        ordinal = 0
+        total = 0
         try:
             selected = _select_fixture_candidates(self._artifacts)
             if selected is None:
@@ -242,14 +268,24 @@ class NetworkStepsMixin:
                     name,
                     self._timed_end(started),
                     ["健康来源合计不足两个不同帖子"],
-                    {"fixture_provider": "未建立"},
+                    {
+                        "fixture_provider": "未建立",
+                        "fixture_phase": phase,
+                        "fixture_candidate_ordinal": ordinal,
+                        "fixture_candidate_total": total,
+                    },
                 )
             provider, candidates, evidence = selected
+            total = len(candidates)
             enriched: list[Post] = []
-            for candidate in candidates:
+            for ordinal, candidate in enumerate(candidates, 1):
+                phase = "detail_fetch"
                 detail = await self._source.get_post(candidate.url)
+                phase = "list_detail_merge"
                 merged = merge_post_fields(candidate, detail)
+                phase = "full_evidence_validate"
                 validate_post_evidence((*evidence, candidate, detail, merged))
+                phase = "subscription_validate"
                 checked = await ensure_subscription_posts(
                     [merged], _MemoryPostSource(merged), {"images"}
                 )
@@ -257,6 +293,8 @@ class NetworkStepsMixin:
                 if not post.author_username:
                     raise SourceSchemaError("author")
                 enriched.append(post)
+            phase = "fixture_order"
+            ordinal = 0
             baseline, candidate = _order_fixture_posts(enriched)
             bundle = FixtureBundle(baseline, candidate)
             self._artifacts["fixture_bundle"] = bundle
@@ -270,13 +308,21 @@ class NetworkStepsMixin:
                 {"fixture_ready": True, "fixture_provider": provider},
             )
         except Exception as exc:
+            facts = {
+                "fixture_ready": False,
+                "fixture_provider": provider,
+                "fixture_phase": phase,
+                "fixture_candidate_ordinal": ordinal,
+                "fixture_candidate_total": total,
+            }
+            details.extend(_fixture_failure_details(facts))
             return self._fail(
                 key,
                 name,
                 self._timed_end(started),
                 exc,
                 details,
-                facts={"fixture_ready": False, "fixture_provider": provider},
+                facts=facts,
             )
 
     async def _step_06_blog(self) -> object:
@@ -339,7 +385,15 @@ def _validate_page(page: SourcePage) -> None:
     if not isinstance(page, SourcePage):
         raise SourceSchemaError("response")
     if not page.complete:
-        raise SourcePartialError(page.mapped_count, page.dropped_count)
+        raise SourcePartialError(
+            page.mapped_count,
+            page.dropped_count,
+            reason="page_incomplete",
+            source=_safe_source(page.source),
+            restarted=page.restarted,
+            page_count=1,
+            unique_count=len({post.post_id for post in page.items}),
+        )
     if page.sort != "new":
         raise SourceSchemaError("sort")
 
@@ -431,3 +485,78 @@ def _safe_mobile_reason(value: object) -> str | None:
 def _safe_source(value: str) -> str:
     known = {"dwr", "html_blog", "mobile_blog", "mobile_tag"}
     return value if value in known else "unknown"
+
+
+def _safe_count(value: object) -> int:
+    return value if type(value) is int and value >= 0 else 0
+
+
+def _mobile_order_details(
+    facts: dict[str, str | int | bool],
+) -> list[str]:
+    return [
+        f"items={facts['mobile_item_count']}",
+        f"times={facts['mobile_time_count']}",
+        f"regressions={facts['mobile_regression_count']}",
+        f"equals={facts['mobile_equal_count']}",
+        "first-regression-pair="
+        f"{facts['mobile_first_regression_pair_ordinal']}",
+    ]
+
+
+def _production_failure_facts(
+    error: BaseException, fallback_reason: str
+) -> dict[str, str | int | bool]:
+    if not isinstance(error, SourcePartialError):
+        return {
+            "production_source": "unknown",
+            "production_restarted": "unknown",
+            "production_fallback_reason": fallback_reason,
+            "production_partial_reason": "unknown",
+            "production_page_count": 0,
+            "production_unique_count": 0,
+            "production_evidence_count": 0,
+        }
+    restarted: str | bool = (
+        error.restarted if error.restarted is not None else "unknown"
+    )
+    return {
+        "production_source": error.source,
+        "production_restarted": restarted,
+        "production_fallback_reason": fallback_reason,
+        "production_partial_reason": error.reason,
+        "production_page_count": error.page_count,
+        "production_unique_count": error.unique_count,
+        "production_evidence_count": error.evidence_count,
+    }
+
+
+def _production_partial_details(
+    facts: dict[str, str | int | bool],
+) -> list[str]:
+    if facts["production_partial_reason"] == "unknown":
+        return []
+    restarted = {
+        True: "yes",
+        False: "no",
+        "unknown": "unknown",
+    }.get(facts["production_restarted"], "unknown")
+    return [
+        f"partial={facts['production_partial_reason']}",
+        f"source={facts['production_source']}",
+        f"restarted={restarted}",
+        f"pages={facts['production_page_count']}",
+        f"unique={facts['production_unique_count']}",
+        f"evidence={facts['production_evidence_count']}",
+    ]
+
+
+def _fixture_failure_details(
+    facts: dict[str, str | int | bool],
+) -> list[str]:
+    details = [f"phase={facts['fixture_phase']}"]
+    ordinal = facts["fixture_candidate_ordinal"]
+    total = facts["fixture_candidate_total"]
+    if type(ordinal) is int and ordinal > 0:
+        details.append(f"candidate={ordinal}/{total}")
+    return details

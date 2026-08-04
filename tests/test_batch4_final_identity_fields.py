@@ -8,7 +8,7 @@ import pytest
 from core.author_block import AuthorBlock
 from core.content_source import DefaultContentSource
 from core.dwr_parser import _map_post
-from core.errors import SourcePartialError, SourceSchemaError
+from core.errors import PostEvidenceError, SourcePartialError, SourceSchemaError
 from core.mobile_parser import parse_mobile_post_detail, parse_mobile_tag_page
 from core.parser import Post, parse_embedded_post, parse_post_page
 from core.post_consumers import ensure_subscription_posts, filter_blocked_with_fields
@@ -319,10 +319,14 @@ async def test_html_rejects_same_slug_cross_blog_evidence():
     <title>Demo</title>
     """
 
-    with pytest.raises(SourceSchemaError, match="post.evidence"):
+    with pytest.raises(PostEvidenceError) as exc_info:
         await parse_post_page(
             html, "https://alice.lofter.com/post/1a_2b"
         )
+
+    assert exc_info.value.diagnostic == (
+        "identity_conflict:owner:html_metadata"
+    )
 
 
 @pytest.mark.parametrize("timestamp", [1, "1"])

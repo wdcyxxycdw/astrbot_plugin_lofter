@@ -9,7 +9,7 @@ import pytest_asyncio
 import core.parser as parser_module
 from core.author_block import AuthorBlockStorage
 from core.db import LofterDB
-from core.errors import SourceLimitError, SourceSchemaError
+from core.errors import PostEvidenceError, SourceLimitError, SourceSchemaError
 from core.filter import FilterRule
 from core.parser import POST_FIELDS, Post, parse_embedded_post
 from core.scheduler import (
@@ -59,23 +59,39 @@ def _embedded_item(**changes) -> dict:
 
 
 @pytest.mark.parametrize(
-    "changes",
+    ("changes", "diagnostic"),
     [
-        {"dirContent": "First", "description": "Second"},
-        {"content": "First", "postContent": "Second"},
-        {
-            "images": ["https://example.invalid/a.jpg"],
-            "photoLinks": ["https://example.invalid/b.jpg"],
-        },
-        {"dirContent": "", "description": "Known"},
-        {"dirContent": "x" * 301 + "a", "description": "x" * 301 + "b"},
+        (
+            {"dirContent": "First", "description": "Second"},
+            "alias_value_conflict:summary:embedded_text_aliases",
+        ),
+        (
+            {"content": "First", "postContent": "Second"},
+            "alias_value_conflict:content:embedded_text_aliases",
+        ),
+        (
+            {
+                "images": ["https://example.invalid/a.jpg"],
+                "photoLinks": ["https://example.invalid/b.jpg"],
+            },
+            "alias_value_conflict:images:embedded_image_aliases",
+        ),
+        (
+            {"dirContent": "", "description": "Known"},
+            "alias_value_conflict:summary:embedded_text_aliases",
+        ),
+        (
+            {"dirContent": "x" * 301 + "a", "description": "x" * 301 + "b"},
+            "alias_value_conflict:summary:embedded_text_aliases",
+        ),
     ],
 )
-def test_embedded_rejects_conflicting_aliases_in_one_mapping(changes):
-    with pytest.raises(SourceSchemaError) as exc_info:
+def test_embedded_rejects_conflicting_aliases_in_one_mapping(changes, diagnostic):
+    with pytest.raises(PostEvidenceError) as exc_info:
         parse_embedded_post(_embedded_html({"post": _embedded_item(**changes)}), POST_URL)
 
     assert exc_info.value.location == "post.evidence"
+    assert exc_info.value.diagnostic == diagnostic
 
 
 def test_embedded_aliases_accept_unknown_and_normalized_equivalence():

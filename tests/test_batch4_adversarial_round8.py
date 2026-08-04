@@ -11,7 +11,12 @@ import pytest
 import core.content_source as source_module
 from core.content_source import DefaultContentSource
 from core.count_scanner import _TagState, scan_tags
-from core.errors import SourceHTTPError, SourcePartialError, SourceSchemaError
+from core.errors import (
+    PostEvidenceError,
+    SourceHTTPError,
+    SourcePartialError,
+    SourceSchemaError,
+)
 from core.filter import FilterRule
 from core.mobile_parser import parse_mobile_post_detail, parse_mobile_tag_page
 from core.parser import Post, parse_embedded_post, parse_post_page
@@ -256,10 +261,13 @@ def test_merge_rejects_known_publish_time_conflict():
     base = _post(tags=["A"], publish_time="2026-01-02 00:00:00")
     detail = _post(tags=["A"], publish_time="2026-01-01 00:00:00")
 
-    with pytest.raises(SourceSchemaError) as exc_info:
+    with pytest.raises(PostEvidenceError) as exc_info:
         merge_post_fields(base, detail)
 
     assert exc_info.value.location == "post.evidence"
+    assert exc_info.value.diagnostic == (
+        "field_conflict:publish_time:post_ledger"
+    )
 
 
 def test_merge_prefers_owned_url_over_ownerless_url():

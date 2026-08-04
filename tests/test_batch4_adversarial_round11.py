@@ -12,7 +12,7 @@ from core.author_block import AuthorBlockStorage
 from core.content_source import DefaultContentSource
 from core.db import LofterDB
 from core.dwr_parser import _map_items
-from core.errors import SourcePartialError, SourceSchemaError
+from core.errors import PostEvidenceError, SourcePartialError, SourceSchemaError
 from core.mobile_parser import parse_mobile_post_detail
 from core.parser import POST_FIELDS, Post, parse_embedded_post
 from core.scheduler import (
@@ -164,10 +164,13 @@ def test_embedded_rejects_empty_and_nonempty_url_aliases():
         + ";</script>"
     )
 
-    with pytest.raises(SourceSchemaError) as exc_info:
+    with pytest.raises(PostEvidenceError) as exc_info:
         parse_embedded_post(html, "https://demo.lofter.com/post/1a_2b")
 
     assert exc_info.value.location == "post.evidence"
+    assert exc_info.value.diagnostic == (
+        "alias_presence_conflict:url:embedded_url_aliases"
+    )
 
 
 @pytest.mark.asyncio

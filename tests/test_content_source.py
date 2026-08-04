@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, call
 import pytest
 
 import core.content_source as source_module
-from core.content_source import DefaultContentSource
+from core.content_source import DefaultContentSource, MobileTagDiagnostic
 from core.dwr_parser import DWRParseResult
 from core.errors import (
     SourceBusinessError,
@@ -239,6 +239,63 @@ async def test_mobile_tag_diagnostic_reports_page_rejection(page, reason):
     assert result.fallback_reason == reason
     assert result.error is None
     client.search_tag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mobile_tag_diagnostic_reports_order_scalars_without_times():
+    client = FakeClient()
+    source = DefaultContentSource(client)
+    posts = [
+        make_post("a", "2026-01-09 00:00:00"),
+        make_post("b", "2026-01-07 00:00:00"),
+        make_post("c", "2026-01-08 00:00:00"),
+        make_post("d", "2026-01-08 00:00:00"),
+        make_post("e", "2026-01-10 00:00:00"),
+    ]
+    source._mobile = SimpleNamespace(
+        list_tag=AsyncMock(return_value=mobile_page(posts))
+    )
+
+    result = await source.diagnose_mobile_tag("demo", 20)
+
+    assert result.fallback_reason == "mobile_order_regressed"
+    assert result.item_count == 5
+    assert result.time_count == 5
+    assert result.regression_count == 2
+    assert result.equal_count == 1
+    assert result.first_regression_pair_ordinal == 2
+
+
+@pytest.mark.asyncio
+async def test_mobile_tag_diagnostic_does_not_invent_order_counts_for_invalid_time():
+    client = FakeClient()
+    source = DefaultContentSource(client)
+    posts = [
+        make_post("a", "2026-01-09 00:00:00"),
+        make_post("b", "private-invalid-time"),
+    ]
+    source._mobile = SimpleNamespace(
+        list_tag=AsyncMock(return_value=mobile_page(posts))
+    )
+
+    result = await source.diagnose_mobile_tag("demo", 20)
+
+    assert result.fallback_reason == "mobile_publish_time_invalid"
+    assert result.item_count == 2
+    assert result.time_count == 1
+    assert result.regression_count == 0
+    assert result.equal_count == 0
+    assert result.first_regression_pair_ordinal == 0
+
+
+def test_mobile_tag_diagnostic_keeps_legacy_positional_constructor():
+    diagnostic = MobileTagDiagnostic(None, (), None, None)
+
+    assert diagnostic.item_count == 0
+    assert diagnostic.time_count == 0
+    assert diagnostic.regression_count == 0
+    assert diagnostic.equal_count == 0
+    assert diagnostic.first_regression_pair_ordinal == 0
 
 
 @pytest.mark.asyncio

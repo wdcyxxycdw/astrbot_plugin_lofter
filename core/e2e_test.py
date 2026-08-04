@@ -15,6 +15,7 @@ from .e2e_steps_network import FixtureBundle, NetworkStepsMixin
 from .errors import (
     DWREvidenceError,
     DWRIdentityError,
+    PostEvidenceError,
     SourceChallengeError,
     SourceError,
     SourceHTTPError,
@@ -483,6 +484,8 @@ def _safe_error(error: BaseException) -> str:
         return f"DWR 证据冲突（{error.diagnostic}）"
     if isinstance(error, DWRIdentityError):
         return f"DWR 身份冲突（{error.diagnostic}）"
+    if isinstance(error, PostEvidenceError):
+        return f"帖子证据冲突（{error.diagnostic}）"
     if isinstance(error, SourceSchemaError):
         return f"内容源响应结构无效（{error.location}）"
     if isinstance(error, SourceError):
@@ -529,6 +532,10 @@ def format_report(results: list[StepResult]) -> str:
         _fact(results, "production_restarted", "unknown")
     )
     production_reason = _fact(results, "production_fallback_reason", "无")
+    production_partial = _fact(results, "production_partial_reason", "无")
+    production_pages = _fact(results, "production_page_count", 0)
+    production_unique = _fact(results, "production_unique_count", 0)
+    production_evidence = _fact(results, "production_evidence_count", 0)
     provider = _fact(results, "fixture_provider", "未建立")
     attempts = _fact(results, "send_attempts", 0)
     accepted = _label_bool(_fact(results, "adapter_accepted", "unknown"))
@@ -536,12 +543,26 @@ def format_report(results: list[StepResult]) -> str:
     db = _label_bool(_fact(results, "db_closed", False))
     temp_dir = _label_bool(_fact(results, "temp_dir_cleaned", False))
 
+    production_line = (
+        "生产标签编排："
+        f"source={production_source}，"
+        f"restarted={production_restarted}，"
+        f"fallback={production_reason}，"
+        f"partial={production_partial}"
+    )
+    if production_partial not in {"无", "unknown"}:
+        production_line += (
+            f"，pages={production_pages}，"
+            f"unique={production_unique}，"
+            f"evidence={production_evidence}"
+        )
+
     lines = [
         "━━━ Lofter 实时健康检查 ━━━",
         f"总体状态：{_HEALTH_LABEL[health]}",
         f"Mobile：eligible={mobile}，fallback={mobile_reason}",
         f"DWR：{dwr}",
-        f"生产标签编排：source={production_source}，restarted={production_restarted}，fallback={production_reason}",
+        production_line,
         f"Fixture：provider={provider}",
         f"真实发送：尝试 {attempts}，adapter accepted={accepted}",
         f"清理：tasks={tasks}，db={db}，temp-dir={temp_dir}",

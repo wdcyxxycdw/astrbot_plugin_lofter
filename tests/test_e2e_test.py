@@ -11,9 +11,12 @@ from core.e2e_test import E2ETestRunner, format_report
 from core.errors import (
     DWREvidenceError,
     DWRIdentityError,
+    PostEvidenceError,
     SourceChallengeError,
+    SourcePartialError,
     SourceSchemaError,
     SourceTimeoutError,
+    attach_source_evidence,
 )
 from core.parser import Post
 from core.source_scan import SourcePage
@@ -97,6 +100,7 @@ class _OfflineSource:
         detail_errors: dict[str, BaseException] | None = None,
         blog_error: BaseException | None = None,
         production_diagnostics: tuple[str, ...] = (),
+        mobile_counts: tuple[int, int, int, int, int] = (0, 0, 0, 0, 0),
     ) -> None:
         self.mobile = mobile
         self.dwr = dwr
@@ -108,6 +112,7 @@ class _OfflineSource:
         self.detail_errors = detail_errors or {}
         self.blog_error = blog_error
         self.production_diagnostics = production_diagnostics
+        self.mobile_counts = mobile_counts
         self.calls: list[tuple] = []
         self.posts = {
             post.url: post
@@ -126,6 +131,7 @@ class _OfflineSource:
             (),
             self.mobile_reason,
             self.mobile_error,
+            *self.mobile_counts,
         )
 
     async def list_tag(self, tag, cursor, limit, sort):
@@ -284,6 +290,11 @@ async def test_mobile_rejection_does_not_block_dwr_or_production():
     assert mobile.facts == {
         "mobile_eligible": False,
         "mobile_fallback_reason": "mobile_incomplete",
+        "mobile_item_count": 0,
+        "mobile_time_count": 0,
+        "mobile_regression_count": 0,
+        "mobile_equal_count": 0,
+        "mobile_first_regression_pair_ordinal": 0,
     }
     assert by_key["dwr_direct"].status == "pass"
     assert by_key["production_orchestration"].status == "pass"
@@ -671,6 +682,178 @@ def test_report_keeps_typed_dwr_diagnostics_payload_free(error, expected):
         "private-token",
     ):
         assert secret not in report
+
+
+@pytest.mark.asyncio
+async def test_mobile_order_failure_reports_only_safe_scalars():
+    secret_time = "2099-12-31 23:59:59"
+    baseline = _post("1a_1", publish_time=secret_time)
+    candidate = _post("1a_2")
+    source = _OfflineSource(
+        [baseline, candidate],
+        [candidate],
+        production=[baseline, candidate],
+        mobile_reason="mobile_order_regressed",
+        mobile_counts=(20, 20, 2, 1, 7),
+    )
+    runner, _, scheduler_task = await _runner(source)
+
+    try:
+        results = await runner.run_all("qq:real-session")
+    finally:
+        await _stop(scheduler_task)
+
+    mobile = _by_key(results)["mobile_direct"]
+    assert mobile.status == "fail"
+    assert mobile.facts["mobile_regression_count"] == 2
+    assert mobile.details == [
+        "items=20",
+        "times=20",
+        "regressions=2",
+        "equals=1",
+        "first-regression-pair=7",
+        "fallback=mobile_order_regressed",
+    ]
+    report = format_report(results)
+    assert "regressions=2" in report
+    assert "first-regression-pair=7" in report
+    assert secret_time not in report
+    assert baseline.post_id not in report
+    assert baseline.url not in report
+
+
+@pytest.mark.asyncio
+async def test_production_partial_reports_typed_safe_context():
+    baseline = _post("1a_1")
+    candidate = _post("1a_2")
+    error = SourcePartialError(
+        20,
+        0,
+        reason="evidence_shortfall",
+        source="dwr",
+        restarted=True,
+        page_count=2,
+        unique_count=20,
+    )
+    attach_source_evidence(error, (baseline, candidate))
+    source = _OfflineSource(
+        [baseline, candidate],
+        [candidate],
+        production_error=error,
+    )
+    runner, _, scheduler_task = await _runner(source)
+
+    try:
+        results = await runner.run_all("qq:real-session")
+    finally:
+        await _stop(scheduler_task)
+
+    production = _by_key(results)["production_orchestration"]
+    assert production.status == "fail"
+    assert production.health == "degraded"
+    assert production.facts == {
+        "production_source": "dwr",
+        "production_restarted": True,
+        "production_fallback_reason": "无",
+        "production_partial_reason": "evidence_shortfall",
+        "production_page_count": 2,
+        "production_unique_count": 20,
+        "production_evidence_count": 2,
+    }
+    assert production.details == [
+        "partial=evidence_shortfall",
+        "source=dwr",
+        "restarted=yes",
+        "pages=2",
+        "unique=20",
+        "evidence=2",
+    ]
+    report = format_report(results)
+    assert (
+        "生产标签编排：source=dwr，restarted=是，fallback=无，"
+        "partial=evidence_shortfall，pages=2，unique=20，evidence=2"
+        in report
+    )
+    assert baseline.post_id not in report
+    assert baseline.url not in report
+    assert baseline.title not in report
+
+
+@pytest.mark.asyncio
+async def test_production_non_partial_error_uses_unknown_context():
+    baseline = _post("1a_1")
+    candidate = _post("1a_2")
+    source = _OfflineSource(
+        [baseline, candidate],
+        [candidate],
+        production_error=SourceSchemaError("response"),
+    )
+    runner, _, scheduler_task = await _runner(source)
+
+    try:
+        results = await runner.run_all("qq:real-session")
+    finally:
+        await _stop(scheduler_task)
+
+    production = _by_key(results)["production_orchestration"]
+    assert production.facts["production_source"] == "unknown"
+    assert production.facts["production_restarted"] == "unknown"
+    assert production.facts["production_partial_reason"] == "unknown"
+    assert production.details == []
+
+
+@pytest.mark.asyncio
+async def test_fixture_failure_reports_phase_candidate_and_typed_evidence():
+    baseline = _post("1a_1")
+    candidate = _post("1a_2")
+    error = PostEvidenceError("field_conflict", "summary", "post_ledger")
+    source = _OfflineSource(
+        [baseline],
+        [candidate],
+        production=[baseline, candidate],
+        detail_errors={candidate.url: error},
+    )
+    runner, send, scheduler_task = await _runner(source)
+
+    try:
+        results = await runner.run_all("qq:real-session")
+    finally:
+        await _stop(scheduler_task)
+
+    fixture = _by_key(results)["fixture_detail"]
+    assert fixture.status == "fail"
+    assert fixture.facts == {
+        "fixture_ready": False,
+        "fixture_provider": "production",
+        "fixture_phase": "detail_fetch",
+        "fixture_candidate_ordinal": 2,
+        "fixture_candidate_total": 2,
+    }
+    assert fixture.details == ["phase=detail_fetch", "candidate=2/2"]
+    report = format_report(results)
+    assert "帖子证据冲突（field_conflict:summary:post_ledger）" in report
+    assert candidate.post_id not in report
+    assert candidate.url not in report
+    assert candidate.summary not in report
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fixture_selection_failure_clears_candidate_ordinal():
+    first = _post("1a_1", owner="owner-a")
+    conflict = _post("1a_1", owner="owner-b")
+    source = _OfflineSource([first], [conflict], production=[first])
+    runner, _, scheduler_task = await _runner(source)
+
+    try:
+        results = await runner.run_all("qq:real-session")
+    finally:
+        await _stop(scheduler_task)
+
+    fixture = _by_key(results)["fixture_detail"]
+    assert fixture.facts["fixture_phase"] == "candidate_selection"
+    assert fixture.facts["fixture_candidate_ordinal"] == 0
+    assert fixture.details == ["phase=candidate_selection"]
 
 
 def test_report_classifies_challenge_as_inconclusive_without_raw_payload():

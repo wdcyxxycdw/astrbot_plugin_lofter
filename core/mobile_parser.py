@@ -105,7 +105,15 @@ def _build_page(
     raw_items = _items(envelope, key)
     posts, dropped, evidence, records = _map_items(raw_items, mapper)
     if raw_items and not posts:
-        error = SourcePartialError(0, dropped)
+        error = SourcePartialError(
+            0,
+            dropped,
+            reason="page_incomplete",
+            source=source,
+            restarted=False,
+            page_count=1,
+            unique_count=0,
+        )
         attach_source_evidence(error, records)
         raise error
     cursor = _cursor(envelope.get("offset", _MISSING))
