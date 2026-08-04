@@ -112,3 +112,24 @@ async def test_real_registry_has_expected_command_permission_filters():
         for name in list(sys.modules):
             if name == "main" or name.startswith("lofter_registry_test"):
                 sys.modules.pop(name, None)
+
+
+def test_real_share_serializes_to_onebot_segment():
+    from astrbot.api.message_components import Share
+
+    share = Share(
+        url="https://example.com/post",
+        title="title",
+        content="content",
+        image="https://example.com/image.jpg",
+    )
+
+    assert share.toDict() == {
+        "type": "share",
+        "data": {
+            "url": "https://example.com/post",
+            "title": "title",
+            "content": "content",
+            "image": "https://example.com/image.jpg",
+        },
+    }

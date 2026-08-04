@@ -218,9 +218,11 @@ def _expected_send_facts(
     primary_outcome: str = "accepted",
     primary_stage: str = "primary_send",
     primary_error_type: str = "none",
+    primary_error_retcode: int | str = "none",
     media_outcome: str = "not_applicable",
     media_stage: str = "none",
     media_error_type: str = "none",
+    media_error_retcode: int | str = "none",
     delivery_accepted: bool | str = True,
     seen_written: bool | str = True,
 ):
@@ -229,9 +231,11 @@ def _expected_send_facts(
         "primary_outcome": primary_outcome,
         "primary_stage": primary_stage,
         "primary_error_type": primary_error_type,
+        "primary_error_retcode": primary_error_retcode,
         "media_outcome": media_outcome,
         "media_stage": media_stage,
         "media_error_type": media_error_type,
+        "media_error_retcode": media_error_retcode,
         "delivery_accepted": delivery_accepted,
         "seen_written": seen_written,
     }
@@ -739,6 +743,59 @@ async def test_primary_error_reports_safe_type_without_seen_ack():
 
 
 @pytest.mark.asyncio
+async def test_primary_action_failed_reports_retcode_without_payload():
+    baseline = _post("1a_1")
+    candidate = _post("1a_2")
+    source = _OfflineSource(
+        [baseline], [candidate], production=[baseline, candidate]
+    )
+    runner, send, scheduler_task = await _runner(
+        source,
+        send_result=PushSendResult(
+            "error",
+            "primary_send",
+            primary_error_type="ActionFailed",
+            primary_error_retcode=1404,
+        ),
+    )
+
+    try:
+        results = await runner.run_all("qq:private-action-session-canary")
+    finally:
+        await _stop(scheduler_task)
+
+    delivery = _by_key(results)["claim_send_ack_seen"]
+    assert delivery.status == "fail"
+    assert delivery.health == "degraded"
+    assert delivery.error == (
+        "推送阶段失败（primary_send:error:ActionFailed:retcode=1404）"
+    )
+    assert delivery.facts == _expected_send_facts(
+        primary_outcome="error",
+        primary_error_type="ActionFailed",
+        primary_error_retcode=1404,
+        delivery_accepted=False,
+        seen_written=False,
+    )
+    report = format_report(results)
+    assert "primary_send:error:ActionFailed:retcode=1404" in report
+    for secret in (
+        "private-action-session-canary",
+        "private-action-msg-canary",
+        "private-action-wording-canary",
+        "private-action-payload-canary",
+        candidate.post_id,
+        candidate.url,
+        candidate.author_username,
+        candidate.title,
+        candidate.summary,
+        candidate.images[0],
+    ):
+        assert secret not in report
+    send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("send_result", "expected_error", "expected_facts"),
     [
@@ -768,6 +825,23 @@ async def test_primary_error_reports_safe_type_without_seen_ack():
                 media_outcome="error",
                 media_stage="media_send",
                 media_error_type="RuntimeError",
+            ),
+        ),
+        (
+            PushSendResult(
+                "accepted",
+                "primary_send",
+                media_outcome="error",
+                media_stage="media_send",
+                media_error_type="ActionFailed",
+                media_error_retcode=1405,
+            ),
+            "推送阶段失败（media_send:error:ActionFailed:retcode=1405）",
+            _expected_send_facts(
+                media_outcome="error",
+                media_stage="media_send",
+                media_error_type="ActionFailed",
+                media_error_retcode=1405,
             ),
         ),
     ],
@@ -827,9 +901,11 @@ async def test_scheduler_send_timeout_is_inconclusive(monkeypatch):
         primary_outcome="unknown",
         primary_stage="unknown",
         primary_error_type="unknown",
+        primary_error_retcode="unknown",
         media_outcome="unknown",
         media_stage="unknown",
         media_error_type="unknown",
+        media_error_retcode="unknown",
         delivery_accepted="unknown",
         seen_written="unknown",
     )
