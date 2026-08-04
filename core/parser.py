@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup, Tag
 from .errors import (
+    PostEvidenceError,
     SourceChallengeError,
     SourceLimitError,
     SourceSchemaError,
@@ -364,7 +365,9 @@ def _post_evidence(soup: BeautifulSoup) -> tuple[str, str]:
         try:
             canonical, post_id, owner = post_url_identity(value)
         except ValueError:
-            raise SourceSchemaError("post.evidence") from None
+            raise PostEvidenceError(
+                "invalid_url_evidence", "url", "html_metadata"
+            ) from None
         urls.append(canonical)
         ids.add(post_id)
         owners.append(owner)
@@ -375,11 +378,15 @@ def _post_evidence(soup: BeautifulSoup) -> tuple[str, str]:
     try:
         evidence_owner = consistent_blog_owner(*owners)
     except ValueError:
-        raise SourceSchemaError("post.evidence") from None
+        raise PostEvidenceError(
+            "identity_conflict", "owner", "html_metadata"
+        ) from None
     if not ids:
         raise SourceSchemaError("html")
     if len(ids) > 1:
-        raise SourceSchemaError("post.evidence")
+        raise PostEvidenceError(
+            "identity_conflict", "post_id", "html_metadata"
+        )
     resolved_url = next(
         (value for value in urls if post_url_identity(value)[2] == evidence_owner),
         urls[0] if urls else "",
@@ -447,10 +454,22 @@ def _html_post_identity(
         raise SourceSchemaError("post.id")
     try:
         resolved_url, _, resolved_owner = post_url_identity(evidence_url or url)
+    except ValueError:
+        raise PostEvidenceError(
+            "invalid_url_evidence", "url", "html_request"
+        ) from None
+    try:
         request_owner = post_url_identity(url)[2]
+    except ValueError:
+        raise PostEvidenceError(
+            "invalid_url_evidence", "url", "html_request"
+        ) from None
+    try:
         owner = consistent_blog_owner(resolved_owner, request_owner)
     except ValueError:
-        raise SourceSchemaError("post.evidence") from None
+        raise PostEvidenceError(
+            "identity_conflict", "owner", "html_request"
+        ) from None
     return evidence_id, resolved_url, owner
 
 
@@ -561,7 +580,9 @@ def _embedded_urls(
             raise SourceSchemaError(f"embedded.{key}")
         aliases.append((key, value))
     if any(not value for _, value in aliases) and any(value for _, value in aliases):
-        raise SourceSchemaError("post.evidence")
+        raise PostEvidenceError(
+            "alias_presence_conflict", "url", "embedded_url_aliases"
+        )
     result: list[tuple[str, str, str]] = []
     for key, value in aliases:
         if not value:
@@ -687,7 +708,11 @@ def _find_embedded_posts(
         raise SourceSchemaError("embedded.post.owner") from None
     return matches
 def _optional_text(
-    item: dict[str, object], keys: tuple[str, ...], resource: str, limit: int
+    item: dict[str, object],
+    keys: tuple[str, ...],
+    field_name: str,
+    resource: str,
+    limit: int,
 ) -> tuple[str, bool]:
     aliases: list[str] = []
     for key in keys:
@@ -700,7 +725,9 @@ def _optional_text(
     if not aliases:
         return "", False
     if any(value != aliases[0] for value in aliases[1:]):
-        raise SourceSchemaError("post.evidence")
+        raise PostEvidenceError(
+            "alias_value_conflict", field_name, "embedded_text_aliases"
+        )
     return aliases[0], True
 def _plain_text(value: str) -> str:
     return BeautifulSoup(value, "lxml").get_text("\n", strip=True)
@@ -746,7 +773,9 @@ def _extract_embedded_images(
         return [], False
     expected = tuple(aliases[0])
     if any(tuple(images) != expected for images in aliases[1:]):
-        raise SourceSchemaError("post.evidence")
+        raise PostEvidenceError(
+            "alias_value_conflict", "images", "embedded_image_aliases"
+        )
     return aliases[0], True
 
 
@@ -776,14 +805,21 @@ def _embedded_content_fields(
     item: dict[str, object],
 ) -> tuple[str, str, str, list[str], list[str], set[str]]:
     title, title_known = _optional_text(
-        item, ("title",), "title", _TITLE_LIMIT
+        item, ("title",), "title", "title", _TITLE_LIMIT
     )
     raw_summary, summary_known = _optional_text(
-        item, ("dirContent", "description", "digest"),
-        "content", _CONTENT_LIMIT,
+        item,
+        ("dirContent", "description", "digest"),
+        "summary",
+        "content",
+        _CONTENT_LIMIT,
     )
     raw_content, content_known = _optional_text(
-        item, ("content", "postContent"), "content", _CONTENT_LIMIT
+        item,
+        ("content", "postContent"),
+        "content",
+        "content",
+        _CONTENT_LIMIT,
     )
     summary_text = raw_summary
     summary = summary_text[:300] + ("…" if len(summary_text) > 300 else "")

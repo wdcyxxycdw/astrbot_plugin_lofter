@@ -44,6 +44,11 @@ class MobileTagDiagnostic:
     evidence_items: tuple[Post, ...]
     fallback_reason: str | None
     error: SourceError | None
+    item_count: int = 0
+    time_count: int = 0
+    regression_count: int = 0
+    equal_count: int = 0
+    first_regression_pair_ordinal: int = 0
 
 
 class DefaultContentSource:
@@ -265,11 +270,13 @@ class DefaultContentSource:
                 _mobile_error_reason(exc),
                 exc,
             )
+        reason, counts = _mobile_tag_diagnostic(primary, sort)
         return MobileTagDiagnostic(
             primary,
             evidence,
-            _mobile_tag_fallback_reason(primary, sort),
+            reason,
             None,
+            *counts,
         )
 
     async def collect_tag(self, tag: str, limit: int, sort: str = "new") -> SourcePage:
@@ -366,11 +373,11 @@ class DefaultContentSource:
             evidence = _error_evidence(exc)
             posts = await self._credentialed_blog(url, username, evidence)
         try:
-            posts = await _complete_html_blog_posts(self, posts)
+            posts = await _complete_html_blog_posts(self, posts, restarted)
         except Exception as exc:
             attach_source_evidence(exc, evidence)
             raise
-        _validate_blog_fallback(username, evidence, posts, limit)
+        _validate_blog_fallback(username, evidence, posts, limit, restarted)
         return _html_blog_page(posts, evidence, restarted)
 
     async def _credentialed_blog(
@@ -412,6 +419,7 @@ def _validate_blog_fallback(
     evidence: tuple[Post, ...],
     posts: list[Post],
     limit: int,
+    restarted: bool,
 ) -> None:
     _validate_blog_posts_owner(username, (*evidence, *posts))
     validate_post_evidence((*evidence, *posts))
@@ -424,7 +432,15 @@ def _validate_blog_fallback(
     visible_ids = {post.post_id for post in posts[:limit]}
     if set(required[:limit]) <= visible_ids:
         return
-    error = SourcePartialError(len(posts), 0)
+    error = SourcePartialError(
+        len(posts),
+        0,
+        reason="evidence_shortfall",
+        source="html_blog",
+        restarted=restarted,
+        page_count=1,
+        unique_count=len({post.post_id for post in posts}),
+    )
     attach_source_evidence(error, evidence)
     raise error
 
@@ -448,7 +464,7 @@ def _html_blog_page(
 
 
 async def _complete_html_blog_posts(
-    source: DefaultContentSource, posts: list[Post]
+    source: DefaultContentSource, posts: list[Post], restarted: bool
 ) -> list[Post]:
     completed: list[Post] = []
     observed: list[Post] = list(posts)
@@ -462,34 +478,54 @@ async def _complete_html_blog_posts(
             if not value.has_fields({"publish_time"}) or not value.publish_time:
                 raise SourceSchemaError("publishTime")
             completed.append(value)
-        _validate_newest_first(completed)
+        _validate_newest_first(completed, restarted)
         return completed
     except Exception as exc:
         attach_source_evidence(exc, observed)
         raise
 
 
-def _mobile_tag_fallback_reason(
+def _mobile_tag_diagnostic(
     page: SourcePage, sort: str
-) -> str | None:
+) -> tuple[str | None, tuple[int, int, int, int, int]]:
+    item_count = len(page.items)
+    empty_counts = (item_count, 0, 0, 0, 0)
     if not page.complete:
-        return "mobile_incomplete"
+        return "mobile_incomplete", empty_counts
     if page.sort != sort:
-        return "mobile_sort_mismatch"
+        return "mobile_sort_mismatch", empty_counts
     if any(
         not post.has_fields({"publish_time"}) or not post.publish_time
         for post in page.items
     ):
-        return "mobile_publish_time_missing"
+        return "mobile_publish_time_missing", empty_counts
     times = [parse_publish_time(post.publish_time) for post in page.items]
-    if any(value is None for value in times):
-        return "mobile_publish_time_invalid"
-    if any(
-        current > previous
-        for previous, current in zip(times, times[1:])
-    ):
-        return "mobile_order_regressed"
-    return None
+    time_count = sum(value is not None for value in times)
+    if time_count != item_count:
+        return "mobile_publish_time_invalid", (
+            item_count, time_count, 0, 0, 0
+        )
+    normalized = [value for value in times if value is not None]
+    regression_ordinals = [
+        ordinal
+        for ordinal, (previous, current) in enumerate(
+            zip(normalized, normalized[1:]), 1
+        )
+        if current > previous
+    ]
+    equal_count = sum(
+        current == previous
+        for previous, current in zip(normalized, normalized[1:])
+    )
+    counts = (
+        item_count,
+        time_count,
+        len(regression_ordinals),
+        equal_count,
+        regression_ordinals[0] if regression_ordinals else 0,
+    )
+    reason = "mobile_order_regressed" if regression_ordinals else None
+    return reason, counts
 
 
 def _mobile_error_reason(error: SourceError) -> str:
@@ -528,13 +564,21 @@ def _tag_fallback_page(
     )
 
 
-def _validate_newest_first(posts: list[Post]) -> None:
+def _validate_newest_first(posts: list[Post], restarted: bool) -> None:
     regressed = any(
         current.publish_time > previous.publish_time
         for previous, current in zip(posts, posts[1:])
     )
     if regressed:
-        raise SourcePartialError(len(posts), 0)
+        raise SourcePartialError(
+            len(posts),
+            0,
+            reason="order_regressed_within_page",
+            source="html_blog",
+            restarted=restarted,
+            page_count=1,
+            unique_count=len({post.post_id for post in posts}),
+        )
 
 
 def _from_mobile(page, source: str) -> SourcePage:
@@ -588,7 +632,15 @@ def _finish_tag_fallback(
 ) -> SourcePage:
     if cursor is not None and primary is None:
         if fallback.exhausted and not fallback.items:
-            error = SourcePartialError(0, 0)
+            error = SourcePartialError(
+                0,
+                0,
+                reason="evidence_shortfall",
+                source="dwr",
+                restarted=True,
+                page_count=1,
+                unique_count=0,
+            )
             attach_source_evidence(error, evidence)
             raise error
     if primary is not None and fallback.exhausted and not fallback.items:

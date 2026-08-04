@@ -7,6 +7,7 @@ from typing import Awaitable, Callable, Protocol
 
 from .errors import (
     IDENTITY_SCHEMA_LOCATIONS,
+    PostEvidenceError,
     SourceClosingError,
     SourceError,
     SourcePartialError,
@@ -95,9 +96,10 @@ async def collect_pages(
         page = await _fetch_with_deadline(
             fetch_page, cursor, state, deadline_at, monotonic
         )
+        state.returned_page_count += 1
         _validate_page_identity(state, page)
         if monotonic() >= deadline_at:
-            raise _deadline_error(state, page)
+            raise _deadline_error(state, page, "deadline_after_fetch")
         if page.restarted:
             _validate_restart(state, cursor, restarted, page)
             evidence = state.all_evidence_items()
@@ -105,11 +107,11 @@ async def collect_pages(
             restarted = True
         _validate_progress(state, cursor, page)
         if not page.complete:
-            raise _partial(state, page)
+            raise _partial(state, page, reason="page_incomplete")
         state.add(page)
         if page.exhausted or _reached_limit(state, limit):
             if state.evidence_shortfall(limit):
-                raise _partial(state)
+                raise _partial(state, reason="evidence_shortfall")
             return state.result(page, limit, restarted)
         cursor = page.next_cursor
         await asyncio.sleep(0)
@@ -124,11 +126,11 @@ async def _fetch_with_deadline(
 ) -> SourcePage:
     remaining = deadline_at - monotonic()
     if remaining <= 0:
-        raise _deadline_error(state)
+        raise _deadline_error(state, reason="deadline_before_fetch")
     try:
         page = await asyncio.wait_for(fetch_page(cursor), remaining)
     except TimeoutError as exc:
-        raise _deadline_error(state) from exc
+        raise _deadline_error(state, reason="fetch_timeout") from exc
     except SourceClosingError:
         raise
     except SourcePartialError as exc:
@@ -139,11 +141,15 @@ async def _fetch_with_deadline(
         if exc.location in IDENTITY_SCHEMA_LOCATIONS:
             raise
         if state.page_count:
-            raise _partial_with_error(state, exc) from exc
+            raise _partial_with_error(
+                state, exc, reason="source_schema_after_progress"
+            ) from exc
         raise
     except SourceError as exc:
         if state.page_count:
-            raise _partial_with_error(state, exc) from exc
+            raise _partial_with_error(
+                state, exc, reason="source_error_after_progress"
+            ) from exc
         raise
     except Exception as exc:
         if state.page_count:
@@ -163,6 +169,7 @@ class _ScanState:
     cursors: set[str] = field(default_factory=set)
     page_signatures: set[tuple[str, ...]] = field(default_factory=set)
     page_count: int = 0
+    returned_page_count: int = 0
     mapped_count: int = 0
     dropped_count: int = 0
     complete: bool = True
@@ -170,6 +177,7 @@ class _ScanState:
     source: str = ""
     sort: str = ""
     previous_oldest: str = ""
+    restarted: bool = False
 
     def __post_init__(self) -> None:
         for post in self.prior_items:
@@ -226,7 +234,7 @@ class _ScanState:
         self, post: Post, field_name: str, value: object
     ) -> None:
         ledger = self.fields.setdefault(field_name, {})
-        self._remember_field(ledger, post.post_id, value)
+        self._remember_field(ledger, post.post_id, field_name, value)
 
     def _remember_url(self, post: Post) -> None:
         if not post.has_fields({"url"}) or not post.url:
@@ -245,13 +253,18 @@ class _ScanState:
         if bool(existing_owner) != bool(owner):
             self.urls[post.post_id] = canonical if owner else existing
             return
-        raise SourceSchemaError("post.evidence")
+        raise PostEvidenceError(
+            "canonical_url_conflict", "url", "scan_ledger"
+        )
 
-    @staticmethod
-    def _remember_field(ledger: dict, post_id: str, value: object) -> None:
+    def _remember_field(
+        self, ledger: dict, post_id: str, field_name: str, value: object
+    ) -> None:
         existing = ledger.get(post_id)
         if existing is not None and existing != value:
-            raise SourceSchemaError("post.evidence")
+            raise PostEvidenceError(
+                "field_conflict", field_name, "scan_ledger"
+            )
         ledger[post_id] = value
 
     def add(self, page: SourcePage) -> None:
@@ -312,6 +325,8 @@ def _restart_state(
         owners=dict(state.owners),
         fields={name: dict(values) for name, values in state.fields.items()},
         urls=dict(state.urls),
+        returned_page_count=state.returned_page_count,
+        restarted=True,
     )
 
 
@@ -324,39 +339,40 @@ def _validate_progress(
     state: _ScanState, cursor: str | None, page: SourcePage
 ) -> None:
     if not page.exhausted and not page.items:
-        raise _partial(state, page)
+        raise _partial(state, page, reason="empty_nonterminal_page")
     if state.source and page.source != state.source:
-        raise _partial(state, page)
+        raise _partial(state, page, reason="source_changed")
     if state.sort and page.sort != state.sort:
-        raise _partial(state, page)
+        raise _partial(state, page, reason="sort_changed")
     if cursor is not None and page.next_cursor == cursor:
-        raise _partial(state, page)
+        raise _partial(state, page, reason="cursor_stalled")
     if page.next_cursor and page.next_cursor in state.cursors:
-        raise _partial(state, page)
+        raise _partial(state, page, reason="cursor_repeated")
     signature = tuple(post.post_id for post in page.items)
     if signature and signature in state.page_signatures:
-        raise _partial(state, page)
+        raise _partial(state, page, reason="page_repeated")
     if page.items and not any(post.post_id not in state.ids for post in page.items):
-        raise _partial(state, page)
+        raise _partial(state, page, reason="no_unique_progress")
     if _missing_sort_time(state, page):
-        raise _partial(state, page)
-    if _sort_regressed(state, page):
-        raise _partial(state, page)
+        raise _partial(state, page, reason="publish_time_missing")
+    order_reason = _sort_regression_reason(state, page)
+    if order_reason is not None:
+        raise _partial(state, page, reason=order_reason)
     if not page.exhausted and page.next_cursor is None:
-        raise _partial(state, page)
+        raise _partial(state, page, reason="next_cursor_missing")
 
 
 def _validate_restart(
     state: _ScanState, cursor: str | None, restarted: bool, page: SourcePage
 ) -> None:
-    invalid = (
-        restarted
-        or not state.page_count
-        or cursor is None
-        or page.source == state.source
-    )
-    if invalid:
-        raise _partial(state, page)
+    if restarted:
+        raise _partial(state, page, reason="restart_repeated")
+    if not state.page_count:
+        raise _partial(state, page, reason="restart_without_prior_page")
+    if cursor is None:
+        raise _partial(state, page, reason="restart_without_cursor")
+    if page.source == state.source:
+        raise _partial(state, page, reason="restart_same_source")
 
 
 def _missing_sort_time(state: _ScanState, page: SourcePage) -> bool:
@@ -371,18 +387,20 @@ def _missing_sort_time(state: _ScanState, page: SourcePage) -> bool:
     )
 
 
-def _sort_regressed(state: _ScanState, page: SourcePage) -> bool:
+def _sort_regression_reason(
+    state: _ScanState, page: SourcePage
+) -> str | None:
     if page.sort != "new":
-        return False
+        return None
     times = [post.publish_time for post in page.items]
-    within_page = any(
+    if any(
         current > previous
         for previous, current in zip(times, times[1:])
-    )
-    across_pages = bool(state.previous_oldest and times) and (
-        max(times) > state.previous_oldest
-    )
-    return within_page or across_pages
+    ):
+        return "order_regressed_within_page"
+    if state.previous_oldest and times and max(times) > state.previous_oldest:
+        return "order_regressed_across_pages"
+    return None
 
 
 def _reached_limit(state: _ScanState, limit: int | None) -> bool:
@@ -390,17 +408,22 @@ def _reached_limit(state: _ScanState, limit: int | None) -> bool:
 
 
 def _deadline_error(
-    state: _ScanState, page: SourcePage | None = None
+    state: _ScanState,
+    page: SourcePage | None = None,
+    reason: str = "deadline_before_fetch",
 ) -> SourceError:
     if state.page_count or page is not None:
-        return _partial(state, page)
+        return _partial(state, page, reason=reason)
     return SourceTimeoutError()
 
 
 def _partial_with_error(
-    state: _ScanState, error: SourceError
+    state: _ScanState,
+    error: SourceError,
+    *,
+    reason: str,
 ) -> SourcePartialError:
-    partial = _partial(state)
+    partial = _partial(state, reason=reason)
     attach_source_evidence(partial, getattr(error, "evidence_items", ()))
     return partial
 
@@ -408,9 +431,15 @@ def _partial_with_error(
 def _partial_error(
     state: _ScanState, error: SourcePartialError
 ) -> SourcePartialError:
+    source = error.source if error.source != "unknown" else state.source
     partial = SourcePartialError(
         state.mapped_count + error.mapped_count,
         state.dropped_count + error.dropped_count,
+        reason=error.reason,
+        source=source,
+        restarted=state.restarted or error.restarted is True,
+        page_count=state.returned_page_count + error.page_count,
+        unique_count=max(len(state.ids), error.unique_count),
     )
     attach_source_evidence(partial, state.all_evidence_items())
     attach_source_evidence(partial, getattr(error, "evidence_items", ()))
@@ -418,11 +447,24 @@ def _partial_error(
 
 
 def _partial(
-    state: _ScanState, page: SourcePage | None = None
+    state: _ScanState,
+    page: SourcePage | None = None,
+    *,
+    reason: str = "source_partial",
 ) -> SourcePartialError:
     mapped = state.mapped_count + (page.mapped_count if page else 0)
     dropped = state.dropped_count + (page.dropped_count if page else 0)
-    partial = SourcePartialError(mapped, dropped)
+    page_ids = {post.post_id for post in page.items} if page else set()
+    source = page.source if page is not None else state.source
+    partial = SourcePartialError(
+        mapped,
+        dropped,
+        reason=reason,
+        source=source,
+        restarted=state.restarted,
+        page_count=state.returned_page_count,
+        unique_count=len(state.ids | page_ids),
+    )
     attach_source_evidence(partial, state.all_evidence_items())
     if page is not None:
         attach_source_evidence(partial, (*page.evidence_items, *page.items))

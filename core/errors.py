@@ -46,6 +46,15 @@ class SourceSchemaError(SourceError):
         super().__init__(f"内容源响应结构无效（{self.location}）", _safe=True)
 
 
+class PostEvidenceError(SourceSchemaError):
+    def __init__(self, reason: str, field: str, origin: str) -> None:
+        self.reason = _safe_post_evidence_reason(reason)
+        self.field = _safe_post_evidence_field(field)
+        self.origin = _safe_post_evidence_origin(origin)
+        self.diagnostic = f"{self.reason}:{self.field}:{self.origin}"
+        super().__init__("post.evidence")
+
+
 class DWREvidenceError(SourceSchemaError):
     def __init__(self, reason: str, *fields: str) -> None:
         self.location = "post.evidence"
@@ -111,11 +120,30 @@ class SourceLimitError(SourceError):
 
 
 class SourcePartialError(SourceError):
-    def __init__(self, mapped_count: int = 0, dropped_count: int = 0) -> None:
+    def __init__(
+        self,
+        mapped_count: int = 0,
+        dropped_count: int = 0,
+        *,
+        reason: str = "source_partial",
+        source: str = "unknown",
+        restarted: bool | None = None,
+        page_count: int = 0,
+        unique_count: int = 0,
+    ) -> None:
         self.mapped_count = _safe_count(mapped_count)
         self.dropped_count = _safe_count(dropped_count)
+        self.reason = _safe_partial_reason(reason)
+        self.source = _safe_partial_source(source)
+        self.restarted = restarted if isinstance(restarted, bool) else None
+        self.page_count = _safe_count(page_count)
+        self.unique_count = _safe_count(unique_count)
         message = f"内容源结果不完整（映射 {self.mapped_count}，丢弃 {self.dropped_count}）"
         super().__init__(message, _safe=True)
+
+    @property
+    def evidence_count(self) -> int:
+        return len(tuple(getattr(self, "evidence_items", ())))
 
 
 class SourceClosingError(SourceError):
@@ -172,6 +200,82 @@ def mark_limit_identity_complete(error: SourceLimitError) -> None:
 
 def limit_identity_complete(error: SourceLimitError) -> bool:
     return getattr(error, "identity_prefix_complete", False) is True
+
+
+def _safe_post_evidence_reason(value: str) -> str:
+    known = {
+        "field_conflict",
+        "canonical_url_conflict",
+        "invalid_url_evidence",
+        "identity_conflict",
+        "alias_presence_conflict",
+        "alias_value_conflict",
+    }
+    return value if value in known else "unknown"
+
+
+def _safe_post_evidence_field(value: str) -> str:
+    known = {
+        "title",
+        "summary",
+        "content",
+        "author",
+        "author_username",
+        "images",
+        "tags",
+        "publish_time",
+        "url",
+        "post_id",
+        "owner",
+    }
+    return value if value in known else "unknown"
+
+
+def _safe_post_evidence_origin(value: str) -> str:
+    known = {
+        "post_ledger",
+        "scan_ledger",
+        "html_metadata",
+        "html_request",
+        "embedded_url_aliases",
+        "embedded_text_aliases",
+        "embedded_image_aliases",
+    }
+    return value if value in known else "unknown"
+
+
+def _safe_partial_reason(value: str) -> str:
+    known = {
+        "source_partial",
+        "deadline_before_fetch",
+        "fetch_timeout",
+        "deadline_after_fetch",
+        "page_incomplete",
+        "evidence_shortfall",
+        "empty_nonterminal_page",
+        "source_changed",
+        "sort_changed",
+        "cursor_stalled",
+        "cursor_repeated",
+        "page_repeated",
+        "no_unique_progress",
+        "publish_time_missing",
+        "order_regressed_within_page",
+        "order_regressed_across_pages",
+        "next_cursor_missing",
+        "restart_repeated",
+        "restart_without_prior_page",
+        "restart_without_cursor",
+        "restart_same_source",
+        "source_schema_after_progress",
+        "source_error_after_progress",
+    }
+    return value if value in known else "source_partial"
+
+
+def _safe_partial_source(value: str) -> str:
+    known = {"mobile_tag", "dwr", "mobile_blog", "html_blog"}
+    return value if value in known else "unknown"
 
 
 def _safe_dwr_evidence_reason(value: str) -> str:

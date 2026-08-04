@@ -293,8 +293,14 @@ def test_nonempty_zero_mapped_is_typed_partial_failure():
     with pytest.raises(SourcePartialError) as exc_info:
         parse_mobile_tag_page(_tag_payload([None, {"postData": {}}]))
 
-    assert exc_info.value.mapped_count == 0
-    assert exc_info.value.dropped_count == 2
+    error = exc_info.value
+    assert error.mapped_count == 0
+    assert error.dropped_count == 2
+    assert error.reason == "page_incomplete"
+    assert error.source == "mobile_tag"
+    assert error.restarted is False
+    assert error.page_count == 1
+    assert error.unique_count == 0
 
 
 @pytest.mark.parametrize(
