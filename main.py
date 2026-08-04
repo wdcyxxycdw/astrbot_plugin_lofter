@@ -132,7 +132,7 @@ async def _search_unique_posts(source: ContentSource, keyword: str, limit: int):
     "astrbot_plugin_lofter",
     "user",
     "解析 Lofter 链接，订阅 Lofter 标签/博主，搜索 Lofter 内容，支持标签表达式统计",
-    "v2.0.7",
+    "v2.0.8",
 )
 class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -236,7 +236,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             result = await self.context.send_message(
                 session_id, MessageChain(components)
             )
-            return result is True
+            return result is not False
         except Exception as e:
             logger.error("推送消息失败 session=%s: %s", session_id, e)
             return False

@@ -336,6 +336,214 @@ async def test_limit_scans_tail_only_until_evidence_is_covered():
 
 
 @pytest.mark.asyncio
+async def test_limit_tail_allows_interleaved_pages_below_business_cutoff():
+    visible = [
+        post(f"visible-{index}", f"2026-01-{30 - index:02d} 00:00:00")
+        for index in range(20)
+    ]
+    hidden_a = post("hidden-a", "2026-01-08 00:00:00")
+    hidden_b = post("hidden-b", "2026-01-07 00:00:00")
+    pages = iter([
+        SourcePage(
+            items=visible,
+            source="dwr",
+            next_cursor="20",
+            exhausted=False,
+            sort="new",
+            mapped_count=20,
+            dropped_count=0,
+            complete=True,
+            evidence_items=(hidden_a, hidden_b),
+        ),
+        SourcePage(
+            items=[
+                post("tail-a", "2026-01-10 00:00:00"),
+                hidden_a,
+            ],
+            source="dwr",
+            next_cursor="40",
+            exhausted=False,
+            sort="new",
+            mapped_count=2,
+            dropped_count=0,
+            complete=True,
+        ),
+        SourcePage(
+            items=[
+                post("tail-b", "2026-01-09 00:00:00"),
+                hidden_b,
+            ],
+            source="dwr",
+            next_cursor="60",
+            exhausted=False,
+            sort="new",
+            mapped_count=2,
+            dropped_count=0,
+            complete=True,
+        ),
+    ])
+
+    result = await collect_pages(lambda _cursor: ready(next(pages)), limit=20)
+
+    assert result.items == visible
+    assert result.next_cursor == "20"
+    assert result.exhausted is False
+
+
+@pytest.mark.asyncio
+async def test_limit_tail_rejects_new_unique_item_above_business_cutoff():
+    visible = [
+        post(f"visible-{index}", f"2026-01-{30 - index:02d} 00:00:00")
+        for index in range(20)
+    ]
+    hidden = post("hidden", "2026-01-10 00:00:00")
+    pages = iter([
+        SourcePage(
+            items=visible,
+            source="dwr",
+            next_cursor="20",
+            exhausted=False,
+            sort="new",
+            mapped_count=20,
+            dropped_count=0,
+            complete=True,
+            evidence_items=(hidden,),
+        ),
+        SourcePage(
+            items=[
+                post("regressed", "2026-01-12 00:00:00"),
+                hidden,
+            ],
+            source="dwr",
+            next_cursor=None,
+            exhausted=True,
+            sort="new",
+            mapped_count=2,
+            dropped_count=0,
+            complete=True,
+        ),
+    ])
+
+    with pytest.raises(SourcePartialError) as exc_info:
+        await collect_pages(lambda _cursor: ready(next(pages)), limit=20)
+
+    assert exc_info.value.reason == "order_regressed_across_pages"
+
+
+@pytest.mark.asyncio
+async def test_limit_tail_cutoff_uses_nth_unique_item_not_boundary_page_oldest():
+    visible = [
+        post("first", "2026-01-10 00:00:00"),
+        post("second", "2026-01-09 00:00:00"),
+        post("overfill", "2026-01-01 00:00:00"),
+    ]
+    hidden = post("hidden", "2026-01-08 00:00:00")
+    pages = iter([
+        SourcePage(
+            items=visible,
+            source="dwr",
+            next_cursor="3",
+            exhausted=False,
+            sort="new",
+            mapped_count=3,
+            dropped_count=0,
+            complete=True,
+            evidence_items=(hidden,),
+        ),
+        SourcePage(
+            items=[hidden],
+            source="dwr",
+            next_cursor=None,
+            exhausted=True,
+            sort="new",
+            mapped_count=1,
+            dropped_count=0,
+            complete=True,
+        ),
+    ])
+
+    result = await collect_pages(lambda _cursor: ready(next(pages)), limit=2)
+
+    assert [item.post_id for item in result.items] == ["first", "second"]
+    assert result.next_cursor == "3"
+    assert result.exhausted is False
+
+
+@pytest.mark.asyncio
+async def test_limit_tail_ignores_newer_duplicate_from_business_prefix():
+    first = post("first", "2026-01-10 00:00:00")
+    second = post("second", "2026-01-09 00:00:00")
+    hidden = post("hidden", "2026-01-08 00:00:00")
+    pages = iter([
+        SourcePage(
+            items=[first, second],
+            source="dwr",
+            next_cursor="2",
+            exhausted=False,
+            sort="new",
+            mapped_count=2,
+            dropped_count=0,
+            complete=True,
+            evidence_items=(hidden,),
+        ),
+        SourcePage(
+            items=[first, hidden],
+            source="dwr",
+            next_cursor=None,
+            exhausted=True,
+            sort="new",
+            mapped_count=2,
+            dropped_count=0,
+            complete=True,
+        ),
+    ])
+
+    result = await collect_pages(lambda _cursor: ready(next(pages)), limit=2)
+
+    assert [item.post_id for item in result.items] == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_limit_tail_keeps_within_page_order_fail_closed():
+    visible = [
+        post(f"visible-{index}", f"2026-01-{30 - index:02d} 00:00:00")
+        for index in range(20)
+    ]
+    hidden = post("hidden", "2026-01-08 00:00:00")
+    pages = iter([
+        SourcePage(
+            items=visible,
+            source="dwr",
+            next_cursor="20",
+            exhausted=False,
+            sort="new",
+            mapped_count=20,
+            dropped_count=0,
+            complete=True,
+            evidence_items=(hidden,),
+        ),
+        SourcePage(
+            items=[
+                hidden,
+                post("tail", "2026-01-09 00:00:00"),
+            ],
+            source="dwr",
+            next_cursor=None,
+            exhausted=True,
+            sort="new",
+            mapped_count=2,
+            dropped_count=0,
+            complete=True,
+        ),
+    ])
+
+    with pytest.raises(SourcePartialError) as exc_info:
+        await collect_pages(lambda _cursor: ready(next(pages)), limit=20)
+
+    assert exc_info.value.reason == "order_regressed_within_page"
+
+
+@pytest.mark.asyncio
 async def test_limit_tail_keeps_identity_conflicts_fail_closed():
     visible = [
         post(f"visible-{index}", f"2026-01-{30 - index:02d} 00:00:00")

@@ -93,6 +93,7 @@ async def collect_pages(
     cursor: str | None = None
     restarted = False
     business_boundary: SourcePage | None = None
+    business_cutoff: str | None = None
     while True:
         page = await _fetch_with_deadline(
             fetch_page, cursor, state, deadline_at, monotonic
@@ -107,12 +108,15 @@ async def collect_pages(
             state = _restart_state(state, evidence)
             restarted = True
             business_boundary = None
-        _validate_progress(state, cursor, page)
+            business_cutoff = None
+        _validate_progress(state, cursor, page, business_cutoff)
         if not page.complete:
             raise _partial(state, page, reason="page_incomplete")
         state.add(page)
         if business_boundary is None and _reached_limit(state, limit):
             business_boundary = page
+            if limit is not None and limit > 0:
+                business_cutoff = state.items[limit - 1].publish_time
         shortfall = state.evidence_shortfall(limit)
         if page.exhausted:
             if shortfall:
@@ -345,7 +349,10 @@ def _validate_page_identity(state: _ScanState, page: SourcePage) -> None:
 
 
 def _validate_progress(
-    state: _ScanState, cursor: str | None, page: SourcePage
+    state: _ScanState,
+    cursor: str | None,
+    page: SourcePage,
+    business_cutoff: str | None,
 ) -> None:
     if not page.exhausted and not page.items:
         raise _partial(state, page, reason="empty_nonterminal_page")
@@ -364,7 +371,7 @@ def _validate_progress(
         raise _partial(state, page, reason="no_unique_progress")
     if _missing_sort_time(state, page):
         raise _partial(state, page, reason="publish_time_missing")
-    order_reason = _sort_regression_reason(state, page)
+    order_reason = _sort_regression_reason(state, page, business_cutoff)
     if order_reason is not None:
         raise _partial(state, page, reason=order_reason)
     if not page.exhausted and page.next_cursor is None:
@@ -397,7 +404,9 @@ def _missing_sort_time(state: _ScanState, page: SourcePage) -> bool:
 
 
 def _sort_regression_reason(
-    state: _ScanState, page: SourcePage
+    state: _ScanState,
+    page: SourcePage,
+    business_cutoff: str | None,
 ) -> str | None:
     if page.sort != "new":
         return None
@@ -407,7 +416,15 @@ def _sort_regression_reason(
         for previous, current in zip(times, times[1:])
     ):
         return "order_regressed_within_page"
-    if state.previous_oldest and times and max(times) > state.previous_oldest:
+    if business_cutoff is not None:
+        new_times = [
+            post.publish_time
+            for post in page.items
+            if post.post_id not in state.ids
+        ]
+        if new_times and max(new_times) > business_cutoff:
+            return "order_regressed_across_pages"
+    elif state.previous_oldest and times and max(times) > state.previous_oldest:
         return "order_regressed_across_pages"
     return None
 
