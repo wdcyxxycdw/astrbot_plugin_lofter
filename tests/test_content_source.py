@@ -219,13 +219,6 @@ async def test_mobile_tag_diagnostic_accepts_eligible_page_without_dwr():
             mobile_page([make_post("missing")]),
             "mobile_publish_time_invalid",
         ),
-        (
-            mobile_page([
-                make_post("old", "2026-01-07 00:00:00"),
-                make_post("new", "2026-01-09 00:00:00"),
-            ]),
-            "mobile_order_regressed",
-        ),
     ],
 )
 async def test_mobile_tag_diagnostic_reports_page_rejection(page, reason):
@@ -242,7 +235,7 @@ async def test_mobile_tag_diagnostic_reports_page_rejection(page, reason):
 
 
 @pytest.mark.asyncio
-async def test_mobile_tag_diagnostic_reports_order_scalars_without_times():
+async def test_mobile_tag_diagnostic_normalizes_order_and_keeps_raw_scalars():
     client = FakeClient()
     source = DefaultContentSource(client)
     posts = [
@@ -258,12 +251,43 @@ async def test_mobile_tag_diagnostic_reports_order_scalars_without_times():
 
     result = await source.diagnose_mobile_tag("demo", 20)
 
-    assert result.fallback_reason == "mobile_order_regressed"
+    assert result.fallback_reason is None
+    assert result.page is not None
+    assert [post.post_id for post in result.page.items] == ["e", "a", "c", "d", "b"]
+    assert result.evidence_items == tuple(posts)
     assert result.item_count == 5
     assert result.time_count == 5
     assert result.regression_count == 2
     assert result.equal_count == 1
     assert result.first_regression_pair_ordinal == 2
+    client.search_tag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mobile_tag_normalization_returns_latest_limit_stably():
+    client = FakeClient()
+    source = DefaultContentSource(client)
+    posts = [
+        make_post("nine", "2026-01-09 00:00:00"),
+        make_post("seven", "2026-01-07 00:00:00"),
+        make_post("eight-a", "2026-01-08 00:00:00"),
+        make_post("eight-b", "2026-01-08 00:00:00"),
+        make_post("ten", "2026-01-10 00:00:00"),
+    ]
+    source._mobile = SimpleNamespace(
+        list_tag=AsyncMock(return_value=mobile_page(posts))
+    )
+
+    result = await collect_pages(
+        lambda cursor: source.list_tag("demo", cursor, 20, "new"),
+        limit=3,
+    )
+
+    assert [post.post_id for post in result.items] == [
+        "ten", "nine", "eight-a",
+    ]
+    assert result.source == "mobile_tag"
+    client.search_tag.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -568,37 +592,23 @@ async def test_nonterminal_tag_page_restarts_dwr_from_zero(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unordered_terminal_tag_page_uses_dwr_order(monkeypatch):
+async def test_unordered_terminal_tag_page_is_normalized_without_dwr():
     client = FakeClient()
-    client.search_tag.return_value = "dwr"
     source = DefaultContentSource(client)
     primary_old = make_post("old", "2026-01-07 00:00:00")
     primary_new = make_post("new", "2026-01-09 00:00:00")
-    fallback_new = make_post("new", "2026-01-09 00:00:00")
-    fallback_old = make_post("old", "2026-01-07 00:00:00")
     source._mobile = SimpleNamespace(
         list_tag=AsyncMock(return_value=mobile_page([primary_old, primary_new]))
-    )
-    monkeypatch.setattr(
-        source_module,
-        "parse_dwr_response_result",
-        AsyncMock(side_effect=[
-            DWRParseResult([fallback_new, fallback_old], 2, 0, False),
-            DWRParseResult([], 0, 0, True),
-        ]),
     )
 
     result = await collect_pages(
         lambda cursor: source.list_tag("demo", cursor, 20, "new")
     )
 
-    assert result.items == [fallback_new, fallback_old]
-    assert [item.post_id for item in result.evidence_items] == ["old", "new"]
-    assert result.source == "dwr"
-    assert client.search_tag.await_args_list == [
-        call("demo", 0, 20),
-        call("demo", 20, 20),
-    ]
+    assert result.items == [primary_new, primary_old]
+    assert result.evidence_items == ()
+    assert result.source == "mobile_tag"
+    client.search_tag.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -271,6 +271,16 @@ class DefaultContentSource:
                 exc,
             )
         reason, counts = _mobile_tag_diagnostic(primary, sort)
+        if reason == "mobile_order_regressed":
+            primary = replace(
+                primary,
+                items=sorted(
+                    primary.items,
+                    key=lambda post: parse_publish_time(post.publish_time),
+                    reverse=True,
+                ),
+            )
+            reason = None
         return MobileTagDiagnostic(
             primary,
             evidence,

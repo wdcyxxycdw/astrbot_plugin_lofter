@@ -14,6 +14,9 @@ if TYPE_CHECKING:
 _EVIDENCE_FIELDS = (
     "title", "summary", "content", "images", "tags", "publish_time", "author",
 )
+_DETAIL_SUMMARY_SOURCES = frozenset({
+    "mobile_detail", "embedded_json", "html_post",
+})
 
 
 @dataclass
@@ -21,6 +24,7 @@ class PostEvidenceLedger:
     fields: dict[str, dict[str, object]] = field(
         default_factory=lambda: {name: {} for name in _EVIDENCE_FIELDS}
     )
+    summary_roles: dict[str, dict[str, object]] = field(default_factory=dict)
     owners: dict[str, str] = field(default_factory=dict)
     urls: dict[str, str] = field(default_factory=dict)
     conflicted_ids: set[str] = field(default_factory=set)
@@ -32,7 +36,11 @@ class PostEvidenceLedger:
                 self.urls, post, self.conflicted_ids, collect_conflicts
             )
         _remember_known_fields(
-            self.fields, post, self.conflicted_ids, collect_conflicts
+            self.fields,
+            self.summary_roles,
+            post,
+            self.conflicted_ids,
+            collect_conflicts,
         )
 
     def merge(
@@ -43,7 +51,16 @@ class PostEvidenceLedger:
         _merge_url_ledgers(
             self.urls, other.urls, self.conflicted_ids, collect_conflicts
         )
+        _merge_summary_ledgers(
+            self.fields["summary"],
+            self.summary_roles,
+            other.summary_roles,
+            self.conflicted_ids,
+            collect_conflicts,
+        )
         for name in _EVIDENCE_FIELDS:
+            if name == "summary":
+                continue
             _merge_field_ledgers(
                 name,
                 self.fields[name],
@@ -55,6 +72,10 @@ class PostEvidenceLedger:
     def copy(self) -> "PostEvidenceLedger":
         return PostEvidenceLedger(
             fields={name: dict(values) for name, values in self.fields.items()},
+            summary_roles={
+                post_id: dict(values)
+                for post_id, values in self.summary_roles.items()
+            },
             owners=dict(self.owners),
             urls=dict(self.urls),
             conflicted_ids=set(self.conflicted_ids),
@@ -127,11 +148,12 @@ def _remember_owner_evidence(owners: dict[str, str], post: Post) -> None:
 
 def _remember_known_fields(
     ledgers: dict[str, dict[str, object]],
+    summary_roles: dict[str, dict[str, object]],
     post: Post,
     conflicts: set[str],
     collect_conflicts: bool,
 ) -> None:
-    for field_name in ("title", "summary", "content", "author"):
+    for field_name in ("title", "content", "author"):
         if post.has_fields({field_name}):
             _remember_evidence(
                 field_name,
@@ -141,6 +163,16 @@ def _remember_known_fields(
                 conflicts,
                 collect_conflicts,
             )
+    if post.has_fields({"summary"}):
+        _remember_summary_evidence(
+            ledgers["summary"],
+            summary_roles,
+            post.post_id,
+            _summary_role(post),
+            post.summary,
+            conflicts,
+            collect_conflicts,
+        )
     if post.has_fields({"images"}):
         _remember_evidence(
             "images",
@@ -164,6 +196,60 @@ def _remember_known_fields(
             conflicts,
             collect_conflicts,
         )
+
+
+def _summary_role(post: Post) -> str:
+    source = post.provenance.get("summary", post.source)
+    if source == "dwr":
+        return "dwr_list"
+    if source in _DETAIL_SUMMARY_SOURCES:
+        return "detail"
+    return "strict"
+
+
+def _remember_summary_evidence(
+    ledger: dict[str, object],
+    roles: dict[str, dict[str, object]],
+    post_id: str,
+    role: str,
+    value: object,
+    conflicts: set[str],
+    collect_conflicts: bool,
+) -> None:
+    observed = roles.get(post_id, {})
+    for existing_role, existing_value in observed.items():
+        if _compatible_summary_values(
+            existing_role, existing_value, role, value
+        ):
+            continue
+        if collect_conflicts:
+            conflicts.add(post_id)
+            return
+        raise PostEvidenceError("field_conflict", "summary", "post_ledger")
+
+    observed = roles.setdefault(post_id, {})
+    observed[role] = value
+    if "detail" in observed:
+        ledger[post_id] = observed["detail"]
+    elif "strict" in observed:
+        ledger[post_id] = observed["strict"]
+    else:
+        ledger[post_id] = observed["dwr_list"]
+
+
+def _compatible_summary_values(
+    existing_role: str,
+    existing_value: object,
+    incoming_role: str,
+    incoming_value: object,
+) -> bool:
+    if existing_value == incoming_value:
+        return True
+    return (
+        {existing_role, incoming_role} == {"dwr_list", "detail"}
+        and bool(existing_value)
+        and bool(incoming_value)
+    )
 
 
 def _remember_evidence(
@@ -242,6 +328,26 @@ def _merge_url_ledgers(
         _remember_canonical_url(
             target, post_id, canonical, conflicts, collect_conflicts
         )
+
+
+def _merge_summary_ledgers(
+    target: dict[str, object],
+    target_roles: dict[str, dict[str, object]],
+    incoming_roles: dict[str, dict[str, object]],
+    conflicts: set[str],
+    collect_conflicts: bool,
+) -> None:
+    for post_id, observed in incoming_roles.items():
+        for role, value in observed.items():
+            _remember_summary_evidence(
+                target,
+                target_roles,
+                post_id,
+                role,
+                value,
+                conflicts,
+                collect_conflicts,
+            )
 
 
 def _merge_field_ledgers(

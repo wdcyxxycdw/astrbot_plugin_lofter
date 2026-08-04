@@ -289,6 +289,92 @@ async def test_limit_stops_without_fetching_extra_page():
 
 
 @pytest.mark.asyncio
+async def test_limit_scans_tail_only_until_evidence_is_covered():
+    visible = [
+        post(f"visible-{index}", f"2026-01-{30 - index:02d} 00:00:00")
+        for index in range(20)
+    ]
+    hidden = post("hidden", "2026-01-10 00:00:00")
+    pages = {
+        None: SourcePage(
+            items=visible,
+            source="dwr",
+            next_cursor="20",
+            exhausted=False,
+            sort="new",
+            mapped_count=20,
+            dropped_count=0,
+            complete=True,
+            evidence_items=(hidden,),
+        ),
+        "20": SourcePage(
+            items=[hidden],
+            source="dwr",
+            next_cursor="40",
+            exhausted=False,
+            sort="new",
+            mapped_count=1,
+            dropped_count=0,
+            complete=True,
+        ),
+    }
+    calls = []
+
+    async def fetch(cursor):
+        calls.append(cursor)
+        return pages[cursor]
+
+    result = await collect_pages(fetch, limit=20)
+
+    assert calls == [None, "20"]
+    assert result.items == visible
+    assert result.next_cursor == "20"
+    assert result.exhausted is False
+    assert [item.post_id for item in result.evidence_items] == [
+        "hidden", "hidden",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_limit_tail_keeps_identity_conflicts_fail_closed():
+    visible = [
+        post(f"visible-{index}", f"2026-01-{30 - index:02d} 00:00:00")
+        for index in range(20)
+    ]
+    hidden = post("hidden", "2026-01-10 00:00:00")
+    conflicting = post("hidden", "2026-01-10 00:00:00")
+    conflicting.title = "conflicting-title"
+    pages = iter([
+        SourcePage(
+            items=visible,
+            source="dwr",
+            next_cursor="20",
+            exhausted=False,
+            sort="new",
+            mapped_count=20,
+            dropped_count=0,
+            complete=True,
+            evidence_items=(hidden,),
+        ),
+        SourcePage(
+            items=[conflicting],
+            source="dwr",
+            next_cursor=None,
+            exhausted=True,
+            sort="new",
+            mapped_count=1,
+            dropped_count=0,
+            complete=True,
+        ),
+    ])
+
+    with pytest.raises(PostEvidenceError) as exc_info:
+        await collect_pages(lambda _cursor: ready(next(pages)), limit=20)
+
+    assert exc_info.value.diagnostic == "field_conflict:title:scan_ledger"
+
+
+@pytest.mark.asyncio
 async def test_partial_reason_priority_is_stable():
     cases = [
         (
