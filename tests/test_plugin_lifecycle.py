@@ -151,7 +151,7 @@ async def test_second_plugin_lock_failure_creates_no_db_or_scheduler_activity():
 
 
 @pytest.mark.asyncio
-async def test_send_push_returns_adapter_acceptance_and_false_on_error():
+async def test_send_push_normalizes_framework_completion_and_false_on_error():
     main = _load_main_module()
     plugin = object.__new__(main.LofterPlugin)
     plugin._max_images = 2
@@ -170,7 +170,7 @@ async def test_send_push_returns_adapter_acceptance_and_false_on_error():
     plugin.context.send_message.return_value = False
     assert await main.LofterPlugin._send_push(plugin, *args) is False
     plugin.context.send_message.return_value = None
-    assert await main.LofterPlugin._send_push(plugin, *args) is False
+    assert await main.LofterPlugin._send_push(plugin, *args) is True
     plugin.context.send_message.side_effect = RuntimeError("send failed")
     assert await main.LofterPlugin._send_push(plugin, *args) is False
 
@@ -364,7 +364,7 @@ async def test_scheduler_uses_production_send_push_acceptance_boundary(tmp_path)
             ) == ["new"]
             assert await plugin._db.filter_unsent("sess", ["new"]) == ["new"]
 
-            context.send_message.return_value = True
+            context.send_message.return_value = None
             await plugin._db.transaction(
                 lambda conn: conn.execute(
                     "UPDATE deliveries SET next_attempt_at=NULL "

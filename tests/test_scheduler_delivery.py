@@ -180,8 +180,9 @@ async def test_poll_all_passes_full_post_header_and_all_source_types(db):
 
 
 @pytest.mark.asyncio
-async def test_poll_all_acks_each_post_and_stops_after_failure(db):
-    send = AsyncMock(side_effect=[True, False])
+@pytest.mark.parametrize("rejected", [False, None])
+async def test_poll_all_acks_each_post_and_stops_after_failure(db, rejected):
+    send = AsyncMock(side_effect=[True, rejected])
     scheduler, snapshot = await _scheduler(db, send, ("tag", "tag"))
     source = source_for_subscription(snapshot.subscriptions[0])
     posts = tuple(_post(index) for index in range(4))
