@@ -4,6 +4,7 @@ import asyncio
 import os
 import tempfile
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -24,13 +25,17 @@ from .errors import (
     SourceTimeoutError,
 )
 from .parser import Post
-from .scheduler import SendFunc, SubscriptionScheduler
+from .scheduler import SubscriptionScheduler
+from .send_result import PushSendError, PushSendResult
 from .session_gate import SessionGateRegistry
 from .source_scan import ContentSource, SourcePage
 from .storage import SubscriptionStorage
 from .subscription_service import SubscriptionService
 
 Health = Literal["healthy", "degraded", "inconclusive"]
+PushSendFunc = Callable[
+    [str, Post, str, frozenset[str]], Awaitable[PushSendResult]
+]
 
 
 @dataclass
@@ -146,7 +151,7 @@ class E2ETestRunner(NetworkStepsMixin, FlowStepsMixin):
         self,
         source: ContentSource,
         scheduler: SubscriptionScheduler,
-        send_push: SendFunc,
+        send_push: PushSendFunc,
     ) -> None:
         self._source = source
         self._production_scheduler = scheduler
@@ -159,7 +164,7 @@ class E2ETestRunner(NetworkStepsMixin, FlowStepsMixin):
         self._release_send = asyncio.Event()
         self._send_entries = 0
         self._send_attempts = 0
-        self._send_result: bool | None = None
+        self._send_result: PushSendResult | None = None
         self._send_error: BaseException | None = None
         self._artifacts: dict[str, object] = {}
         self._results_by_key: dict[str, StepResult] = {}
@@ -244,8 +249,8 @@ class E2ETestRunner(NetworkStepsMixin, FlowStepsMixin):
         except BaseException as exc:
             self._send_error = exc
             raise
-        self._send_result = result is True
-        return result is True
+        self._send_result = result
+        return result.accepted
 
     async def _wait_event_or_poll(self, event: asyncio.Event) -> bool:
         if self._poll_task is None:
@@ -480,6 +485,8 @@ def _error_health(error: BaseException) -> Health:
 
 
 def _safe_error(error: BaseException) -> str:
+    if isinstance(error, PushSendError):
+        return f"推送阶段失败（{error}）"
     if isinstance(error, DWREvidenceError):
         return f"DWR 证据冲突（{error.diagnostic}）"
     if isinstance(error, DWRIdentityError):
@@ -538,7 +545,14 @@ def format_report(results: list[StepResult]) -> str:
     production_evidence = _fact(results, "production_evidence_count", 0)
     provider = _fact(results, "fixture_provider", "未建立")
     attempts = _fact(results, "send_attempts", 0)
-    accepted = _label_bool(_fact(results, "adapter_accepted", "unknown"))
+    primary_outcome = _fact(results, "primary_outcome", "unknown")
+    primary_stage = _fact(results, "primary_stage", "unknown")
+    media_outcome = _fact(results, "media_outcome", "unknown")
+    media_stage = _fact(results, "media_stage", "unknown")
+    delivery_accepted = _label_bool(
+        _fact(results, "delivery_accepted", "unknown")
+    )
+    seen_written = _label_bool(_fact(results, "seen_written", "unknown"))
     tasks = _label_bool(_fact(results, "tasks_cancelled", False))
     db = _label_bool(_fact(results, "db_closed", False))
     temp_dir = _label_bool(_fact(results, "temp_dir_cleaned", False))
@@ -564,7 +578,12 @@ def format_report(results: list[StepResult]) -> str:
         f"DWR：{dwr}",
         production_line,
         f"Fixture：provider={provider}",
-        f"真实发送：尝试 {attempts}，adapter accepted={accepted}",
+        (
+            f"真实发送：尝试 {attempts}，"
+            f"primary={primary_outcome}/{primary_stage}，"
+            f"media={media_outcome}/{media_stage}，"
+            f"delivery accepted={delivery_accepted}，seen={seen_written}"
+        ),
         f"清理：tasks={tasks}，db={db}，temp-dir={temp_dir}",
         "",
     ]

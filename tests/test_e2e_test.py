@@ -20,6 +20,7 @@ from core.errors import (
     attach_source_evidence,
 )
 from core.parser import Post
+from core.send_result import PushSendResult
 from core.source_scan import SourcePage
 
 
@@ -184,7 +185,7 @@ class _OfflineSource:
 async def _runner(
     source: _OfflineSource,
     *,
-    send_result: bool = True,
+    send_result: PushSendResult | None = None,
     send_side_effect=None,
     scheduler_running: bool = True,
 ):
@@ -194,6 +195,8 @@ async def _runner(
         scheduler_task = asyncio.create_task(asyncio.sleep(0))
         await scheduler_task
     scheduler = SimpleNamespace(_task=scheduler_task, _interval=1800)
+    if send_result is None:
+        send_result = PushSendResult("accepted", "primary_send")
     send = AsyncMock(return_value=send_result)
     if send_side_effect is not None:
         send.side_effect = send_side_effect
@@ -209,6 +212,31 @@ def _by_key(results):
     return {result.key: result for result in results}
 
 
+def _expected_send_facts(
+    *,
+    send_attempts: int = 1,
+    primary_outcome: str = "accepted",
+    primary_stage: str = "primary_send",
+    primary_error_type: str = "none",
+    media_outcome: str = "not_applicable",
+    media_stage: str = "none",
+    media_error_type: str = "none",
+    delivery_accepted: bool | str = True,
+    seen_written: bool | str = True,
+):
+    return {
+        "send_attempts": send_attempts,
+        "primary_outcome": primary_outcome,
+        "primary_stage": primary_stage,
+        "primary_error_type": primary_error_type,
+        "media_outcome": media_outcome,
+        "media_stage": media_stage,
+        "media_error_type": media_error_type,
+        "delivery_accepted": delivery_accepted,
+        "seen_written": seen_written,
+    }
+
+
 @pytest.mark.asyncio
 async def test_nine_step_health_check_uses_independent_probes_and_production_flow():
     baseline = _post("1a_1", publish_time="2026-08-01 11:00:00")
@@ -218,7 +246,15 @@ async def test_nine_step_health_check_uses_independent_probes_and_production_flo
         [candidate],
         production=[baseline, candidate],
     )
-    runner, send, scheduler_task = await _runner(source)
+    runner, send, scheduler_task = await _runner(
+        source,
+        send_result=PushSendResult(
+            "accepted",
+            "primary_send",
+            media_outcome="accepted",
+            media_stage="media_send",
+        ),
+    )
 
     try:
         results = await runner.run_all("qq:real-session")
@@ -255,7 +291,11 @@ async def test_nine_step_health_check_uses_independent_probes_and_production_flo
     assert "[2/9 mobile_direct]" in report
     assert "DWR：已真实验证" in report
     assert "Fixture：provider=production" in report
-    assert "真实发送：尝试 1，adapter accepted=是" in report
+    assert (
+        "真实发送：尝试 1，primary=accepted/primary_send，"
+        "media=accepted/media_send，delivery accepted=是，seen=是"
+        in report
+    )
     assert "清理：tasks=是，db=是，temp-dir=是" in report
     for secret in (
         baseline.post_id,
@@ -625,13 +665,16 @@ async def test_pending_assertion_failure_skips_adapter():
 
 
 @pytest.mark.asyncio
-async def test_adapter_rejection_is_degraded_without_seen_ack():
+async def test_primary_rejection_is_degraded_without_seen_ack():
     baseline = _post("1a_1")
     candidate = _post("1a_2")
     source = _OfflineSource(
         [baseline], [candidate], production=[baseline, candidate]
     )
-    runner, send, scheduler_task = await _runner(source, send_result=False)
+    runner, send, scheduler_task = await _runner(
+        source,
+        send_result=PushSendResult("rejected", "primary_send"),
+    )
 
     try:
         results = await runner.run_all("qq:real-session")
@@ -641,10 +684,119 @@ async def test_adapter_rejection_is_degraded_without_seen_ack():
     delivery = _by_key(results)["claim_send_ack_seen"]
     assert delivery.status == "fail"
     assert delivery.health == "degraded"
-    assert delivery.facts == {
-        "send_attempts": 1,
-        "adapter_accepted": False,
-    }
+    assert delivery.error == "推送阶段失败（primary_send:rejected）"
+    assert delivery.facts == _expected_send_facts(
+        primary_outcome="rejected",
+        delivery_accepted=False,
+        seen_written=False,
+    )
+    send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_primary_error_reports_safe_type_without_seen_ack():
+    baseline = _post("1a_1")
+    candidate = _post("1a_2")
+    source = _OfflineSource(
+        [baseline], [candidate], production=[baseline, candidate]
+    )
+    runner, send, scheduler_task = await _runner(
+        source,
+        send_result=PushSendResult(
+            "error",
+            "primary_send",
+            primary_error_type="RuntimeError",
+        ),
+    )
+
+    try:
+        results = await runner.run_all("qq:private-session-canary")
+    finally:
+        await _stop(scheduler_task)
+
+    delivery = _by_key(results)["claim_send_ack_seen"]
+    assert delivery.status == "fail"
+    assert delivery.health == "degraded"
+    assert delivery.error == "推送阶段失败（primary_send:error:RuntimeError）"
+    assert delivery.facts == _expected_send_facts(
+        primary_outcome="error",
+        primary_error_type="RuntimeError",
+        delivery_accepted=False,
+        seen_written=False,
+    )
+    report = format_report(results)
+    for secret in (
+        "private-session-canary",
+        candidate.post_id,
+        candidate.url,
+        candidate.author_username,
+        candidate.title,
+        candidate.summary,
+        candidate.images[0],
+    ):
+        assert secret not in report
+    send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("send_result", "expected_error", "expected_facts"),
+    [
+        (
+            PushSendResult(
+                "accepted",
+                "primary_send",
+                media_outcome="rejected",
+                media_stage="media_send",
+            ),
+            "推送阶段失败（media_send:rejected）",
+            _expected_send_facts(
+                media_outcome="rejected",
+                media_stage="media_send",
+            ),
+        ),
+        (
+            PushSendResult(
+                "accepted",
+                "primary_send",
+                media_outcome="error",
+                media_stage="media_send",
+                media_error_type="RuntimeError",
+            ),
+            "推送阶段失败（media_send:error:RuntimeError）",
+            _expected_send_facts(
+                media_outcome="error",
+                media_stage="media_send",
+                media_error_type="RuntimeError",
+            ),
+        ),
+    ],
+)
+async def test_media_failure_is_degraded_after_delivery_ack(
+    send_result, expected_error, expected_facts
+):
+    baseline = _post("1a_1")
+    candidate = _post("1a_2")
+    source = _OfflineSource(
+        [baseline], [candidate], production=[baseline, candidate]
+    )
+    runner, send, scheduler_task = await _runner(
+        source, send_result=send_result
+    )
+
+    try:
+        results = await runner.run_all("qq:real-session")
+    finally:
+        await _stop(scheduler_task)
+
+    delivery = _by_key(results)["claim_send_ack_seen"]
+    assert delivery.status == "fail"
+    assert delivery.health == "degraded"
+    assert delivery.error == expected_error
+    assert delivery.facts == expected_facts
+    assert "图片转发失败，主要消息不会重试" in delivery.details
+    assert "production ack_success 已写入 accepted" in delivery.details
+    assert "candidate 已写入 subscription-level seen" in delivery.details
     send.assert_awaited_once()
 
 
@@ -671,10 +823,16 @@ async def test_scheduler_send_timeout_is_inconclusive(monkeypatch):
 
     delivery = _by_key(results)["claim_send_ack_seen"]
     assert delivery.health == "inconclusive"
-    assert delivery.facts == {
-        "send_attempts": 1,
-        "adapter_accepted": "unknown",
-    }
+    assert delivery.facts == _expected_send_facts(
+        primary_outcome="unknown",
+        primary_stage="unknown",
+        primary_error_type="unknown",
+        media_outcome="unknown",
+        media_stage="unknown",
+        media_error_type="unknown",
+        delivery_accepted="unknown",
+        seen_written="unknown",
+    )
     send.assert_awaited_once()
 
 

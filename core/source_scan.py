@@ -36,6 +36,7 @@ class SourcePage:
     field_completeness: frozenset[str] | None = None
     provenance: dict[str, str] = field(default_factory=dict)
     evidence_items: tuple[Post, ...] = field(default_factory=tuple)
+    restart_requires_prior_coverage: bool = True
 
     def __post_init__(self) -> None:
         fields = self.field_completeness
@@ -104,8 +105,10 @@ async def collect_pages(
             raise _deadline_error(state, page, "deadline_after_fetch")
         if page.restarted:
             _validate_restart(state, cursor, restarted, page)
-            evidence = state.all_evidence_items()
-            state = _restart_state(state, evidence)
+            state = _restart_state(
+                state,
+                require_prior_coverage=page.restart_requires_prior_coverage,
+            )
             restarted = True
             business_boundary = None
             business_cutoff = None
@@ -173,6 +176,7 @@ async def _fetch_with_deadline(
 class _ScanState:
     items: list[Post] = field(default_factory=list)
     prior_items: tuple[Post, ...] = field(default_factory=tuple)
+    required_items: tuple[Post, ...] = field(default_factory=tuple)
     ids: set[str] = field(default_factory=set)
     owners: dict[str, str] = field(default_factory=dict)
     fields: dict[str, dict[str, object]] = field(default_factory=dict)
@@ -200,7 +204,7 @@ class _ScanState:
     def evidence_shortfall(self, limit: int | None) -> bool:
         ordered_ids: list[str] = []
         seen: set[str] = set()
-        for post in self.prior_items:
+        for post in self.required_items:
             if post.post_id not in seen:
                 seen.add(post.post_id)
                 ordered_ids.append(post.post_id)
@@ -279,6 +283,7 @@ class _ScanState:
     def add(self, page: SourcePage) -> None:
         self.page_count += 1
         self.prior_items = (*self.prior_items, *page.evidence_items)
+        self.required_items = (*self.required_items, *page.evidence_items)
         self.source = page.source
         self.sort = page.sort
         self.mapped_count += page.mapped_count
@@ -331,10 +336,16 @@ class _ScanState:
 
 
 def _restart_state(
-    state: _ScanState, evidence: tuple[Post, ...]
+    state: _ScanState,
+    *,
+    require_prior_coverage: bool,
 ) -> _ScanState:
+    required_items = state.required_items
+    if require_prior_coverage:
+        required_items = (*required_items, *state.items)
     return _ScanState(
-        prior_items=evidence,
+        prior_items=state.all_evidence_items(),
+        required_items=required_items,
         owners=dict(state.owners),
         fields={name: dict(values) for name, values in state.fields.items()},
         urls=dict(state.urls),

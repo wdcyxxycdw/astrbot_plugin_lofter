@@ -123,7 +123,6 @@ class FlowStepsMixin:
             await asyncio.wait_for(
                 asyncio.shield(self._poll_task), self.POLL_SECONDS
             )
-            facts = _send_facts(self)
             if self._send_entries != 1 or self._send_attempts > 1:
                 raise RuntimeError("adapter bridge invoked more than once")
             if self._send_error is not None:
@@ -134,26 +133,56 @@ class FlowStepsMixin:
                     name,
                     self._timed_end(started),
                     [*details, "adapter 结果未知，delivery 保持 lease recovery 语义"],
-                    facts,
+                    _send_facts(self),
                 )
-            if self._send_result is not True:
+
+            row = await self._delivery_row()
+            delivery_accepted = bool(
+                row is not None and row[0] == "accepted" and row[1] is None
+            )
+            seen_written = await self._candidate_seen()
+            facts = _send_facts(
+                self,
+                delivery_accepted=delivery_accepted,
+                seen_written=seen_written,
+            )
+            if not self._send_result.accepted:
+                if delivery_accepted or seen_written:
+                    raise RuntimeError("rejected delivery changed accepted or seen state")
+                error = self._send_result.error()
+                if error is None:
+                    raise RuntimeError("primary rejection diagnostic is missing")
                 return self._fail(
                     key,
                     name,
                     self._timed_end(started),
-                    RuntimeError("adapter rejected delivery"),
+                    error,
                     details,
                     health="degraded",
                     facts=facts,
                 )
-            row = await self._delivery_row()
-            if row is None or row[0] != "accepted" or row[1] is not None:
+            if not delivery_accepted:
                 raise RuntimeError("delivery was not accepted")
-            if not await self._candidate_seen():
+            if not seen_written:
                 raise RuntimeError("accepted delivery was not marked seen")
-            details.append("真实 adapter 严格返回 True")
+
+            details.append("主要消息已被 adapter 接受")
             details.append("production ack_success 已写入 accepted")
             details.append("candidate 已写入 subscription-level seen")
+            error = self._send_result.error()
+            if error is not None:
+                details.append(
+                    "图片转发失败，主要消息不会重试"
+                )
+                return self._fail(
+                    key,
+                    name,
+                    self._timed_end(started),
+                    error,
+                    details,
+                    health="degraded",
+                    facts=facts,
+                )
             return self._pass(
                 key,
                 name,
@@ -169,10 +198,7 @@ class FlowStepsMixin:
                 exc,
                 details,
                 health="inconclusive",
-                facts={
-                    "send_attempts": self._send_attempts,
-                    "adapter_accepted": "unknown",
-                },
+                facts=_send_facts(self),
             )
         except Exception as exc:
             return self._fail(
@@ -185,12 +211,27 @@ class FlowStepsMixin:
             )
 
 
-def _send_facts(runner) -> dict[str, str | int | bool]:
+def _send_facts(
+    runner,
+    *,
+    delivery_accepted: bool | str = "unknown",
+    seen_written: bool | str = "unknown",
+) -> dict[str, str | int | bool]:
+    result = runner._send_result
     return {
         "send_attempts": runner._send_attempts,
-        "adapter_accepted": runner._send_result
-        if runner._send_result is not None
+        "primary_outcome": result.primary_outcome if result else "unknown",
+        "primary_stage": result.primary_stage if result else "unknown",
+        "primary_error_type": result.primary_error_type or "none"
+        if result
         else "unknown",
+        "media_outcome": result.media_outcome if result else "unknown",
+        "media_stage": result.media_stage or "none" if result else "unknown",
+        "media_error_type": result.media_error_type or "none"
+        if result
+        else "unknown",
+        "delivery_accepted": delivery_accepted,
+        "seen_written": seen_written,
     }
 
 

@@ -256,7 +256,9 @@ def _apply_restart(
     if invalid:
         state.fail("分页 restart 无效")
         return state, cursor, restarted, False
-    return state.restart(), None, True, True
+    return state.restart(
+        require_prior_coverage=page.restart_requires_prior_coverage
+    ), None, True, True
 
 
 @dataclass
@@ -282,7 +284,10 @@ class _TagState:
     reliable: bool = False
     required_ids: set[str] = field(default_factory=set)
 
-    def restart(self) -> "_TagState":
+    def restart(self, *, require_prior_coverage: bool) -> "_TagState":
+        required_ids = set(self.required_ids)
+        if require_prior_coverage:
+            required_ids.update(self.candidate_ids)
         return _TagState(
             self.tag,
             known_tags=dict(self.known_tags),
@@ -291,7 +296,7 @@ class _TagState:
             known_owners=dict(self.known_owners),
             evidence=self.evidence.copy(),
             conflicted_ids=set(self.conflicted_ids),
-            required_ids=set(self.candidate_ids),
+            required_ids=required_ids,
         )
 
     def observe_page(self, posts: tuple[Post, ...] | list[Post]) -> None:

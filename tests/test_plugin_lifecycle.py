@@ -212,17 +212,122 @@ async def test_send_push_qq_tag_uses_share_and_all_image_nodes():
     )
 
     assert accepted is True
-    chain = context.send_message.await_args.args[1].chain
-    assert [item.kind for item in chain] == ["share", "nodes"]
-    assert chain[0].url == post.url
-    assert chain[0].title == "标题"
-    assert chain[0].image == images[0]
-    assert "【标签新内容】" in chain[0].content
-    assert "作者：作者" in chain[0].content
-    assert "#标签" in chain[0].content
-    assert "摘要" in chain[0].content
-    assert post.url not in chain[0].content
-    assert [node.content[0].url for node in chain[1].nodes] == images
+    assert context.send_message.await_count == 2
+    primary = context.send_message.await_args_list[0].args[1].chain
+    media = context.send_message.await_args_list[1].args[1].chain
+    assert [item.kind for item in primary] == ["share"]
+    assert primary[0].url == post.url
+    assert primary[0].title == "标题"
+    assert primary[0].image == images[0]
+    assert "【标签新内容】" in primary[0].content
+    assert "作者：作者" in primary[0].content
+    assert "#标签" in primary[0].content
+    assert "摘要" in primary[0].content
+    assert post.url not in primary[0].content
+    assert [item.kind for item in media] == ["nodes"]
+    assert [node.content[0].url for node in media[0].nodes] == images
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("media_result", "outcome", "error_type"),
+    [
+        (False, "rejected", None),
+        (RuntimeError("private media canary"), "error", "RuntimeError"),
+    ],
+)
+async def test_send_push_qq_media_failure_keeps_primary_accepted(
+    media_result, outcome, error_type, caplog
+):
+    main = _load_main_module()
+    main.Comp = SimpleNamespace(
+        Image=SimpleNamespace(
+            fromURL=lambda url: SimpleNamespace(kind="image", url=url)
+        ),
+        Share=lambda **kwargs: SimpleNamespace(kind="share", **kwargs),
+        Node=lambda **kwargs: SimpleNamespace(kind="node", **kwargs),
+        Nodes=lambda **kwargs: SimpleNamespace(kind="nodes", **kwargs),
+    )
+    main.MessageChain = lambda components: SimpleNamespace(chain=components)
+    platform = SimpleNamespace(meta=lambda: SimpleNamespace(name="aiocqhttp"))
+    context = SimpleNamespace(
+        get_platform_inst=MagicMock(return_value=platform),
+        send_message=AsyncMock(side_effect=[True, media_result]),
+    )
+    plugin = object.__new__(main.LofterPlugin)
+    plugin._max_images = 1
+    plugin.context = context
+    post = Post(
+        post_id="send",
+        title="标题",
+        summary="",
+        images=["https://img.example/private.jpg"],
+        url="https://u.lofter.com/post/send",
+        completeness=frozenset({"title", "images", "url"}),
+    )
+
+    result = await main.LofterPlugin._send_push_result(
+        plugin,
+        "qq-id:GroupMessage:private-session",
+        post,
+        "【标签新内容】",
+        frozenset({"tag"}),
+    )
+
+    assert result.accepted is True
+    assert result.primary_outcome == "accepted"
+    assert result.media_outcome == outcome
+    assert result.media_stage == "media_send"
+    assert result.media_error_type == error_type
+    assert context.send_message.await_count == 2
+    assert "private media canary" not in caplog.text
+    assert "private-session" not in caplog.text
+    assert post.url not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_send_push_primary_error_reports_safe_stage(caplog):
+    main = _load_main_module()
+    main.Comp = SimpleNamespace(
+        Plain=lambda text: SimpleNamespace(kind="plain", text=text),
+        Image=SimpleNamespace(
+            fromURL=lambda url: SimpleNamespace(kind="image", url=url)
+        ),
+    )
+    main.MessageChain = lambda components: SimpleNamespace(chain=components)
+    platform = SimpleNamespace(meta=lambda: SimpleNamespace(name="test"))
+    context = SimpleNamespace(
+        get_platform_inst=MagicMock(return_value=platform),
+        send_message=AsyncMock(
+            side_effect=RuntimeError("private primary canary")
+        ),
+    )
+    plugin = object.__new__(main.LofterPlugin)
+    plugin._max_images = 1
+    plugin.context = context
+    post = Post(
+        post_id="send",
+        title="标题",
+        summary="",
+        url="https://u.lofter.com/post/send",
+    )
+
+    result = await main.LofterPlugin._send_push_result(
+        plugin,
+        "adapter:FriendMessage:private-session",
+        post,
+        "【标签新内容】",
+        frozenset({"tag"}),
+    )
+
+    assert result.accepted is False
+    assert result.primary_outcome == "error"
+    assert result.primary_stage == "primary_send"
+    assert result.primary_error_type == "RuntimeError"
+    assert result.media_outcome == "not_applicable"
+    assert "private primary canary" not in caplog.text
+    assert "private-session" not in caplog.text
+    assert post.url not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -374,6 +479,79 @@ async def test_scheduler_uses_production_send_push_acceptance_boundary(tmp_path)
             await scheduler._poll_all()
         assert await plugin._db.filter_unseen_session("sess", "tag", ["new"]) == []
         assert await plugin._db.filter_unsent("sess", ["new"]) == []
+    finally:
+        await plugin._db.close()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_accepts_qq_primary_when_media_send_fails(tmp_path):
+    main = _load_main_module()
+    main.Comp = SimpleNamespace(
+        Plain=lambda text: SimpleNamespace(kind="plain", text=text),
+        Image=SimpleNamespace(
+            fromURL=lambda url: SimpleNamespace(kind="image", url=url)
+        ),
+        Share=lambda **kwargs: SimpleNamespace(kind="share", **kwargs),
+        Node=lambda **kwargs: SimpleNamespace(kind="node", **kwargs),
+        Nodes=lambda **kwargs: SimpleNamespace(kind="nodes", **kwargs),
+    )
+    main.MessageChain = lambda components: SimpleNamespace(chain=components)
+    platform = SimpleNamespace(meta=lambda: SimpleNamespace(name="aiocqhttp"))
+    context = SimpleNamespace(
+        get_platform_inst=MagicMock(return_value=platform),
+        send_message=AsyncMock(
+            side_effect=[True, RuntimeError("private media canary")]
+        ),
+    )
+    config = {"max_images": 2, "search_limit": 3, "poll_interval": 30}
+    with patch.object(
+        main.StarTools, "get_data_dir", return_value=str(tmp_path), create=True
+    ):
+        plugin = main.LofterPlugin(context, config)
+
+    session_id = "qq-id:GroupMessage:private-session"
+    post = Post(
+        post_id="new",
+        title="new",
+        summary="",
+        tags=["tag"],
+        images=["https://img.example/private.jpg"],
+        url="https://u.lofter.com/post/new",
+        publish_time="2026-07-29 05:00:00",
+        completeness=frozenset({
+            "title", "summary", "tags", "images", "url", "publish_time"
+        }),
+    )
+    scheduler = plugin._scheduler
+    scheduler_module = __import__(
+        scheduler.__class__.__module__, fromlist=["fetch_tag_posts"]
+    )
+
+    await plugin._db.initialize()
+    try:
+        await plugin._storage.add(session_id, "tag", "tag")
+        await plugin._db.mark_seen_session(session_id, "tag", ["warmup"])
+        with patch.object(
+            scheduler_module, "fetch_tag_posts", AsyncMock(return_value=[post])
+        ):
+            await scheduler._poll_single_session(session_id)
+            await scheduler._poll_single_session(session_id)
+
+        assert context.send_message.await_count == 2
+        primary = context.send_message.await_args_list[0].args[1].chain
+        media = context.send_message.await_args_list[1].args[1].chain
+        assert [item.kind for item in primary] == ["share"]
+        assert [item.kind for item in media] == ["nodes"]
+        assert await plugin._db.transaction(
+            lambda conn: conn.execute(
+                "SELECT status,attempts,lease_token FROM deliveries "
+                "WHERE session_id=? AND post_id=?",
+                (session_id, post.post_id),
+            ).fetchone()
+        ) == ("accepted", 0, None)
+        assert await plugin._db.filter_unseen_session(
+            session_id, "tag", [post.post_id]
+        ) == []
     finally:
         await plugin._db.close()
 

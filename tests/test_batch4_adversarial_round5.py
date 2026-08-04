@@ -54,6 +54,7 @@ def _page(
     next_cursor: str | None = None,
     exhausted: bool = True,
     restarted: bool = False,
+    restart_requires_prior_coverage: bool = True,
     evidence: tuple[Post, ...] = (),
 ) -> SourcePage:
     return SourcePage(
@@ -67,6 +68,7 @@ def _page(
         complete=True,
         restarted=restarted,
         evidence_items=evidence,
+        restart_requires_prior_coverage=restart_requires_prior_coverage,
     )
 
 
@@ -177,6 +179,72 @@ async def test_count_restart_requires_fallback_to_cover_mobile_witnesses():
     assert result.status == "partial"
     assert result.count == 1
     assert result.candidates == 1
+
+
+@pytest.mark.asyncio
+async def test_count_new_scope_restart_uses_only_dwr_candidates():
+    mobile = [
+        _post("1a_2b", tags=["A"], publish_time="2026-01-03 00:00:00"),
+        _post("1a_2c", tags=["A"], publish_time="2026-01-02 00:00:00"),
+    ]
+    dwr = [
+        _post(
+            "1a_2d",
+            tags=["A"],
+            source="dwr",
+            publish_time="2026-01-01 00:00:00",
+        )
+    ]
+    source = AsyncMock()
+    source.list_tag.side_effect = [
+        _page(mobile, next_cursor="next", exhausted=False),
+        _page(
+            dwr,
+            source="dwr",
+            restarted=True,
+            restart_requires_prior_coverage=False,
+        ),
+    ]
+
+    result = await count_posts("A", source)
+
+    assert result.status == "success"
+    assert result.count == 1
+    assert result.candidates == 1
+
+
+@pytest.mark.asyncio
+async def test_count_new_scope_restart_keeps_explicit_evidence_required():
+    mobile = _post("1a_2b", tags=["A"], publish_time="2026-01-03 00:00:00")
+    witness = _post("1a_2c", tags=["A"], publish_time="2026-01-02 00:00:00")
+    dwr = _post(
+        "1a_2d",
+        tags=["A"],
+        source="dwr",
+        publish_time="2026-01-01 00:00:00",
+    )
+    source = AsyncMock()
+    source.list_tag.side_effect = [
+        _page(
+            [mobile],
+            next_cursor="next",
+            exhausted=False,
+            evidence=(witness,),
+        ),
+        _page(
+            [dwr],
+            source="dwr",
+            restarted=True,
+            restart_requires_prior_coverage=False,
+        ),
+    ]
+
+    result = await count_posts("A", source)
+
+    assert result.status == "partial"
+    assert result.count == 1
+    assert result.candidates == 1
+    assert any("fallback 未覆盖已有可靠证据" in warning for warning in result.warnings)
 
 
 @pytest.mark.asyncio

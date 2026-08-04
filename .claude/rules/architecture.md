@@ -4,7 +4,7 @@
 
 AstrBot 插件，功能：自动解析 Lofter 帖子链接、订阅标签/博主并定时推送、搜索标签内容、统计标签表达式，以及按会话屏蔽作者。
 
-当前插件版本为 v2.0.8，数据库 Schema 为 v5。
+当前插件版本为 v2.0.9，数据库 Schema 为 v5。
 
 ## 文件结构
 
@@ -63,7 +63,9 @@ core/
 - 单帖：Mobile detail 优先；失败后依次尝试匿名页面 embedded JSON、HTML parser，最后才进行 credentialed HTML 回退。
 - 标签：Mobile tag 优先；结果不完整时从 offset 0 重启 DWR，随后按 DWR offset 翻页。
 - 博主：Mobile blog 优先；结果不完整时回退匿名/授权 HTML，并在必要时补全帖子详情。
-- primary/fallback evidence 与业务 `items` 分离；fallback 必须覆盖 primary 已观察到的 identity 下界。
+- 所有来源 observation 都保留为 evidence，用于 canonical ID、URL、owner 和字段冲突验证。
+- restart 默认要求新 scope 覆盖旧业务 identity；仅 Mobile 标签 cursor 切换到 DWR offset 0 时开启新业务 scope，旧 Mobile items 不再构成 DWR coverage obligation，也不与 DWR 业务结果拼接。
+- explicit dropped/unmapped `evidence_items` 始终保留为 coverage obligation，不因 scope 切换消失。
 - canonical ID、URL、owner、字段别名和重复 occurrence 发生冲突时 fail closed。
 
 HTTP client 使用长生命周期 `aiohttp.ClientSession` 和 `DummyCookieJar`：
@@ -217,10 +219,12 @@ Claim transaction：
 
 发送在 gate 外进行：
 
-- tag/blog 共用同一个 session queue；每轮合计最多 5 次真实 `send_func` 调用。
+- tag/blog 共用同一个 session queue；每轮合计最多 5 次 delivery `send_func` 调用。
+- 非 QQ callback 保持一次平台发送；QQ blog 和无图 tag 只发送 Share；QQ 有图 tag 在同一 callback 中先发送 Share，再发送包含全部图片的 Nodes sidecar，因此最多产生两条平台消息。
 - 每条成功立即独立 ack；第 N 条失败后停止本 session 本轮 drain。
-- 仅 adapter 严格返回 `True` 才 accepted，并为 ack 时仍有效的全部 sources 写 seen。
-- `False`、`None` 或普通异常：attempts + 1、清 lease、设置 backoff，不写 seen。
+- scheduler 仅在 `send_func` 严格返回 `True` 时 accepted，并为 ack 时仍有效的全部 sources 写 seen。
+- QQ callback 只由 Share primary 决定 acceptance；Nodes 明确 rejected/error 时单独报告，delivery 仍 accepted，不重试已成功的 Share。
+- 其他 `False`、`None` 或普通异常：attempts + 1、清 lease、设置 backoff，不写 seen。
 - backoff：60、300、1800、7200 秒，第 5–9 次为 21600 秒；第 10 次进入 dead。
 - send timeout 为 60 秒，lease 为 5 分钟。
 - timeout 或 `CancelledError` 保持 `sending`；取消继续向上传播，等待 lease recovery。
@@ -271,7 +275,8 @@ Claim transaction：
 - blog 与标签投递链在 fixture 后分叉；blog 失败不阻断 tag flow。
 - 临时 SQLite 中复用生产 `SubscriptionService`、`DeliveryQueue` 和 `SubscriptionScheduler`；flow 使用纯内存 controlled source，不再访问真实内容源，验证 `pending → sending → accepted → subscription seen`。
 - skip 通过稳定 step key 传播根 `blocked_by`，不复制上游异常。
-- fixture 足够时最多向命令所在会话发送一条带“Lofter E2E 测试”标识的真实消息。
+- fixture 足够时向命令所在会话发送一个带“Lofter E2E 测试”标识的 candidate；QQ 标签帖子有图片时该 candidate 最多产生 Share 与图片转发两条平台消息。
+- Step 8 分别报告 primary/media 的固定 stage、outcome 和异常类型；primary 决定 delivery acceptance，media 失败时 delivery 仍 accepted、seen 已写入，但总体报告为 `DEGRADED`。
 - cleanup 独立尝试取消临时 task、关闭 DB 和删除临时目录；不写生产订阅、seen、delivery 或 config。
 - 报告区分 `HEALTHY`、`DEGRADED` 和 `INCONCLUSIVE`，且不暴露 Cookie、URL、post ID、owner、正文、图片 URL、响应体或原始异常。
 
