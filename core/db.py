@@ -183,8 +183,12 @@ def _classify_sqlite_error(exc: BaseException) -> BaseException:
     if not isinstance(exc, sqlite3.OperationalError):
         return exc
     code = getattr(exc, "sqlite_errorcode", None)
-    locked_codes = {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+    primary_code = code & 0xFF if isinstance(code, int) else None
+    locked_codes = {
+        getattr(sqlite3, "SQLITE_BUSY", 5),
+        getattr(sqlite3, "SQLITE_LOCKED", 6),
+    }
     message = str(exc).lower()
-    if code in locked_codes or "database is locked" in message or "database table is locked" in message:
+    if primary_code in locked_codes or "database is locked" in message or "database table is locked" in message:
         return SQLiteBusyError(str(exc))
     return exc

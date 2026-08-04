@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from core.formatter import format_post
 from core.instance_lock import InstanceLockHeldError
 from core.llm_tools import LofterLLMToolsMixin
 from core.parser import Post
@@ -204,14 +205,13 @@ async def test_send_push_normalizes_framework_completion_and_false_on_error():
 
 
 @pytest.mark.asyncio
-async def test_send_push_qq_tag_uses_share_and_all_image_nodes():
+async def test_send_push_qq_tag_uses_plain_and_all_image_nodes():
     main = _load_main_module()
     main.Comp = SimpleNamespace(
         Plain=lambda text: SimpleNamespace(kind="plain", text=text),
         Image=SimpleNamespace(
             fromURL=lambda url: SimpleNamespace(kind="image", url=url)
         ),
-        Share=lambda **kwargs: SimpleNamespace(kind="share", **kwargs),
         Node=lambda **kwargs: SimpleNamespace(kind="node", **kwargs),
         Nodes=lambda **kwargs: SimpleNamespace(kind="nodes", **kwargs),
     )
@@ -243,15 +243,8 @@ async def test_send_push_qq_tag_uses_share_and_all_image_nodes():
     assert context.send_message.await_count == 2
     primary = context.send_message.await_args_list[0].args[1].chain
     media = context.send_message.await_args_list[1].args[1].chain
-    assert [item.kind for item in primary] == ["share"]
-    assert primary[0].url == post.url
-    assert primary[0].title == "标题"
-    assert primary[0].image == images[0]
-    assert "【标签新内容】" in primary[0].content
-    assert "作者：作者" in primary[0].content
-    assert "#标签" in primary[0].content
-    assert "摘要" in primary[0].content
-    assert post.url not in primary[0].content
+    assert [item.kind for item in primary] == ["plain"]
+    assert primary[0].text == format_post(post, header="【标签新内容】")
     assert [item.kind for item in media] == ["nodes"]
     assert [node.content[0].url for node in media[0].nodes] == images
 
@@ -269,10 +262,10 @@ async def test_send_push_qq_media_failure_keeps_primary_accepted(
 ):
     main = _load_main_module()
     main.Comp = SimpleNamespace(
+        Plain=lambda text: SimpleNamespace(kind="plain", text=text),
         Image=SimpleNamespace(
             fromURL=lambda url: SimpleNamespace(kind="image", url=url)
         ),
-        Share=lambda **kwargs: SimpleNamespace(kind="share", **kwargs),
         Node=lambda **kwargs: SimpleNamespace(kind="node", **kwargs),
         Nodes=lambda **kwargs: SimpleNamespace(kind="nodes", **kwargs),
     )
@@ -390,7 +383,7 @@ async def test_send_push_primary_action_failed_reports_only_retcode(
 ):
     main = _load_main_module()
     main.Comp = SimpleNamespace(
-        Share=lambda **kwargs: SimpleNamespace(kind="share", **kwargs),
+        Plain=lambda text: SimpleNamespace(kind="plain", text=text),
     )
     main.MessageChain = lambda components: SimpleNamespace(chain=components)
     platform = SimpleNamespace(meta=lambda: SimpleNamespace(name="aiocqhttp"))
@@ -445,10 +438,10 @@ async def test_send_push_media_action_failed_keeps_primary_accepted(
 ):
     main = _load_main_module()
     main.Comp = SimpleNamespace(
+        Plain=lambda text: SimpleNamespace(kind="plain", text=text),
         Image=SimpleNamespace(
             fromURL=lambda url: SimpleNamespace(kind="image", url=url)
         ),
-        Share=lambda **kwargs: SimpleNamespace(kind="share", **kwargs),
         Node=lambda **kwargs: SimpleNamespace(kind="node", **kwargs),
         Nodes=lambda **kwargs: SimpleNamespace(kind="nodes", **kwargs),
     )
@@ -496,10 +489,10 @@ async def test_send_push_media_action_failed_keeps_primary_accepted(
 
 
 @pytest.mark.asyncio
-async def test_send_push_qq_tag_without_images_uses_share_only():
+async def test_send_push_qq_tag_without_images_uses_plain_only():
     main = _load_main_module()
     main.Comp = SimpleNamespace(
-        Share=lambda **kwargs: SimpleNamespace(kind="share", **kwargs),
+        Plain=lambda text: SimpleNamespace(kind="plain", text=text),
     )
     main.MessageChain = lambda components: SimpleNamespace(chain=components)
     platform = SimpleNamespace(meta=lambda: SimpleNamespace(name="aiocqhttp"))
@@ -523,14 +516,15 @@ async def test_send_push_qq_tag_without_images_uses_share_only():
 
     chain = context.send_message.await_args.args[1].chain
     assert len(chain) == 1
-    assert chain[0].kind == "share"
+    assert chain[0].kind == "plain"
+    assert chain[0].text == format_post(post, header="【标签新内容】")
 
 
 @pytest.mark.asyncio
-async def test_send_push_qq_blog_uses_share_only():
+async def test_send_push_qq_blog_uses_plain_only():
     main = _load_main_module()
     main.Comp = SimpleNamespace(
-        Share=lambda **kwargs: SimpleNamespace(kind="share", **kwargs),
+        Plain=lambda text: SimpleNamespace(kind="plain", text=text),
     )
     main.MessageChain = lambda components: SimpleNamespace(chain=components)
     platform = SimpleNamespace(meta=lambda: SimpleNamespace(name="aiocqhttp"))
@@ -555,7 +549,8 @@ async def test_send_push_qq_blog_uses_share_only():
 
     chain = context.send_message.await_args.args[1].chain
     assert len(chain) == 1
-    assert chain[0].kind == "share"
+    assert chain[0].kind == "plain"
+    assert chain[0].text == format_post(post, header="【博主新内容】")
 
 
 @pytest.mark.asyncio
@@ -656,7 +651,6 @@ async def test_scheduler_accepts_qq_primary_when_media_send_fails(tmp_path):
         Image=SimpleNamespace(
             fromURL=lambda url: SimpleNamespace(kind="image", url=url)
         ),
-        Share=lambda **kwargs: SimpleNamespace(kind="share", **kwargs),
         Node=lambda **kwargs: SimpleNamespace(kind="node", **kwargs),
         Nodes=lambda **kwargs: SimpleNamespace(kind="nodes", **kwargs),
     )
@@ -705,7 +699,10 @@ async def test_scheduler_accepts_qq_primary_when_media_send_fails(tmp_path):
         assert context.send_message.await_count == 2
         primary = context.send_message.await_args_list[0].args[1].chain
         media = context.send_message.await_args_list[1].args[1].chain
-        assert [item.kind for item in primary] == ["share"]
+        assert [item.kind for item in primary] == ["plain"]
+        assert primary[0].text == format_post(
+            post, header="【标签「tag」有新内容】"
+        )
         assert [item.kind for item in media] == ["nodes"]
         assert await plugin._db.transaction(
             lambda conn: conn.execute(
@@ -774,14 +771,13 @@ async def test_cli_preview_then_subscription_replacement_keeps_seen(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cli_preview_qq_reuses_share_and_all_image_nodes(tmp_path):
+async def test_cli_preview_qq_reuses_plain_and_all_image_nodes(tmp_path):
     main = _load_main_module()
     main.Comp = SimpleNamespace(
         Plain=lambda text: SimpleNamespace(kind="plain", text=text),
         Image=SimpleNamespace(
             fromURL=lambda url: SimpleNamespace(kind="image", url=url)
         ),
-        Share=lambda **kwargs: SimpleNamespace(kind="share", **kwargs),
         Node=lambda **kwargs: SimpleNamespace(kind="node", **kwargs),
         Nodes=lambda **kwargs: SimpleNamespace(kind="nodes", **kwargs),
     )
@@ -810,7 +806,8 @@ async def test_cli_preview_qq_reuses_share_and_all_image_nodes(tmp_path):
         await plugin._db.close()
 
     chain = results[1]
-    assert [item.kind for item in chain] == ["share", "nodes"]
+    assert [item.kind for item in chain] == ["plain", "nodes"]
+    assert chain[0].text == format_post(post, header="【标签「A」有新内容】")
     assert [node.content[0].url for node in chain[1].nodes] == images
 
 

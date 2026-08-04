@@ -226,7 +226,7 @@ async def _fetch_page(
             source.list_tag(state.tag, cursor, page_size, "new"),
             remaining,
         )
-    except TimeoutError:
+    except asyncio.TimeoutError:
         state.fail("扫描超过统计 deadline")
     except SourceSchemaError as exc:
         if exc.location in IDENTITY_SCHEMA_LOCATIONS:
@@ -504,7 +504,7 @@ class _TagState:
             enriched = await asyncio.wait_for(
                 ensure_post_fields(post, source, {"tags"}), remaining
             )
-        except TimeoutError:
+        except asyncio.TimeoutError:
             self.fail("扫描超过统计 deadline")
             return False
         except SourceSchemaError as exc:
@@ -566,7 +566,7 @@ class _TagState:
             enriched = await asyncio.wait_for(
                 ensure_post_fields(post, source, {"tags"}), remaining
             )
-        except TimeoutError:
+        except asyncio.TimeoutError:
             self.fail("扫描超过统计 deadline")
             return False
         except SourceSchemaError as exc:

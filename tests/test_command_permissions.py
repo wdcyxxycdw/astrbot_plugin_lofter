@@ -151,7 +151,7 @@ def test_e2e_handler_uses_isolated_runner_and_discloses_live_effects():
     assert "真实 LOFTER" in text
     assert "临时 SQLite" in text
     assert "发送一个" in text
-    assert "最多产生 Share 与图片转发两条平台消息" in text
+    assert "最多产生文本预览与图片转发两条平台消息" in text
     assert "Lofter E2E 测试" in text
 
 
