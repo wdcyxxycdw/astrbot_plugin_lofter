@@ -160,6 +160,7 @@ async def test_tag_primary_first_page_failure_switches_to_dwr_start(monkeypatch)
 
     assert result.source == "dwr"
     assert result.restarted is False
+    assert result.restart_requires_prior_coverage is True
     assert result.items == [expected]
     assert result.diagnostics == (
         "fallback_dwr",
@@ -444,6 +445,7 @@ async def test_legacy_mobile_cursor_restarts_dwr_from_zero(monkeypatch):
 
     assert result.items == [expected]
     assert result.restarted is True
+    assert result.restart_requires_prior_coverage is False
     assert result.diagnostics == (
         "fallback_dwr",
         "mobile_fallback:mobile_cursor_restart",
@@ -589,6 +591,50 @@ async def test_nonterminal_tag_page_restarts_dwr_from_zero(monkeypatch):
         call("demo", 0, 20),
         call("demo", 20, 20),
     ]
+
+
+@pytest.mark.asyncio
+async def test_mobile_cursor_restart_stops_at_dwr_business_limit(monkeypatch):
+    client = FakeClient()
+    client.search_tag.side_effect = [
+        "dwr",
+        AssertionError("new scope must not fetch a DWR tail page"),
+    ]
+    source = DefaultContentSource(client)
+    primary = [
+        make_post(f"mobile-{index}", f"2026-01-{31 - index:02d} 00:00:00")
+        for index in range(9)
+    ]
+    fallback = [
+        make_post(f"dwr-{index}", f"2026-01-{22 - index:02d} 00:00:00")
+        for index in range(20)
+    ]
+    source._mobile = SimpleNamespace(
+        list_tag=AsyncMock(
+            return_value=mobile_page(
+                primary, cursor="mobile-2", exhausted=False
+            )
+        )
+    )
+    monkeypatch.setattr(
+        source_module,
+        "parse_dwr_response_result",
+        AsyncMock(return_value=DWRParseResult(fallback, 20, 0, False)),
+    )
+
+    result = await collect_pages(
+        lambda cursor: source.list_tag("demo", cursor, 20, "new"),
+        limit=20,
+    )
+
+    assert result.items == fallback
+    assert [post.post_id for post in result.evidence_items] == [
+        post.post_id for post in primary
+    ]
+    assert result.source == "dwr"
+    assert result.restarted is True
+    source._mobile.list_tag.assert_awaited_once_with("demo", None)
+    client.search_tag.assert_awaited_once_with("demo", 0, 20)
 
 
 @pytest.mark.asyncio

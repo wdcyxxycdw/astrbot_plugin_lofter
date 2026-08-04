@@ -194,7 +194,11 @@ class DefaultContentSource:
         )
         try:
             fallback = await self._dwr_page(
-                tag, "0", limit, restarted=cursor is not None
+                tag,
+                "0",
+                limit,
+                restarted=cursor is not None,
+                restart_requires_prior_coverage=cursor is None,
             )
         except SourceClosingError:
             raise
@@ -401,7 +405,13 @@ class DefaultContentSource:
             raise
 
     async def _dwr_page(
-        self, tag: str, offset: str | None, limit: int, *, restarted: bool
+        self,
+        tag: str,
+        offset: str | None,
+        limit: int,
+        *,
+        restarted: bool,
+        restart_requires_prior_coverage: bool = True,
     ) -> SourcePage:
         numeric_offset = _offset_value(offset)
         raw = await self._client.search_tag(tag, numeric_offset, limit)
@@ -420,6 +430,7 @@ class DefaultContentSource:
             dropped_count=result.dropped_count,
             complete=result.complete,
             restarted=restarted,
+            restart_requires_prior_coverage=restart_requires_prior_coverage,
             evidence_items=result.evidence_items,
         )
 

@@ -31,6 +31,8 @@ def page(
     cursor=None,
     exhausted=False,
     restarted=False,
+    restart_requires_prior_coverage=True,
+    evidence=(),
     sort="new",
     complete=True,
 ):
@@ -49,6 +51,8 @@ def page(
         dropped_count=0,
         complete=complete,
         restarted=restarted,
+        evidence_items=tuple(evidence),
+        restart_requires_prior_coverage=restart_requires_prior_coverage,
     )
 
 
@@ -117,6 +121,115 @@ async def test_restart_requires_fallback_to_cover_prior_ids():
     assert error.restarted is True
     assert error.page_count == 2
     assert error.unique_count == 2
+
+
+@pytest.mark.asyncio
+async def test_new_scope_restart_keeps_prior_items_as_evidence_only():
+    mobile = [
+        post(f"mobile-{index}", f"2026-01-{30 - index:02d} 00:00:00")
+        for index in range(9)
+    ]
+    dwr = [
+        post(f"dwr-{index}", f"2025-12-{30 - index:02d} 00:00:00")
+        for index in range(20)
+    ]
+    calls = []
+
+    async def fetch(cursor):
+        calls.append(cursor)
+        if cursor is None:
+            return SourcePage(
+                items=mobile,
+                source="mobile_tag",
+                next_cursor="mobile-2",
+                exhausted=False,
+                sort="new",
+                mapped_count=len(mobile),
+                dropped_count=0,
+                complete=True,
+            )
+        if cursor == "mobile-2":
+            return SourcePage(
+                items=dwr,
+                source="dwr",
+                next_cursor="20",
+                exhausted=False,
+                sort="new",
+                mapped_count=len(dwr),
+                dropped_count=0,
+                complete=True,
+                restarted=True,
+                restart_requires_prior_coverage=False,
+            )
+        raise AssertionError("new scope should stop at the DWR business limit")
+
+    result = await collect_pages(fetch, limit=20)
+
+    assert calls == [None, "mobile-2"]
+    assert result.items == dwr
+    assert result.evidence_items == tuple(mobile)
+    assert result.source == "dwr"
+    assert result.restarted is True
+
+
+@pytest.mark.asyncio
+async def test_new_scope_restart_still_requires_explicit_evidence():
+    witness = post("witness", "2026-01-08 00:00:00")
+    pages = iter([
+        page(
+            ["primary"],
+            cursor="primary-2",
+            evidence=(witness,),
+        ),
+        page(
+            ["fallback"],
+            source="dwr",
+            exhausted=True,
+            restarted=True,
+            restart_requires_prior_coverage=False,
+        ),
+    ])
+
+    with pytest.raises(SourcePartialError) as exc_info:
+        await collect_pages(lambda _cursor: ready(next(pages)))
+
+    assert exc_info.value.reason == "evidence_shortfall"
+
+
+@pytest.mark.asyncio
+async def test_new_scope_restart_keeps_cross_source_conflicts_fail_closed():
+    mobile = post("shared", "2026-01-09 00:00:00")
+    dwr = post("shared", "2026-01-09 00:00:00")
+    dwr.title = "conflicting-title"
+    pages = iter([
+        SourcePage(
+            items=[mobile],
+            source="mobile_tag",
+            next_cursor="primary-2",
+            exhausted=False,
+            sort="new",
+            mapped_count=1,
+            dropped_count=0,
+            complete=True,
+        ),
+        SourcePage(
+            items=[dwr],
+            source="dwr",
+            next_cursor=None,
+            exhausted=True,
+            sort="new",
+            mapped_count=1,
+            dropped_count=0,
+            complete=True,
+            restarted=True,
+            restart_requires_prior_coverage=False,
+        ),
+    ])
+
+    with pytest.raises(PostEvidenceError) as exc_info:
+        await collect_pages(lambda _cursor: ready(next(pages)))
+
+    assert exc_info.value.diagnostic == "field_conflict:title:scan_ledger"
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,7 @@ from .core.permissions import ADMIN_ONLY_MESSAGE, is_admin_event
 from .core.parser import Post
 from .core.post_consumers import filter_blocked_with_fields
 from .core.scheduler import SubscriptionScheduler
+from .core.send_result import PushSendResult, exception_type
 from .core.session_gate import SessionGateRegistry
 from .core.storage import SubscriptionStorage
 from .core.subscription_service import SubscriptionService
@@ -94,6 +95,53 @@ def _post_components(
     return chain
 
 
+def _push_primary_components(
+    post: Post, header: str, is_qq: bool, max_images: int,
+):
+    if is_qq:
+        return [_qq_share(post, header)]
+    chain = [Comp.Plain(format_post(post, header=header))]
+    chain.extend(
+        Comp.Image.fromURL(url)
+        for url in visible_images(post)[:max_images]
+    )
+    return chain
+
+
+def _push_media_components(
+    post: Post, source_types: frozenset[str], is_qq: bool,
+):
+    if not is_qq or "tag" not in source_types or not visible_images(post):
+        return None
+    return [_qq_image_nodes(post)]
+
+
+def _push_error(stage: str, error: Exception) -> PushSendResult:
+    error_type = exception_type(error)
+    logger.error(
+        "Lofter: 主要推送失败 stage=%s outcome=error error_type=%s",
+        stage,
+        error_type,
+    )
+    return PushSendResult("error", stage, error_type)
+
+
+def _media_error(stage: str, error: Exception) -> PushSendResult:
+    error_type = exception_type(error)
+    logger.warning(
+        "Lofter: QQ 图片转发失败 stage=%s outcome=error error_type=%s",
+        stage,
+        error_type,
+    )
+    return PushSendResult(
+        "accepted",
+        "primary_send",
+        media_outcome="error",
+        media_stage=stage,
+        media_error_type=error_type,
+    )
+
+
 def _auto_post_result(event: AstrMessageEvent, post: Post, max_images: int):
     if event.get_platform_name() != "aiocqhttp":
         content = post.content if post.has_fields({"content"}) else ""
@@ -132,7 +180,7 @@ async def _search_unique_posts(source: ContentSource, keyword: str, limit: int):
     "astrbot_plugin_lofter",
     "user",
     "解析 Lofter 链接，订阅 Lofter 标签/博主，搜索 Lofter 内容，支持标签表达式统计",
-    "v2.0.8",
+    "v2.0.9",
 )
 class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -226,20 +274,74 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         header: str,
         source_types: frozenset[str],
     ) -> bool:
+        result = await self._send_push_result(
+            session_id, post, header, source_types
+        )
+        return result.accepted
+
+    async def _send_push_result(
+        self,
+        session_id: str,
+        post: Post,
+        header: str,
+        source_types: frozenset[str],
+    ) -> PushSendResult:
         platform_id = session_id.split(":", 1)[0]
         platform = self.context.get_platform_inst(platform_id)
         is_qq = platform is not None and platform.meta().name == "aiocqhttp"
-        components = _post_components(
-            post, header, source_types, is_qq, self._max_images
-        )
         try:
-            result = await self.context.send_message(
-                session_id, MessageChain(components)
+            primary = _push_primary_components(
+                post, header, is_qq, self._max_images
             )
-            return result is not False
-        except Exception as e:
-            logger.error("推送消息失败 session=%s: %s", session_id, e)
-            return False
+        except Exception as exc:
+            return _push_error("primary_build", exc)
+        try:
+            primary_result = await self.context.send_message(
+                session_id, MessageChain(primary)
+            )
+        except Exception as exc:
+            return _push_error("primary_send", exc)
+        if primary_result is False:
+            return PushSendResult("rejected", "primary_send")
+        return await self._send_push_media(
+            session_id, post, source_types, is_qq
+        )
+
+    async def _send_push_media(
+        self,
+        session_id: str,
+        post: Post,
+        source_types: frozenset[str],
+        is_qq: bool,
+    ) -> PushSendResult:
+        try:
+            media = _push_media_components(post, source_types, is_qq)
+        except Exception as exc:
+            return _media_error("media_build", exc)
+        if media is None:
+            return PushSendResult("accepted", "primary_send")
+        try:
+            media_result = await self.context.send_message(
+                session_id, MessageChain(media)
+            )
+        except Exception as exc:
+            return _media_error("media_send", exc)
+        if media_result is False:
+            logger.warning(
+                "Lofter: QQ 图片转发失败 stage=media_send outcome=rejected"
+            )
+            return PushSendResult(
+                "accepted",
+                "primary_send",
+                media_outcome="rejected",
+                media_stage="media_send",
+            )
+        return PushSendResult(
+            "accepted",
+            "primary_send",
+            media_outcome="accepted",
+            media_stage="media_send",
+        )
 
     # ──────────────────────────────────────────
     # 自动解析消息中的 Lofter 链接
@@ -599,11 +701,12 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         runner = E2ETestRunner(
             self._source,
             self._scheduler,
-            self._send_push,
+            self._send_push_result,
         )
         yield event.plain_result(
             "开始 Lofter 实时健康检查：将访问真实 LOFTER，使用临时 SQLite；"
-            "若实时 fixture 足够，最多向当前会话发送一条带“Lofter E2E 测试”标识的真实消息。"
+            "若实时 fixture 足够，将发送一个带“Lofter E2E 测试”标识的 candidate；"
+            "QQ 标签帖子有图片时最多产生 Share 与图片转发两条平台消息。"
         )
         results = await runner.run_all(event.unified_msg_origin)
         yield event.plain_result(format_report(results))
