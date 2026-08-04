@@ -225,14 +225,28 @@ def _send_facts(
         "primary_error_type": result.primary_error_type or "none"
         if result
         else "unknown",
+        "primary_error_retcode": _error_retcode(
+            result.primary_error_retcode if result else None,
+            result is not None,
+        ),
         "media_outcome": result.media_outcome if result else "unknown",
         "media_stage": result.media_stage or "none" if result else "unknown",
         "media_error_type": result.media_error_type or "none"
         if result
         else "unknown",
+        "media_error_retcode": _error_retcode(
+            result.media_error_retcode if result else None,
+            result is not None,
+        ),
         "delivery_accepted": delivery_accepted,
         "seen_written": seen_written,
     }
+
+
+def _error_retcode(value: int | None, result_known: bool) -> int | str:
+    if not result_known:
+        return "unknown"
+    return value if value is not None else "none"
 
 
 async def _warmup_state(runtime, baseline: Post, candidate: Post) -> tuple:

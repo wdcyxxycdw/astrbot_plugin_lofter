@@ -21,7 +21,11 @@ from .core.permissions import ADMIN_ONLY_MESSAGE, is_admin_event
 from .core.parser import Post
 from .core.post_consumers import filter_blocked_with_fields
 from .core.scheduler import SubscriptionScheduler
-from .core.send_result import PushSendResult, exception_type
+from .core.send_result import (
+    PushSendResult,
+    action_failed_retcode,
+    exception_type,
+)
 from .core.session_gate import SessionGateRegistry
 from .core.storage import SubscriptionStorage
 from .core.subscription_service import SubscriptionService
@@ -123,7 +127,12 @@ def _push_error(stage: str, error: Exception) -> PushSendResult:
         stage,
         error_type,
     )
-    return PushSendResult("error", stage, error_type)
+    return PushSendResult(
+        "error",
+        stage,
+        error_type,
+        primary_error_retcode=action_failed_retcode(error),
+    )
 
 
 def _media_error(stage: str, error: Exception) -> PushSendResult:
@@ -139,6 +148,7 @@ def _media_error(stage: str, error: Exception) -> PushSendResult:
         media_outcome="error",
         media_stage=stage,
         media_error_type=error_type,
+        media_error_retcode=action_failed_retcode(error),
     )
 
 

@@ -276,8 +276,8 @@ Claim transaction：
 - 临时 SQLite 中复用生产 `SubscriptionService`、`DeliveryQueue` 和 `SubscriptionScheduler`；flow 使用纯内存 controlled source，不再访问真实内容源，验证 `pending → sending → accepted → subscription seen`。
 - skip 通过稳定 step key 传播根 `blocked_by`，不复制上游异常。
 - fixture 足够时向命令所在会话发送一个带“Lofter E2E 测试”标识的 candidate；QQ 标签帖子有图片时该 candidate 最多产生 Share 与图片转发两条平台消息。
-- Step 8 分别报告 primary/media 的固定 stage、outcome 和异常类型；primary 决定 delivery acceptance，media 失败时 delivery 仍 accepted、seen 已写入，但总体报告为 `DEGRADED`。
+- Step 8 分别报告 primary/media 的固定 stage、outcome、异常类型和可选安全整数 retcode；primary 决定 delivery acceptance，media 失败时 delivery 仍 accepted、seen 已写入，但总体报告为 `DEGRADED`。
 - cleanup 独立尝试取消临时 task、关闭 DB 和删除临时目录；不写生产订阅、seen、delivery 或 config。
-- 报告区分 `HEALTHY`、`DEGRADED` 和 `INCONCLUSIVE`，且不暴露 Cookie、URL、post ID、owner、正文、图片 URL、响应体或原始异常。
+- 报告区分 `HEALTHY`、`DEGRADED` 和 `INCONCLUSIVE`，且不暴露 Cookie、URL、post ID、owner、正文、图片 URL、完整 adapter response、异常文本、业务 payload 或原始异常。
 
 该命令仅管理员可执行，不暴露给 LLM tool。开发回归只使用离线 fake；普通 pytest 通过 marker 和 socket guard 隔离真实网络，只有显式 live 配置才允许真实测试。

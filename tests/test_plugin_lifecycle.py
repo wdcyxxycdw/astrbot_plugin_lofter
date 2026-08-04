@@ -1,3 +1,5 @@
+import sys
+import types
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -7,6 +9,7 @@ import pytest
 from core.instance_lock import InstanceLockHeldError
 from core.llm_tools import LofterLLMToolsMixin
 from core.parser import Post
+from core.send_result import action_failed_retcode
 from core.source_scan import SourcePage
 from tests.test_command_permissions import _load_main_module
 
@@ -91,6 +94,31 @@ async def _make_command_plugin(main, tmp_path):
     )
     plugin._max_images = 2
     return plugin
+
+
+def _action_failed(monkeypatch, retcode):
+    package = types.ModuleType("aiocqhttp")
+    exceptions = types.ModuleType("aiocqhttp.exceptions")
+
+    class ActionFailed(Exception):
+        def __init__(self, result):
+            self.result = result
+
+        @property
+        def retcode(self):
+            return self.result["retcode"]
+
+    ActionFailed.__module__ = "aiocqhttp.exceptions"
+    exceptions.ActionFailed = ActionFailed
+    package.exceptions = exceptions
+    monkeypatch.setitem(sys.modules, "aiocqhttp", package)
+    monkeypatch.setitem(sys.modules, "aiocqhttp.exceptions", exceptions)
+    return ActionFailed({
+        "retcode": retcode,
+        "msg": "private-action-msg-canary",
+        "wording": "private-action-wording-canary",
+        "data": {"payload": "private-action-payload-canary"},
+    })
 
 
 @pytest.mark.asyncio
@@ -328,6 +356,143 @@ async def test_send_push_primary_error_reports_safe_stage(caplog):
     assert "private primary canary" not in caplog.text
     assert "private-session" not in caplog.text
     assert post.url not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("retcode", "expected"),
+    [
+        (0, 0),
+        (-1, -1),
+        (True, None),
+        ("100", None),
+        (1.5, None),
+        (None, None),
+    ],
+)
+def test_action_failed_retcode_accepts_only_exact_integers(
+    monkeypatch, retcode, expected
+):
+    error = _action_failed(monkeypatch, retcode)
+
+    assert action_failed_retcode(error) == expected
+
+
+def test_action_failed_retcode_rejects_unrelated_exception():
+    error = RuntimeError("private-retcode-canary")
+    error.retcode = 1404
+
+    assert action_failed_retcode(error) is None
+
+
+@pytest.mark.asyncio
+async def test_send_push_primary_action_failed_reports_only_retcode(
+    monkeypatch, caplog
+):
+    main = _load_main_module()
+    main.Comp = SimpleNamespace(
+        Share=lambda **kwargs: SimpleNamespace(kind="share", **kwargs),
+    )
+    main.MessageChain = lambda components: SimpleNamespace(chain=components)
+    platform = SimpleNamespace(meta=lambda: SimpleNamespace(name="aiocqhttp"))
+    error = _action_failed(monkeypatch, 1404)
+    context = SimpleNamespace(
+        get_platform_inst=MagicMock(return_value=platform),
+        send_message=AsyncMock(side_effect=error),
+    )
+    plugin = object.__new__(main.LofterPlugin)
+    plugin._max_images = 1
+    plugin.context = context
+    post = Post(
+        post_id="send",
+        title="标题",
+        summary="摘要",
+        url="https://u.lofter.com/post/send",
+        completeness=frozenset({"title", "summary", "url"}),
+    )
+
+    result = await main.LofterPlugin._send_push_result(
+        plugin,
+        "qq-id:GroupMessage:private-session",
+        post,
+        "【标签新内容】",
+        frozenset({"tag"}),
+    )
+
+    assert result.accepted is False
+    assert result.primary_error_type == "ActionFailed"
+    assert result.primary_error_retcode == 1404
+    assert result.media_outcome == "not_applicable"
+    assert str(result.error()) == "primary_send:error:ActionFailed:retcode=1404"
+    assert result.error().args == (
+        "primary_send", "error", "ActionFailed", 1404
+    )
+    context.send_message.assert_awaited_once()
+    for secret in (
+        "private-action-msg-canary",
+        "private-action-wording-canary",
+        "private-action-payload-canary",
+        "private-session",
+        post.url,
+    ):
+        assert secret not in caplog.text
+        assert secret not in str(result.error())
+        assert secret not in repr(result.error().args)
+
+
+@pytest.mark.asyncio
+async def test_send_push_media_action_failed_keeps_primary_accepted(
+    monkeypatch, caplog
+):
+    main = _load_main_module()
+    main.Comp = SimpleNamespace(
+        Image=SimpleNamespace(
+            fromURL=lambda url: SimpleNamespace(kind="image", url=url)
+        ),
+        Share=lambda **kwargs: SimpleNamespace(kind="share", **kwargs),
+        Node=lambda **kwargs: SimpleNamespace(kind="node", **kwargs),
+        Nodes=lambda **kwargs: SimpleNamespace(kind="nodes", **kwargs),
+    )
+    main.MessageChain = lambda components: SimpleNamespace(chain=components)
+    platform = SimpleNamespace(meta=lambda: SimpleNamespace(name="aiocqhttp"))
+    error = _action_failed(monkeypatch, 1405)
+    context = SimpleNamespace(
+        get_platform_inst=MagicMock(return_value=platform),
+        send_message=AsyncMock(side_effect=[True, error]),
+    )
+    plugin = object.__new__(main.LofterPlugin)
+    plugin._max_images = 1
+    plugin.context = context
+    post = Post(
+        post_id="send",
+        title="标题",
+        summary="",
+        images=["https://img.example/private.jpg"],
+        url="https://u.lofter.com/post/send",
+        completeness=frozenset({"title", "images", "url"}),
+    )
+
+    result = await main.LofterPlugin._send_push_result(
+        plugin,
+        "qq-id:GroupMessage:private-session",
+        post,
+        "【标签新内容】",
+        frozenset({"tag"}),
+    )
+
+    assert result.accepted is True
+    assert result.media_error_type == "ActionFailed"
+    assert result.media_error_retcode == 1405
+    assert str(result.error()) == "media_send:error:ActionFailed:retcode=1405"
+    assert context.send_message.await_count == 2
+    for secret in (
+        "private-action-msg-canary",
+        "private-action-wording-canary",
+        "private-action-payload-canary",
+        "private-session",
+        post.url,
+    ):
+        assert secret not in caplog.text
+        assert secret not in str(result.error())
 
 
 @pytest.mark.asyncio
