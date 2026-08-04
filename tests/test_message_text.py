@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from core.formatter import format_post
 from core.parser import Post
 from core.utils import extract_message_body_text
 from tests.test_command_permissions import _load_main_module
@@ -45,11 +46,6 @@ class FakeImageComponent:
         self.url = url
 
 
-class FakeShareComponent:
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
-
-
 class FakeNodeComponent:
     def __init__(self, content, **kwargs):
         self.content = content
@@ -65,7 +61,6 @@ def _message_components():
     return SimpleNamespace(
         Plain=FakePlainComponent,
         Image=SimpleNamespace(fromURL=FakeImageComponent),
-        Share=FakeShareComponent,
         Node=FakeNodeComponent,
         Nodes=FakeNodesComponent,
     )
@@ -113,7 +108,7 @@ def test_reply_link_is_ignored_when_body_has_no_text():
     assert text == ""
 
 
-def test_qq_group_long_post_uses_share_then_nodes_with_self_uin():
+def test_qq_group_long_post_uses_plain_then_nodes_with_self_uin():
     main = _load_main_module()
     main.Comp = _message_components()
     event = _auto_event(group_id="group", private=False, self_id="12345")
@@ -133,9 +128,8 @@ def test_qq_group_long_post_uses_share_then_nodes_with_self_uin():
 
     chain = main._auto_post_result(event, post, 3)
 
-    assert isinstance(chain[0], FakeShareComponent)
-    assert chain[0].url == post.url
-    assert post.url not in chain[0].content
+    assert isinstance(chain[0], FakePlainComponent)
+    assert chain[0].text == format_post(post)
     assert isinstance(chain[1], FakeNodesComponent)
     assert all(node.uin == "12345" for node in chain[1].nodes)
     assert "正文内容" in "\n".join(
@@ -143,7 +137,7 @@ def test_qq_group_long_post_uses_share_then_nodes_with_self_uin():
     )
 
 
-def test_qq_private_long_post_uses_share_without_group_nodes():
+def test_qq_private_long_post_uses_plain_without_group_nodes():
     main = _load_main_module()
     main.Comp = _message_components()
     post = Post(
@@ -155,7 +149,8 @@ def test_qq_private_long_post_uses_share_without_group_nodes():
     chain = main._auto_post_result(_auto_event(private=True), post, 3)
 
     assert len(chain) == 1
-    assert isinstance(chain[0], FakeShareComponent)
+    assert isinstance(chain[0], FakePlainComponent)
+    assert chain[0].text == format_post(post)
 
 
 def test_non_qq_auto_parse_uses_plain_and_truncated_images():
@@ -174,7 +169,6 @@ def test_non_qq_auto_parse_uses_plain_and_truncated_images():
 
     assert isinstance(chain[0], FakePlainComponent)
     assert [item.url for item in chain[1:]] == post.images[:2]
-    assert not any(isinstance(item, FakeShareComponent) for item in chain)
     assert not any(isinstance(item, FakeNodesComponent) for item in chain)
 
 

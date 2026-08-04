@@ -51,29 +51,6 @@ def _validated_int_config(
     return clamped
 
 
-def _qq_share(post: Post, header: str = ""):
-    title = "Lofter"
-    if post.has_fields({"title"}):
-        title = post.title or "(无标题)"
-    content = [header] if header else []
-    if post.has_fields({"author"}) and post.author:
-        content.append(f"作者：{post.author}")
-    if post.has_fields({"tags"}) and post.tags:
-        content.append(f"#{' #'.join(post.tags)}")
-    if post.has_fields({"summary"}) and post.summary:
-        content.append(post.summary)
-    images = visible_images(post)
-    content_text = "\n".join(content)
-    if post.has_fields({"url"}) and post.url:
-        content_text = content_text.replace(post.url, "").strip()
-    return Comp.Share(
-        url=post.url if post.has_fields({"url"}) else "",
-        title=title,
-        content=content_text,
-        image=images[0] if images else "",
-    )
-
-
 def _qq_image_nodes(post: Post):
     name = post.author if post.has_fields({"author"}) and post.author else "Lofter"
     return Comp.Nodes(nodes=[
@@ -93,7 +70,7 @@ def _post_components(
             for url in visible_images(post)[:max_images]
         )
         return chain
-    chain = [_qq_share(post, header)]
+    chain = [Comp.Plain(format_post(post, header=header))]
     if "tag" in source_types and visible_images(post):
         chain.append(_qq_image_nodes(post))
     return chain
@@ -103,7 +80,7 @@ def _push_primary_components(
     post: Post, header: str, is_qq: bool, max_images: int,
 ):
     if is_qq:
-        return [_qq_share(post, header)]
+        return [Comp.Plain(format_post(post, header=header))]
     chain = [Comp.Plain(format_post(post, header=header))]
     chain.extend(
         Comp.Image.fromURL(url)
@@ -164,7 +141,7 @@ def _auto_post_result(event: AstrMessageEvent, post: Post, max_images: int):
         chain = [Comp.Plain(text)]
         chain.extend(Comp.Image.fromURL(url) for url in images)
         return event.chain_result(chain)
-    chain = [_qq_share(post)]
+    chain = [Comp.Plain(format_post(post))]
     content = post.content if post.has_fields({"content"}) else ""
     if content and len(content) > 500 and event.get_group_id() and not event.is_private_chat():
         name = post.author if post.has_fields({"author"}) and post.author else "Lofter"
@@ -190,7 +167,7 @@ async def _search_unique_posts(source: ContentSource, keyword: str, limit: int):
     "astrbot_plugin_lofter",
     "user",
     "解析 Lofter 链接，订阅 Lofter 标签/博主，搜索 Lofter 内容，支持标签表达式统计",
-    "v2.0.9",
+    "v2.0.10",
 )
 class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -716,7 +693,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         yield event.plain_result(
             "开始 Lofter 实时健康检查：将访问真实 LOFTER，使用临时 SQLite；"
             "若实时 fixture 足够，将发送一个带“Lofter E2E 测试”标识的 candidate；"
-            "QQ 标签帖子有图片时最多产生 Share 与图片转发两条平台消息。"
+            "QQ 标签帖子有图片时最多产生文本预览与图片转发两条平台消息。"
         )
         results = await runner.run_all(event.unified_msg_origin)
         yield event.plain_result(format_report(results))
