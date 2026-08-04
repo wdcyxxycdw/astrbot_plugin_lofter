@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.dwr_parser import _map_post
-from core.errors import SourcePartialError, SourceSchemaError
+from core.errors import PostEvidenceError, SourcePartialError, SourceSchemaError
 from core.mobile_parser import (
     parse_mobile_post_detail,
     parse_mobile_tag_page,
@@ -23,7 +23,7 @@ from core.post_identity import (
     mobile_decimal_ids,
     post_id_from_url,
 )
-from core.post_fields import merge_post_fields
+from core.post_fields import PostEvidenceLedger, merge_post_fields
 from core.source_scan import SourcePage, collect_pages
 from core.filter import FilterRule
 from core.author_block import AuthorBlock
@@ -193,6 +193,100 @@ def test_merge_summary_distinguishes_known_empty_from_unknown():
     with pytest.raises(SourceSchemaError) as exc_info:
         merge_post_fields(base, empty_detail)
     assert exc_info.value.location == "post.evidence"
+
+
+@pytest.mark.parametrize(
+    "detail_source", ["mobile_detail", "embedded_json", "html_post"]
+)
+def test_merge_accepts_distinct_nonempty_dwr_and_detail_summaries(detail_source):
+    base = _complete_post(
+        summary="列表摘要",
+        source="dwr",
+        completeness=frozenset({"summary", "url", "publish_time"}),
+        provenance={"summary": "dwr", "url": "dwr", "publish_time": "dwr"},
+    )
+    detail = _complete_post(
+        summary="详情摘要",
+        source=detail_source,
+        completeness=frozenset({"summary", "url", "publish_time"}),
+        provenance={
+            "summary": detail_source,
+            "url": detail_source,
+            "publish_time": detail_source,
+        },
+    )
+
+    merged = merge_post_fields(base, detail)
+
+    assert merged.summary == "详情摘要"
+    assert merged.provenance["summary"] == detail_source
+
+
+def test_summary_ledger_keeps_each_role_through_copy_and_merge():
+    dwr = _complete_post(
+        summary="列表摘要",
+        source="dwr",
+        completeness=frozenset({"summary"}),
+        provenance={"summary": "dwr"},
+    )
+    detail = _complete_post(
+        summary="详情摘要",
+        source="mobile_detail",
+        completeness=frozenset({"summary"}),
+        provenance={"summary": "mobile_detail"},
+    )
+    conflicting_dwr = _complete_post(
+        summary="另一份列表摘要",
+        source="dwr",
+        completeness=frozenset({"summary"}),
+        provenance={"summary": "dwr"},
+    )
+    first = PostEvidenceLedger()
+    first.observe(dwr)
+    first.observe(detail)
+    copied = first.copy()
+    incoming = PostEvidenceLedger()
+    incoming.observe(conflicting_dwr)
+
+    with pytest.raises(PostEvidenceError) as copy_info:
+        copied.observe(conflicting_dwr)
+    with pytest.raises(PostEvidenceError) as merge_info:
+        first.merge(incoming)
+
+    assert copy_info.value.diagnostic == "field_conflict:summary:post_ledger"
+    assert merge_info.value.diagnostic == "field_conflict:summary:post_ledger"
+
+
+def test_summary_role_exception_does_not_relax_strict_or_other_fields():
+    dwr = _complete_post(
+        title="列表标题",
+        summary="列表摘要",
+        source="dwr",
+        completeness=frozenset({"title", "summary"}),
+        provenance={"title": "dwr", "summary": "dwr"},
+    )
+    strict_summary = _complete_post(
+        title="列表标题",
+        summary="未知摘要",
+        source="test",
+        completeness=frozenset({"title", "summary"}),
+        provenance={"title": "test", "summary": "test"},
+    )
+    conflicting_title = _complete_post(
+        title="详情标题",
+        summary="详情摘要",
+        source="mobile_detail",
+        completeness=frozenset({"title", "summary"}),
+        provenance={"title": "mobile_detail", "summary": "mobile_detail"},
+    )
+
+    with pytest.raises(PostEvidenceError) as summary_info:
+        merge_post_fields(dwr, strict_summary)
+    with pytest.raises(PostEvidenceError) as title_info:
+        merge_post_fields(dwr, conflicting_title)
+
+    assert summary_info.value.diagnostic == "field_conflict:summary:post_ledger"
+    assert title_info.value.diagnostic == "field_conflict:title:post_ledger"
 
 
 def test_post_and_page_propagate_completeness_and_provenance():

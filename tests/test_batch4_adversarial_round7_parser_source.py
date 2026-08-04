@@ -277,12 +277,14 @@ async def test_complete_blog_fallback_keeps_fallback_objects(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_limit_coverage_uses_only_visible_fallback_prefix():
+async def test_limit_coverage_accepts_validated_tail_outside_business_prefix():
     evidence = (_post("1a_2b"),)
     page = _page([_post("1a_2c"), _post("1a_2b")], evidence=evidence)
 
-    with pytest.raises(SourcePartialError):
-        await collect_pages(AsyncMock(return_value=page), limit=1)
+    result = await collect_pages(AsyncMock(return_value=page), limit=1)
+
+    assert [post.post_id for post in result.items] == ["1a_2c"]
+    assert [post.post_id for post in result.evidence_items] == ["1a_2b", "1a_2b"]
 
 
 @pytest.mark.asyncio

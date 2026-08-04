@@ -92,6 +92,7 @@ async def collect_pages(
     state = _ScanState()
     cursor: str | None = None
     restarted = False
+    business_boundary: SourcePage | None = None
     while True:
         page = await _fetch_with_deadline(
             fetch_page, cursor, state, deadline_at, monotonic
@@ -105,14 +106,20 @@ async def collect_pages(
             evidence = state.all_evidence_items()
             state = _restart_state(state, evidence)
             restarted = True
+            business_boundary = None
         _validate_progress(state, cursor, page)
         if not page.complete:
             raise _partial(state, page, reason="page_incomplete")
         state.add(page)
-        if page.exhausted or _reached_limit(state, limit):
-            if state.evidence_shortfall(limit):
+        if business_boundary is None and _reached_limit(state, limit):
+            business_boundary = page
+        shortfall = state.evidence_shortfall(limit)
+        if page.exhausted:
+            if shortfall:
                 raise _partial(state, reason="evidence_shortfall")
-            return state.result(page, limit, restarted)
+            return state.result(business_boundary or page, limit, restarted)
+        if business_boundary is not None and not shortfall:
+            return state.result(business_boundary, limit, restarted)
         cursor = page.next_cursor
         await asyncio.sleep(0)
 
@@ -194,9 +201,7 @@ class _ScanState:
                 seen.add(post.post_id)
                 ordered_ids.append(post.post_id)
         required = ordered_ids if limit is None else ordered_ids[:limit]
-        visible = self.items if limit is None else self.items[:limit]
-        visible_ids = {post.post_id for post in visible}
-        return not set(required).issubset(visible_ids)
+        return not set(required).issubset(self.ids)
 
     def remember_identity(self, post: Post) -> None:
         self._remember_owner(post)
@@ -300,6 +305,10 @@ class _ScanState:
         restarted: bool,
     ) -> SourcePage:
         items = self.items if limit is None else self.items[:limit]
+        returned_ids = {post.post_id for post in items}
+        tail_evidence = tuple(
+            post for post in self.items if post.post_id not in returned_ids
+        )
         return SourcePage(
             items=items,
             source=self.source,
@@ -313,7 +322,7 @@ class _ScanState:
             restarted=restarted,
             field_completeness=_common_fields(items),
             provenance=_common_provenance(items, _common_fields(items)),
-            evidence_items=self.prior_items,
+            evidence_items=(*self.prior_items, *tail_evidence),
         )
 
 

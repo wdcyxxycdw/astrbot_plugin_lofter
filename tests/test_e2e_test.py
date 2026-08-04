@@ -1,5 +1,6 @@
 import asyncio
 import os
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -378,6 +379,109 @@ async def test_fixture_combines_sources_only_when_each_is_insufficient():
     assert by_key["fixture_detail"].facts["fixture_provider"] == "combined"
     assert by_key["claim_send_ack_seen"].status == "pass"
     send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_dwr_fixture_accepts_distinct_detail_summaries():
+    first = replace(
+        _post("1a_1", publish_time="2026-08-01 11:00:00"),
+        summary="private-list-summary-a",
+        source="dwr",
+        provenance={**_post("1a_1").provenance, "summary": "dwr"},
+    )
+    second = replace(
+        _post("1a_2"),
+        summary="private-list-summary-b",
+        source="dwr",
+        provenance={**_post("1a_2").provenance, "summary": "dwr"},
+    )
+    details = {
+        first.url: replace(
+            first,
+            summary="private-detail-summary-a",
+            source="mobile_detail",
+            provenance={**first.provenance, "summary": "mobile_detail"},
+        ),
+        second.url: replace(
+            second,
+            summary="private-detail-summary-b",
+            source="mobile_detail",
+            provenance={**second.provenance, "summary": "mobile_detail"},
+        ),
+    }
+    source = _OfflineSource([], [first, second], production=[])
+    source.posts = details
+    runner, send, scheduler_task = await _runner(source)
+
+    try:
+        results = await runner.run_all("qq:real-session")
+    finally:
+        await _stop(scheduler_task)
+
+    by_key = _by_key(results)
+    assert by_key["fixture_detail"].status == "pass"
+    assert by_key["fixture_detail"].facts["fixture_provider"] == "dwr"
+    assert by_key["claim_send_ack_seen"].status == "pass"
+    send.assert_awaited_once()
+    report = format_report(results)
+    for secret in (
+        "private-list-summary-a",
+        "private-list-summary-b",
+        "private-detail-summary-a",
+        "private-detail-summary-b",
+    ):
+        assert secret not in report
+
+
+@pytest.mark.asyncio
+async def test_dwr_fixture_still_rejects_detail_title_conflict():
+    first = replace(
+        _post("1a_1", publish_time="2026-08-01 11:00:00"),
+        summary="private-list-summary-a",
+        source="dwr",
+        provenance={**_post("1a_1").provenance, "summary": "dwr"},
+    )
+    second = replace(
+        _post("1a_2"),
+        summary="private-list-summary-b",
+        source="dwr",
+        provenance={**_post("1a_2").provenance, "summary": "dwr"},
+    )
+    details = {
+        first.url: replace(
+            first,
+            title="private-conflicting-title",
+            summary="private-detail-summary-a",
+            source="mobile_detail",
+            provenance={
+                **first.provenance,
+                "title": "mobile_detail",
+                "summary": "mobile_detail",
+            },
+        ),
+        second.url: replace(
+            second,
+            summary="private-detail-summary-b",
+            source="mobile_detail",
+            provenance={**second.provenance, "summary": "mobile_detail"},
+        ),
+    }
+    source = _OfflineSource([], [first, second], production=[])
+    source.posts = details
+    runner, send, scheduler_task = await _runner(source)
+
+    try:
+        results = await runner.run_all("qq:real-session")
+    finally:
+        await _stop(scheduler_task)
+
+    fixture = _by_key(results)["fixture_detail"]
+    assert fixture.status == "fail"
+    assert fixture.facts["fixture_provider"] == "dwr"
+    assert fixture.facts["fixture_phase"] == "list_detail_merge"
+    assert fixture.facts["fixture_candidate_ordinal"] == 1
+    assert "帖子证据冲突（field_conflict:title:post_ledger）" in format_report(results)
+    send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
