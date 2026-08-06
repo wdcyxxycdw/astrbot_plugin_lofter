@@ -92,6 +92,7 @@ def merge_post_fields(base: Post, detail: Post) -> Post:
     for field_name in {"publish_time"} & base.completeness:
         values[field_name] = getattr(base, field_name)
         provenance[field_name] = base.provenance.get(field_name, base.source)
+    _prefer_summary(base, detail, values, provenance)
     _prefer_owned_url(base, detail, values, provenance)
     return replace(
         detail,
@@ -229,12 +230,18 @@ def _remember_summary_evidence(
 
     observed = roles.setdefault(post_id, {})
     observed[role] = value
-    if "detail" in observed:
-        ledger[post_id] = observed["detail"]
-    elif "strict" in observed:
-        ledger[post_id] = observed["strict"]
-    else:
-        ledger[post_id] = observed["dwr_list"]
+    selected_role = _preferred_summary_role(observed)
+    ledger[post_id] = observed[selected_role]
+
+
+def _preferred_summary_role(observed: dict[str, object]) -> str:
+    for role in ("detail", "strict", "dwr_list"):
+        if observed.get(role):
+            return role
+    for role in ("detail", "strict", "dwr_list"):
+        if role in observed:
+            return role
+    raise RuntimeError("summary evidence is empty")
 
 
 def _compatible_summary_values(
@@ -245,11 +252,7 @@ def _compatible_summary_values(
 ) -> bool:
     if existing_value == incoming_value:
         return True
-    return (
-        {existing_role, incoming_role} == {"dwr_list", "detail"}
-        and bool(existing_value)
-        and bool(incoming_value)
-    )
+    return {existing_role, incoming_role} == {"dwr_list", "detail"}
 
 
 def _remember_evidence(
@@ -363,6 +366,18 @@ def _merge_field_ledgers(
         )
 
 
+def _prefer_summary(
+    base: Post, detail: Post, values: dict[str, object], provenance: dict[str, str]
+) -> None:
+    if not base.has_fields({"summary"}) or not detail.has_fields({"summary"}):
+        return
+    if _summary_role(base) != "dwr_list" or _summary_role(detail) != "detail":
+        return
+    if base.summary and not detail.summary:
+        values["summary"] = base.summary
+        provenance["summary"] = base.provenance.get("summary", base.source)
+
+
 def _prefer_owned_url(
     base: Post, detail: Post, values: dict[str, object], provenance: dict[str, str]
 ) -> None:
@@ -413,4 +428,6 @@ def _missing_location(post: Post, fields: frozenset[str]) -> str:
         return "publishTime"
     if "url" in missing:
         return "url"
+    if "images" in missing:
+        return "post.images"
     return "post.content"

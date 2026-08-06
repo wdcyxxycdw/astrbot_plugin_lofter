@@ -169,7 +169,7 @@ async def test_source_publish_times_satisfy_subscription_contract():
     source.get_post.assert_not_awaited()
 
 
-def test_merge_summary_distinguishes_known_empty_from_unknown():
+def test_merge_summary_preserves_known_list_value_for_unknown_or_empty_detail():
     base = _complete_post(
         summary="列表摘要",
         completeness=frozenset({"summary", "url", "publish_time"}),
@@ -186,13 +186,13 @@ def test_merge_summary_distinguishes_known_empty_from_unknown():
         provenance={"summary": "mobile_detail", "url": "mobile_detail", "publish_time": "mobile_detail"},
     )
 
-    preserved = merge_post_fields(base, unknown_detail)
+    unknown_merged = merge_post_fields(base, unknown_detail)
+    empty_merged = merge_post_fields(base, empty_detail)
 
-    assert preserved.summary == "列表摘要"
-    assert preserved.provenance["summary"] == "dwr"
-    with pytest.raises(SourceSchemaError) as exc_info:
-        merge_post_fields(base, empty_detail)
-    assert exc_info.value.location == "post.evidence"
+    assert unknown_merged.summary == "列表摘要"
+    assert unknown_merged.provenance["summary"] == "dwr"
+    assert empty_merged.summary == "列表摘要"
+    assert empty_merged.provenance["summary"] == "dwr"
 
 
 @pytest.mark.parametrize(
@@ -391,6 +391,28 @@ async def test_subscription_enriches_required_location_and_time():
 
     assert result[0].publish_time == "2026-07-29 05:00:00"
     source.get_post.assert_awaited_once_with(partial.url)
+
+
+@pytest.mark.asyncio
+async def test_subscription_reports_unknown_images_at_image_field():
+    post = Post(
+        post_id="1a_2b",
+        title="Demo",
+        summary="",
+        images=[],
+        url="https://demo.lofter.com/post/1a_2b",
+        publish_time="2026-07-29 05:00:00",
+        completeness=frozenset({"url", "publish_time"}),
+    )
+    class Source:
+        async def get_post(self, url):
+            assert url == post.url
+            return post
+
+    with pytest.raises(SourceSchemaError) as exc_info:
+        await ensure_subscription_posts([post], Source(), {"images"})
+
+    assert exc_info.value.location == "post.images"
 
 
 @pytest.mark.asyncio

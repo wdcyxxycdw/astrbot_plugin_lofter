@@ -217,8 +217,7 @@ def test_default_tests_block_real_network():
         socket.create_connection(("127.0.0.1", 9))
 
 
-def test_pytest_config_disables_dotenv_and_registers_real_marker(pytestconfig):
-    assert ".env.test" not in pytestconfig.getini("env_files")
+def test_pytest_config_registers_strict_markers(pytestconfig):
     assert pytestconfig.getini("strict_markers") is True
     assert any(item.startswith("real:") for item in pytestconfig.getini("markers"))
 

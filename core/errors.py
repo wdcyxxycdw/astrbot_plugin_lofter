@@ -358,7 +358,7 @@ def _safe_location(value: str) -> str:
         "firstPost", "homePageUrl", "html", "id", "isMember", "items[]", "json",
         "list", "meta", "meta.msg", "minTimeStamp", "msg", "offset", "permalink",
         "photoCaptions", "photoLinks", "post", "post.content", "post.evidence",
-        "post.id", "post.meta.description", "post.meta.keywords", "post.url",
+        "post.id", "post.images", "post.meta.description", "post.meta.keywords", "post.url",
         "postData", "postData.postCount.blogId", "postData.postView.blogId",
         "post.owner",
         "postData.postView.photoCount", "postCount", "post_id", "postView",
