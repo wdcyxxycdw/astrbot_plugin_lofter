@@ -2,7 +2,7 @@
 
 AstrBot 插件，用于解析 Lofter 链接、订阅 Lofter 标签/博主、搜索内容、屏蔽作者和统计标签作品。
 
-当前版本：**v2.0.11**。
+当前版本：**v2.0.12**。
 
 ## 功能
 
@@ -14,7 +14,7 @@ AstrBot 插件，用于解析 Lofter 链接、订阅 Lofter 标签/博主、搜�
 - **作者屏蔽**：按会话屏蔽作者昵称或 Lofter 用户名，应用于自动解析、搜索、预览和订阅推送。
 - **LLM 工具调用**：向 AstrBot LLM 暴露搜索、订阅、作者屏蔽和标签统计工具。
 - **持久化投递**：候选帖子先写入 SQLite 队列，再按稳定顺序逐条发送和确认。
-- **QQ 推送**：QQ 标签订阅先发送包含标题、作者、摘要和链接的文本预览；有图片时再用折叠转发发送全部图片，图片转发失败不会重试已成功的文本预览。
+- **QQ 推送**：QQ 标签和博主订阅先发送包含标题、作者、摘要和链接的文本预览；有图片时再用折叠转发发送全部图片，图片转发失败不会重试已成功的文本预览。
 
 ## 安装
 
@@ -48,7 +48,8 @@ AstrBot 插件，用于解析 Lofter 链接、订阅 Lofter 标签/博主、搜�
 2. 按内容类型和失败原因回退到页面 embedded JSON、HTML 或 DWR 标签接口。
 3. DWR 响应在受限子进程中执行并提取对象图。
 4. 各来源都执行 canonical 帖子身份、字段证据和来源一致性校验；证据冲突时 fail closed，而不是拼接不可信结果。
-5. 所有来源 observation 都保留用于冲突验证。restart 默认延续旧业务结果的 coverage obligation；仅 Mobile 标签 cursor 切换到 DWR offset 0 时开启新业务 scope，旧 Mobile 结果不与 DWR 结果拼接，显式 dropped/unmapped evidence 仍必须被覆盖。
+5. Mobile detail 图片字段兼容 `photoLinks` 与 `firstImageUrl`；双字段同时出现时必须解析为相同的有序 URL 列表，否则 fail closed。
+6. 所有来源 observation 都保留用于冲突验证。restart 默认延续旧业务结果的 coverage obligation；仅 Mobile 标签 cursor 切换到 DWR offset 0 时开启新业务 scope，旧 Mobile 结果不与 DWR 结果拼接，显式 dropped/unmapped evidence 仍必须被覆盖。
 
 HTML 仍是博主页面等路径的回退来源，但不再是唯一解析方式。
 
@@ -62,7 +63,7 @@ HTML 仍是博主页面等路径的回退来源，但不再是唯一解析方式
 https://username.lofter.com/post/xxxxxx
 ```
 
-图片贴会发送统一格式文本和图片；无图片的长文本会按适配器能力使用合并转发或文本结果。
+图片贴会发送统一格式文本和图片；QQ 自动解析优先发送最多 `max_images` 张图片的折叠转发，不再同时附加长正文转发；无图片的长文本会按适配器能力使用合并转发或文本结果。
 
 ### 权限边界
 
@@ -188,9 +189,9 @@ LLM 工具不暴露 Cookie 更新、真实端到端测试或链接 parse；链�
 
 - 保存实际返回帖子的具体 subscription row provenance；它与帖子字段 provenance 是两类不同证据。
 - 标签和博主共享同一个 session 队列，按 `published_at ASC, post_id ASC` 稳定消费。
-- 每个 session 每轮最多进行 5 次 delivery callback；超过部分留在队列中，即使下一轮 feed 已为空也会继续 drain。QQ 有图片的标签推送在一次 callback 中会依次产生文本预览和图片折叠转发两条平台消息。
+- 每个 session 每轮最多进行 5 次 delivery callback；超过部分留在队列中，即使下一轮 feed 已为空也会继续 drain。QQ 有图片的标签或博主推送在一次 callback 中会依次产生文本预览和图片折叠转发两条平台消息。
 - 每条成功后立即独立 ack；第 N 条失败时，之前的 accepted 保留，第 N+1 条不会在本轮发送。
-- scheduler 只有在 send callback **严格返回 `True`** 时才转为 `accepted` 并写入当前有效来源的 seen。QQ 标签推送由 Plain 文本 primary 决定 callback acceptance；后续图片转发明确失败时单独报告，但不会让已成功的 primary 重试。
+- scheduler 只有在 send callback **严格返回 `True`** 时才转为 `accepted` 并写入当前有效来源的 seen。QQ 有图片推送由 Plain 文本 primary 决定 callback acceptance；后续图片转发明确失败时单独报告，但不会让已成功的 primary 重试。
 - 普通确定失败按 60 秒、300 秒、1800 秒、7200 秒、之后 21600 秒退避；第 10 次进入 `dead`。
 - 发送 timeout 为 60 秒，claim lease 为 5 分钟。timeout 或任务取消的结果不确定，因此 delivery 保持 `sending`，等待 lease recovery。
 - 每个 session 的 `pending + sending` admission 上限为 5000；超出容量的候选不写 seen，后续轮询可再次发现。

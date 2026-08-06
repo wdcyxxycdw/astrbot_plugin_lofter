@@ -240,6 +240,7 @@ def _safe_post_evidence_origin(value: str) -> str:
         "embedded_url_aliases",
         "embedded_text_aliases",
         "embedded_image_aliases",
+        "mobile_image_aliases",
     }
     return value if value in known else "unknown"
 
@@ -355,7 +356,7 @@ def _safe_location(value: str) -> str:
         "embedded.post.owner",
         "embedded.postContent", "embedded.postUrl", "embedded.root",
         "embedded.tags", "embedded.tags[]", "embedded.title", "embedded.url",
-        "firstPost", "homePageUrl", "html", "id", "isMember", "items[]", "json",
+        "firstPost", "firstImageUrl", "homePageUrl", "html", "id", "isMember", "items[]", "json",
         "list", "meta", "meta.msg", "minTimeStamp", "msg", "offset", "permalink",
         "photoCaptions", "photoLinks", "post", "post.content", "post.evidence",
         "post.id", "post.images", "post.meta.description", "post.meta.keywords", "post.url",

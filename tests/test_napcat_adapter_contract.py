@@ -72,7 +72,7 @@ def _post():
         title="契约标题",
         summary="契约摘要",
         content="契约正文",
-        images=[],
+        images=["https://media.example.invalid/contract.jpg"],
         author="契约作者",
         author_username="contract-user",
         url="https://contract-user.lofter.com/post/1a_20",
@@ -83,11 +83,14 @@ def _post():
     )
 
 
-def _response(action: dict, *, fail_valid_text: bool = False) -> dict:
+def _response(
+    action: dict, *, fail_primary: bool = False, fail_media: bool = False,
+) -> dict:
     segments = action.get("params", {}).get("message", [])
     segment_types = [item.get("type") for item in segments]
-    valid = segment_types == ["text"]
-    if valid and not fail_valid_text:
+    valid_text = action["action"] == "send_group_msg" and segment_types == ["text"]
+    valid_media = action["action"] == "send_group_forward_msg"
+    if (valid_text and not fail_primary) or (valid_media and not fail_media):
         return {
             "status": "ok",
             "retcode": 0,
@@ -113,6 +116,16 @@ def _assert_text_action(action: dict, expected_text: str) -> None:
     assert isinstance(action["echo"]["seq"], int)
 
 
+def _assert_forward_action(action: dict) -> None:
+    assert action["action"] == "send_group_forward_msg"
+    nodes = action["params"]["messages"]
+    assert len(nodes) == 1
+    image = nodes[0]["data"]["content"][0]
+    assert image["type"] == "image"
+    assert image["data"]["file"].startswith("base64://")
+    assert isinstance(action["echo"]["seq"], int)
+
+
 async def _wait_for_api_client(adapter) -> None:
     for _ in range(100):
         if SELF_ID in adapter.bot._wsr_api_clients:
@@ -121,9 +134,11 @@ async def _wait_for_api_client(adapter) -> None:
     pytest.fail("reverse WebSocket API client was not registered")
 
 
-async def _exchange(runtime, operation, *, fail_valid_text: bool = False):
+async def _exchange(
+    runtime, operation, *, fail_primary: bool = False, fail_media: bool = False,
+):
     task = None
-    action = None
+    actions = []
     app = runtime.adapter.bot.server_app
     try:
         async with app.test_app():
@@ -134,17 +149,30 @@ async def _exchange(runtime, operation, *, fail_valid_text: bool = False):
             ) as websocket:
                 await _wait_for_api_client(runtime.adapter)
                 task = asyncio.create_task(operation())
-                action = await asyncio.wait_for(websocket.receive_json(), timeout=1)
-                await websocket.send_json(
-                    _response(action, fail_valid_text=fail_valid_text)
-                )
+                while not task.done():
+                    receiver = asyncio.create_task(websocket.receive_json())
+                    done, _ = await asyncio.wait(
+                        {task, receiver}, timeout=1,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if receiver not in done:
+                        receiver.cancel()
+                        await asyncio.gather(receiver, return_exceptions=True)
+                        break
+                    action = receiver.result()
+                    actions.append(action)
+                    await websocket.send_json(_response(
+                        action,
+                        fail_primary=fail_primary,
+                        fail_media=fail_media,
+                    ))
                 result = await asyncio.wait_for(task, timeout=1)
                 await asyncio.sleep(0)
             for _ in range(20):
                 if SELF_ID not in runtime.adapter.bot._wsr_api_clients:
                     break
                 await asyncio.sleep(0)
-        return action, result
+        return actions, result
     finally:
         if task is not None and not task.done():
             task.cancel()
@@ -156,7 +184,11 @@ async def runtime(monkeypatch):
     async def no_metric(*args, **kwargs):
         return None
 
+    async def fake_base64(self):
+        return "c3ludGhldGljLWltYWdl"
+
     monkeypatch.setattr(Metric, "upload", no_metric)
+    monkeypatch.setattr(main.Comp.Image, "convert_to_base64", fake_base64)
     assert not ResultStore._futures
 
     event_queue = asyncio.Queue()
@@ -204,18 +236,20 @@ async def runtime(monkeypatch):
 async def test_plain_primary_succeeds_through_reverse_websocket(runtime):
     post = _post()
     expected = main.format_post(post, header=HEADER)
-    action, result = await _exchange(
+    actions, result = await _exchange(
         runtime,
         lambda: runtime.plugin._send_push_result(
             SESSION_ID, post, HEADER, frozenset({"tag"})
         ),
     )
 
-    _assert_text_action(action, expected)
+    _assert_text_action(actions[0], expected)
+    _assert_forward_action(actions[1])
     assert result.accepted is True
     assert result.primary_outcome == "accepted"
     assert result.primary_stage == "primary_send"
-    assert result.media_outcome == "not_applicable"
+    assert result.media_outcome == "accepted"
+    assert result.media_stage == "media_send"
     assert result.error() is None
 
 
@@ -223,15 +257,15 @@ async def test_plain_primary_succeeds_through_reverse_websocket(runtime):
 async def test_action_failed_is_reduced_to_safe_send_result(runtime, caplog):
     post = _post()
     expected = main.format_post(post, header=HEADER)
-    action, result = await _exchange(
+    actions, result = await _exchange(
         runtime,
         lambda: runtime.plugin._send_push_result(
             SESSION_ID, post, HEADER, frozenset({"tag"})
         ),
-        fail_valid_text=True,
+        fail_primary=True,
     )
 
-    _assert_text_action(action, expected)
+    _assert_text_action(actions[0], expected)
     error = result.error()
     assert result.accepted is False
     assert result.primary_outcome == "error"
@@ -241,6 +275,27 @@ async def test_action_failed_is_reduced_to_safe_send_result(runtime, caplog):
     assert str(error) == "primary_send:error:ActionFailed:retcode=1400"
     assert CANARY not in repr(result)
     assert CANARY not in str(error)
+    assert CANARY not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_media_failure_keeps_primary_accepted(runtime, caplog):
+    post = _post()
+    actions, result = await _exchange(
+        runtime,
+        lambda: runtime.plugin._send_push_result(
+            SESSION_ID, post, HEADER, frozenset({"blog"})
+        ),
+        fail_media=True,
+    )
+
+    _assert_text_action(actions[0], main.format_post(post, header=HEADER))
+    _assert_forward_action(actions[1])
+    assert result.accepted is True
+    assert result.media_outcome == "error"
+    assert result.media_stage == "media_send"
+    assert result.media_error_type == "ActionFailed"
+    assert CANARY not in repr(result)
     assert CANARY not in caplog.text
 
 
@@ -304,11 +359,12 @@ async def test_scheduler_accepts_and_marks_seen_after_real_adapter_send(
             "_fetch_snapshot_batches",
             AsyncMock(return_value=[batch]),
         ):
-            action, _ = await _exchange(
+            actions, _ = await _exchange(
                 runtime, lambda: scheduler._poll_single_session(SESSION_ID)
             )
 
-        _assert_text_action(action, main.format_post(_post(), header=HEADER))
+        _assert_text_action(actions[0], main.format_post(_post(), header=HEADER))
+        _assert_forward_action(actions[1])
         assert await _delivery_row(db) == (
             "accepted",
             None,
@@ -339,13 +395,13 @@ async def test_scheduler_backs_off_without_seen_after_adapter_failure(
             "_fetch_snapshot_batches",
             AsyncMock(return_value=[batch]),
         ):
-            action, _ = await _exchange(
+            actions, _ = await _exchange(
                 runtime,
                 lambda: scheduler._poll_single_session(SESSION_ID),
-                fail_valid_text=True,
+                fail_primary=True,
             )
 
-        _assert_text_action(action, main.format_post(_post(), header=HEADER))
+        _assert_text_action(actions[0], main.format_post(_post(), header=HEADER))
         assert await _delivery_row(db) == (
             "pending",
             None,

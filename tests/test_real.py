@@ -22,6 +22,8 @@ from core.scheduler import _enrich_blog_posts
 
 COOKIE = os.getenv("LOFTER_COOKIE", "")
 POST_URL = os.getenv("LOFTER_POST_URL", "")
+IMAGE_POST_URL = os.getenv("LOFTER_IMAGE_POST_URL", "")
+IMAGE_EXPECTED_COUNT = os.getenv("LOFTER_IMAGE_EXPECTED_COUNT", "")
 TAG = os.getenv("LOFTER_TAG", "")
 BLOG = os.getenv("LOFTER_BLOG", "")
 RUN_LIVE = os.getenv("LOFTER_RUN_LIVE") == "1"
@@ -73,6 +75,23 @@ async def test_real_parse_post():
     print(f"[images]   {len(post.images)} 张: {post.images}")
     print(f"[summary 前100字] {post.summary[:100] if post.summary else ''}")
     assert post.post_id, "未能提取 post_id"
+
+
+@pytest.mark.asyncio
+@skip_if_missing(IMAGE_POST_URL)
+async def test_real_default_source_image_post():
+    async with _live_source() as source:
+        post = await source.get_post(IMAGE_POST_URL)
+    expected_count = int(IMAGE_EXPECTED_COUNT) if IMAGE_EXPECTED_COUNT else None
+    print(
+        f"[image source] {post.source} known={'images' in post.completeness} "
+        f"count={len(post.images)}"
+    )
+    assert post.source == "mobile_detail"
+    assert "images" in post.completeness
+    assert post.images
+    if expected_count is not None:
+        assert len(post.images) == expected_count
 
 
 @pytest.mark.asyncio

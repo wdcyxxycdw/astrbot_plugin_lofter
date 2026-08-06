@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from core.errors import (
+    PostEvidenceError,
     SourceBusinessError,
     SourceChallengeError,
     SourceClosingError,
@@ -159,6 +160,95 @@ def test_detail_maps_json_encoded_photo_fields():
     assert "images" in post.completeness
 
 
+def test_detail_maps_first_image_url_with_detail_provenance():
+    images = [
+        "https://media.example.invalid/one.jpg",
+        "https://media.example.invalid/two.jpg",
+    ]
+    item = _nested_detail_item(photoLinks=None, firstImageUrl=json.dumps(images))
+
+    post = parse_mobile_post_detail({
+        "meta": {"status": 200, "msg": "demo"},
+        "response": {"posts": [item]},
+    })
+
+    assert post.images == images
+    assert "images" in post.completeness
+    assert post.provenance["images"] == "mobile_detail"
+
+
+def test_detail_image_aliases_must_match_in_order():
+    images = ["https://media.example.invalid/one.jpg"]
+    item = _nested_detail_item(
+        photoLinks=images,
+        firstImageUrl=json.dumps(images),
+    )
+
+    post = parse_mobile_post_detail({
+        "meta": {"status": 200, "msg": "demo"},
+        "response": {"posts": [item]},
+    })
+
+    assert post.images == images
+
+
+def test_detail_rejects_conflicting_image_aliases():
+    item = _nested_detail_item(
+        photoLinks=["https://media.example.invalid/one.jpg"],
+        firstImageUrl='["https://media.example.invalid/two.jpg"]',
+    )
+
+    with pytest.raises(PostEvidenceError) as exc_info:
+        parse_mobile_post_detail({
+            "meta": {"status": 200, "msg": "demo"},
+            "response": {"posts": [item]},
+        })
+
+    assert exc_info.value.diagnostic == "alias_value_conflict:images:mobile_image_aliases"
+
+
+@pytest.mark.parametrize(
+    ("value", "known"), [(None, False), ("[]", True)],
+)
+def test_detail_first_image_url_handles_null_and_known_empty(value, known):
+    item = _nested_detail_item(photoLinks=None, firstImageUrl=value)
+
+    post = parse_mobile_post_detail({
+        "meta": {"status": 200, "msg": "demo"},
+        "response": {"posts": [item]},
+    })
+
+    assert post.images == []
+    assert ("images" in post.completeness) is known
+
+
+def test_detail_rejects_malformed_first_image_url():
+    item = _nested_detail_item(photoLinks=None, firstImageUrl="[not-json")
+
+    with pytest.raises(SourceSchemaError) as exc_info:
+        parse_mobile_post_detail({
+            "meta": {"status": 200, "msg": "demo"},
+            "response": {"posts": [item]},
+        })
+
+    assert exc_info.value.location == "firstImageUrl"
+
+
+def test_detail_rejects_oversized_first_image_url():
+    item = _nested_detail_item(
+        photoLinks=None,
+        firstImageUrl=json.dumps(["https://img.invalid/" + "x" * MAX_URL_BYTES]),
+    )
+
+    with pytest.raises(SourceLimitError) as exc_info:
+        parse_mobile_post_detail({
+            "meta": {"status": 200, "msg": "demo"},
+            "response": {"posts": [item]},
+        })
+
+    assert (exc_info.value.resource, exc_info.value.limit) == ("url", MAX_URL_BYTES)
+
+
 def test_detail_rejects_malformed_json_encoded_photo_fields():
     item = _nested_detail_item(photoLinks="[not-json")
     payload = {
@@ -213,6 +303,10 @@ def test_blog_fixture_maps_posts_and_offset():
     assert page.mapped_count == 1
     assert page.dropped_count == 0
     assert page.complete is True
+    post = page.items[0]
+    assert post.images == ["https://media.example.invalid/demo.jpg"]
+    assert "images" in post.completeness
+    assert post.provenance["images"] == "mobile_blog"
 
 
 def test_tag_fixture_maps_exact_post_data_contract():

@@ -8,6 +8,7 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
 
 from .errors import (
+    PostEvidenceError,
     SourceBusinessError,
     SourceChallengeError,
     SourceLimitError,
@@ -283,12 +284,10 @@ def _map_detail_fields(
     content_known = isinstance(post.get("content"), str)
     digest_known = isinstance(post.get("digest"), str)
     tags_known = "tag" in post and post["tag"] is not None
-    images_known = "photoLinks" in post and post["photoLinks"] is not None
+    images, images_known = _detail_images(post)
     content = _optional_string(post, "content", MAX_CONTENT_BYTES, "content")
     digest = _optional_string(post, "digest", MAX_CONTENT_BYTES, "content")
     tags = _tags(post.get("tag"))
-    photo_links = post.get("photoLinks")
-    images = [] if photo_links is None else _url_list(photo_links, "photoLinks")
     _string_list(post.get("photoCaptions", []), "photoCaptions")
     username = _blog_username(blog, url)
     known = {"title", "author", "publish_time", "url"}
@@ -598,6 +597,21 @@ def _tags(value: Any) -> list[str]:
     else:
         raise SourceSchemaError("tag")
     return [_bounded_string(item, MAX_TITLE_BYTES, "tags") for item in values]
+
+
+def _detail_images(post: Mapping[str, Any]) -> tuple[list[str], bool]:
+    aliases = [
+        (key, post[key]) for key in ("photoLinks", "firstImageUrl")
+        if key in post and post[key] is not None
+    ]
+    if not aliases:
+        return [], False
+    images = [_url_list(value, key) for key, value in aliases]
+    if len(images) == 2 and images[0] != images[1]:
+        raise PostEvidenceError(
+            "alias_value_conflict", "images", "mobile_image_aliases"
+        )
+    return images[0], True
 
 
 def _url_list(value: Any, location: str) -> list[str]:

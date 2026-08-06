@@ -108,6 +108,43 @@ def test_reply_link_is_ignored_when_body_has_no_text():
     assert text == ""
 
 
+def test_qq_auto_parse_images_use_truncated_nodes_before_long_body():
+    main = _load_main_module()
+    main.Comp = _message_components()
+    images = [f"https://img/{index}.jpg" for index in range(3)]
+    post = Post(
+        post_id="abc_123", title="标题", summary="摘要", images=images,
+        content="正文" * 300, url="https://demo.lofter.com/post/abc_123",
+        completeness=frozenset({"title", "summary", "content", "images", "url"}),
+    )
+
+    chain = main._auto_post_result(
+        _auto_event(group_id="group", private=False), post, 2
+    )
+
+    assert [type(item) for item in chain] == [
+        FakePlainComponent, FakeNodesComponent
+    ]
+    assert [node.content[0].url for node in chain[1].nodes] == images[:2]
+
+
+def test_qq_private_image_post_uses_plain_and_nodes():
+    main = _load_main_module()
+    main.Comp = _message_components()
+    post = Post(
+        post_id="abc_123", title="标题", summary="摘要",
+        images=["https://img/1.jpg"],
+        url="https://demo.lofter.com/post/abc_123",
+        completeness=frozenset({"title", "summary", "images", "url"}),
+    )
+
+    chain = main._auto_post_result(_auto_event(private=True), post, 3)
+
+    assert [type(item) for item in chain] == [
+        FakePlainComponent, FakeNodesComponent
+    ]
+
+
 def test_qq_group_long_post_uses_plain_then_nodes_with_self_uin():
     main = _load_main_module()
     main.Comp = _message_components()

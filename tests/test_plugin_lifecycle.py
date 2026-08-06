@@ -521,10 +521,15 @@ async def test_send_push_qq_tag_without_images_uses_plain_only():
 
 
 @pytest.mark.asyncio
-async def test_send_push_qq_blog_uses_plain_only():
+async def test_send_push_qq_blog_uses_plain_and_all_image_nodes():
     main = _load_main_module()
     main.Comp = SimpleNamespace(
         Plain=lambda text: SimpleNamespace(kind="plain", text=text),
+        Image=SimpleNamespace(
+            fromURL=lambda url: SimpleNamespace(kind="image", url=url)
+        ),
+        Node=lambda **kwargs: SimpleNamespace(kind="node", **kwargs),
+        Nodes=lambda **kwargs: SimpleNamespace(kind="nodes", **kwargs),
     )
     main.MessageChain = lambda components: SimpleNamespace(chain=components)
     platform = SimpleNamespace(meta=lambda: SimpleNamespace(name="aiocqhttp"))
@@ -547,10 +552,13 @@ async def test_send_push_qq_blog_uses_plain_only():
         frozenset({"blog"}),
     )
 
-    chain = context.send_message.await_args.args[1].chain
-    assert len(chain) == 1
-    assert chain[0].kind == "plain"
-    assert chain[0].text == format_post(post, header="【博主新内容】")
+    assert context.send_message.await_count == 2
+    primary = context.send_message.await_args_list[0].args[1].chain
+    media = context.send_message.await_args_list[1].args[1].chain
+    assert [item.kind for item in primary] == ["plain"]
+    assert primary[0].text == format_post(post, header="【博主新内容】")
+    assert [item.kind for item in media] == ["nodes"]
+    assert [node.content[0].url for node in media[0].nodes] == post.images
 
 
 @pytest.mark.asyncio

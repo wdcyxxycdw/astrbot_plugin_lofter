@@ -4,7 +4,7 @@
 
 AstrBot 插件，功能：自动解析 Lofter 帖子链接、订阅标签/博主并定时推送、搜索标签内容、统计标签表达式，以及按会话屏蔽作者。
 
-当前插件版本为 v2.0.11，数据库 Schema 为 v5。
+当前插件版本为 v2.0.12，数据库 Schema 为 v5。
 
 ## 文件结构
 
@@ -66,7 +66,7 @@ core/
 - 所有来源 observation 都保留为 evidence，用于 canonical ID、URL、owner 和字段冲突验证。
 - restart 默认要求新 scope 覆盖旧业务 identity；仅 Mobile 标签 cursor 切换到 DWR offset 0 时开启新业务 scope，旧 Mobile items 不再构成 DWR coverage obligation，也不与 DWR 业务结果拼接。
 - explicit dropped/unmapped `evidence_items` 始终保留为 coverage obligation，不因 scope 切换消失。
-- canonical ID、URL、owner、字段别名和重复 occurrence 发生冲突时 fail closed。
+- canonical ID、URL、owner、字段别名和重复 occurrence 发生冲突时 fail closed；Mobile detail 图片仅接受 `photoLinks`/`firstImageUrl`，两个别名必须解析为相同有序列表。
 
 HTTP client 使用长生命周期 `aiohttp.ClientSession` 和 `DummyCookieJar`：
 
@@ -220,7 +220,7 @@ Claim transaction：
 发送在 gate 外进行：
 
 - tag/blog 共用同一个 session queue；每轮合计最多 5 次 delivery `send_func` 调用。
-- 非 QQ callback 保持一次平台发送；QQ blog 和无图 tag 只发送 Plain 文本预览；QQ 有图 tag 在同一 callback 中先发送 Plain 文本预览，再发送包含全部图片的 Nodes sidecar，因此最多产生两条平台消息。
+- 非 QQ callback 保持一次平台发送；QQ 有可信图片的 tag/blog 均在同一 callback 中先发送 Plain 文本预览，再发送包含全部图片的 Nodes sidecar。QQ 自动解析图片帖为 Plain 加最多 `max_images` 图片 Nodes，优先于长正文 Nodes。
 - 每条成功立即独立 ack；第 N 条失败后停止本 session 本轮 drain。
 - scheduler 仅在 `send_func` 严格返回 `True` 时 accepted，并为 ack 时仍有效的全部 sources 写 seen。
 - QQ callback 只由 Plain primary 决定 acceptance；Nodes 明确 rejected/error 时单独报告，delivery 仍 accepted，不重试已成功的 primary。
@@ -284,6 +284,6 @@ Claim transaction：
 
 ## QQ adapter 契约测试
 
-QQ 主消息使用 `Plain` 文本，包含格式化后的标题、作者、标签、摘要和 canonical URL；自动解析和命令预览同样不使用 OneBot `share` segment。标签帖子有图片时，primary 成功后再发送现有 `Nodes` sidecar。
+QQ 主消息使用 `Plain` 文本，包含格式化后的标题、作者、标签、摘要和 canonical URL；自动解析和命令预览同样不使用 OneBot `share` segment。tag/blog 帖子有图片时，primary 成功后再发送现有 `Nodes` sidecar。
 
 `adapter_contract` 测试使用固定版本的真实 AstrBot/aiocqhttp 和进程内 reverse WebSocket fake，验证 `Context.send_message → AiocqhttpAdapter → OneBot action/echo → PushSendResult → delivery ack/backoff`。它不绑定端口、不访问外网、不登录 QQ、不发送真实消息，也不属于九步 `/lofter test`。

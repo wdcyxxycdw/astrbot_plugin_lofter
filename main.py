@@ -51,18 +51,16 @@ def _validated_int_config(
     return clamped
 
 
-def _qq_image_nodes(post: Post):
+def _qq_image_nodes(post: Post, images: list[str] | None = None):
     name = post.author if post.has_fields({"author"}) and post.author else "Lofter"
+    urls = visible_images(post) if images is None else images
     return Comp.Nodes(nodes=[
         Comp.Node(content=[Comp.Image.fromURL(url)], name=name, uin="0")
-        for url in visible_images(post)
+        for url in urls
     ])
 
 
-def _post_components(
-    post: Post, header: str, source_types: frozenset[str],
-    is_qq: bool, max_images: int,
-):
+def _post_components(post: Post, header: str, is_qq: bool, max_images: int):
     if not is_qq:
         chain = [Comp.Plain(format_post(post, header=header))]
         chain.extend(
@@ -71,7 +69,7 @@ def _post_components(
         )
         return chain
     chain = [Comp.Plain(format_post(post, header=header))]
-    if "tag" in source_types and visible_images(post):
+    if visible_images(post):
         chain.append(_qq_image_nodes(post))
     return chain
 
@@ -89,10 +87,8 @@ def _push_primary_components(
     return chain
 
 
-def _push_media_components(
-    post: Post, source_types: frozenset[str], is_qq: bool,
-):
-    if not is_qq or "tag" not in source_types or not visible_images(post):
+def _push_media_components(post: Post, is_qq: bool):
+    if not is_qq or not visible_images(post):
         return None
     return [_qq_image_nodes(post)]
 
@@ -142,6 +138,10 @@ def _auto_post_result(event: AstrMessageEvent, post: Post, max_images: int):
         chain.extend(Comp.Image.fromURL(url) for url in images)
         return event.chain_result(chain)
     chain = [Comp.Plain(format_post(post))]
+    images = visible_images(post)[:max_images]
+    if images:
+        chain.append(_qq_image_nodes(post, images))
+        return event.chain_result(chain)
     content = post.content if post.has_fields({"content"}) else ""
     if content and len(content) > 500 and event.get_group_id() and not event.is_private_chat():
         name = post.author if post.has_fields({"author"}) and post.author else "Lofter"
@@ -167,7 +167,7 @@ async def _search_unique_posts(source: ContentSource, keyword: str, limit: int):
     "astrbot_plugin_lofter",
     "user",
     "解析 Lofter 链接，订阅 Lofter 标签/博主，搜索 Lofter 内容，支持标签表达式统计",
-    "v2.0.11",
+    "v2.0.12",
 )
 class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -290,19 +290,13 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             return _push_error("primary_send", exc)
         if primary_result is False:
             return PushSendResult("rejected", "primary_send")
-        return await self._send_push_media(
-            session_id, post, source_types, is_qq
-        )
+        return await self._send_push_media(session_id, post, is_qq)
 
     async def _send_push_media(
-        self,
-        session_id: str,
-        post: Post,
-        source_types: frozenset[str],
-        is_qq: bool,
+        self, session_id: str, post: Post, is_qq: bool,
     ) -> PushSendResult:
         try:
-            media = _push_media_components(post, source_types, is_qq)
+            media = _push_media_components(post, is_qq)
         except Exception as exc:
             return _media_error("media_build", exc)
         if media is None:
@@ -578,7 +572,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         for post in posts[:3]:
             header = f"【标签「{subscribes[0]}」有新内容】"
             chain = _post_components(
-                post, header, frozenset({"tag"}), is_qq, self._max_images
+                post, header, is_qq, self._max_images
             )
             yield event.chain_result(chain)
 
