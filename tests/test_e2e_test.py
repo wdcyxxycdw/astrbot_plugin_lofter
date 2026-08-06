@@ -100,6 +100,7 @@ class _OfflineSource:
         dwr_error: BaseException | None = None,
         production_error: BaseException | None = None,
         detail_errors: dict[str, BaseException] | None = None,
+        detail_posts: dict[str, Post] | None = None,
         blog_error: BaseException | None = None,
         production_diagnostics: tuple[str, ...] = (),
         mobile_counts: tuple[int, int, int, int, int] = (0, 0, 0, 0, 0),
@@ -112,6 +113,7 @@ class _OfflineSource:
         self.dwr_error = dwr_error
         self.production_error = production_error
         self.detail_errors = detail_errors or {}
+        self.detail_posts = detail_posts or {}
         self.blog_error = blog_error
         self.production_diagnostics = production_diagnostics
         self.mobile_counts = mobile_counts
@@ -163,7 +165,7 @@ class _OfflineSource:
         error = self.detail_errors.get(url)
         if error is not None:
             raise error
-        post = self.posts.get(url)
+        post = self.detail_posts.get(url, self.posts.get(url))
         if post is None:
             raise SourceSchemaError("post.url")
         return post
@@ -310,6 +312,52 @@ async def test_nine_step_health_check_uses_independent_probes_and_production_flo
         baseline.summary,
     ):
         assert secret not in report
+
+
+@pytest.mark.asyncio
+async def test_zero_photo_list_evidence_survives_unknown_detail_in_full_flow():
+    baseline = _post("1a_1", publish_time="2026-08-01 11:00:00")
+    candidate = replace(
+        _post("1a_2"),
+        images=[],
+        source="mobile_tag",
+        provenance={
+            **_post("1a_2").provenance,
+            "images": "mobile_tag",
+        },
+    )
+    detail = replace(
+        candidate,
+        source="mobile_detail",
+        completeness=candidate.completeness - {"images"},
+        provenance={
+            name: value
+            for name, value in candidate.provenance.items()
+            if name != "images"
+        },
+    )
+    source = _OfflineSource(
+        [baseline],
+        [candidate],
+        production=[baseline, candidate],
+        detail_posts={candidate.url: detail},
+    )
+    runner, send, scheduler_task = await _runner(source)
+
+    try:
+        results = await runner.run_all("qq:real-session")
+    finally:
+        await _stop(scheduler_task)
+
+    by_key = _by_key(results)
+    assert by_key["fixture_detail"].status == "pass"
+    assert by_key["fixture_detail"].facts["fixture_provider"] == "production"
+    assert by_key["blog"].status == "pass"
+    assert by_key["warmup_pending"].status == "pass"
+    assert by_key["claim_send_ack_seen"].status == "pass"
+    send.assert_awaited_once()
+    assert send.await_args.args[1].images == []
+    assert "images" in send.await_args.args[1].completeness
 
 
 @pytest.mark.asyncio
@@ -475,6 +523,53 @@ async def test_dwr_fixture_accepts_distinct_detail_summaries():
         "private-detail-summary-b",
     ):
         assert secret not in report
+
+
+@pytest.mark.asyncio
+async def test_dwr_fixture_preserves_list_summary_when_detail_summary_is_empty():
+    first = replace(
+        _post("1a_1", publish_time="2026-08-01 11:00:00"),
+        summary="private-list-summary-a",
+        source="dwr",
+        provenance={**_post("1a_1").provenance, "summary": "dwr"},
+    )
+    second = replace(
+        _post("1a_2"),
+        summary="private-list-summary-b",
+        source="dwr",
+        provenance={**_post("1a_2").provenance, "summary": "dwr"},
+    )
+    details = {
+        post.url: replace(
+            post,
+            summary="",
+            source="mobile_detail",
+            provenance={**post.provenance, "summary": "mobile_detail"},
+        )
+        for post in (first, second)
+    }
+    source = _OfflineSource(
+        [],
+        [first, second],
+        production=[],
+        detail_posts=details,
+    )
+    runner, send, scheduler_task = await _runner(source)
+
+    try:
+        results = await runner.run_all("qq:real-session")
+    finally:
+        await _stop(scheduler_task)
+
+    by_key = _by_key(results)
+    assert by_key["fixture_detail"].status == "pass"
+    assert by_key["fixture_detail"].facts["fixture_provider"] == "dwr"
+    assert by_key["claim_send_ack_seen"].status == "pass"
+    send.assert_awaited_once()
+    assert send.await_args.args[1].summary == "private-list-summary-b"
+    report = format_report(results)
+    assert "private-list-summary-a" not in report
+    assert "private-list-summary-b" not in report
 
 
 @pytest.mark.asyncio

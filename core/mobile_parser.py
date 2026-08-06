@@ -356,10 +356,13 @@ def _map_tag_fields(
     known = {"title", "publish_time", "url"}
     if identity.owner:
         known.add("author_username")
+    if photo_count == 0:
+        known.add("images")
     return Post(
         post_id=identity.post_id,
         title=_required_string(view, "title", MAX_TITLE_BYTES, "title"),
         summary="",
+        images=[],
         author_username=identity.owner,
         url=identity.url,
         publish_time=_publish_time(view.get("publishTime", _MISSING)),

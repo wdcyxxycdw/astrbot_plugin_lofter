@@ -26,6 +26,7 @@ from core.mobile_parser import (
     parse_mobile_tag_page,
 )
 from core.parser import Post
+from core.post_fields import merge_post_fields
 
 FIXTURES = Path(__file__).parent / "fixtures" / "lofter"
 
@@ -223,6 +224,38 @@ def test_tag_fixture_maps_exact_post_data_contract():
     assert page.items[0].author_username == "demo"
     assert page.items[0].summary == ""
     assert page.next_cursor == "20"
+
+
+@pytest.mark.parametrize(
+    ("photo_count", "images_known"),
+    [(0, True), (1, False)],
+)
+def test_tag_photo_count_only_proves_known_empty_images(
+    photo_count, images_known
+):
+    post = parse_mobile_tag_page(
+        _tag_payload([_tag_item(photoCount=photo_count)])
+    ).items[0]
+
+    assert post.images == []
+    assert ("images" in post.completeness) is images_known
+
+
+def test_zero_photo_tag_evidence_survives_unknown_detail_images():
+    base = parse_mobile_tag_page(
+        _tag_payload([_tag_item(photoCount=0)])
+    ).items[0]
+    detail_item = _detail_item(photoLinks=None)
+    detail = parse_mobile_post_detail({
+        "meta": {"status": 200, "msg": "demo"},
+        "response": {"posts": [detail_item]},
+    })
+
+    merged = merge_post_fields(base, detail)
+
+    assert merged.images == []
+    assert "images" in merged.completeness
+    assert merged.provenance["images"] == "mobile_tag"
 
 
 def test_tag_maps_current_permalink_slug():
