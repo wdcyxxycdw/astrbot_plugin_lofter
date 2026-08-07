@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .formatter import format_post, visible_images
+from .formatter import format_post
 
 
 def format_subscription_line(index: int, sub: Any) -> str:
@@ -56,13 +56,10 @@ def format_index_remove_result(ok: bool, index: int, sub: Any) -> str:
 
 def format_post_for_tool(post: Any, include_time: bool = False, max_images: int = 3) -> str:
     text = format_post(post, include_time=include_time)
-    images = visible_images(post)
-    if not images:
+    if not post.images:
         return text
-    image_lines = "\n".join(
-        f"图片：{url}" for url in images[:max_images]
-    )
-    return f"{text}\n{image_lines}"
+    images = "\n".join(f"图片：{url}" for url in post.images[:max_images])
+    return f"{text}\n{images}"
 
 
 def unknown_action(tool_name: str, actions: tuple[str, ...]) -> str:

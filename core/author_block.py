@@ -2,9 +2,7 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from .db import LofterDB
-from .errors import SourceSchemaError
 from .parser import Post
-from .session_gate import SessionGateRegistry
 
 AuthorBlockKey = tuple[str, str, str]
 
@@ -43,28 +41,14 @@ def normalize_author_query(raw: str) -> list[AuthorBlockKey]:
 
 
 def is_author_blocked(post: Post, blocks: list[AuthorBlock]) -> bool:
-    author_known = post.has_fields({"author"})
-    username_known = post.has_fields({"author_username"})
-    author = _norm(post.author) if author_known else ""
-    username = _norm(post.author_username) if username_known else ""
+    author = _norm(post.author)
+    username = _norm(post.author_username)
     for block in blocks:
         if block.kind == "name" and author and author == block.value:
             return True
         if block.kind == "username" and username and username == block.value:
             return True
-    required = required_author_fields(blocks)
-    if required and not post.has_fields(required):
-        raise SourceSchemaError("author")
     return False
-
-
-def required_author_fields(blocks: list[AuthorBlock]) -> set[str]:
-    fields: set[str] = set()
-    if any(block.kind == "name" for block in blocks):
-        fields.add("author")
-    if any(block.kind == "username" for block in blocks):
-        fields.add("author_username")
-    return fields
 
 
 def filter_blocked_posts(posts: list[Post], blocks: list[AuthorBlock]) -> tuple[list[Post], list[Post]]:
@@ -79,21 +63,22 @@ def filter_blocked_posts(posts: list[Post], blocks: list[AuthorBlock]) -> tuple[
 
 
 class AuthorBlockStorage:
-    def __init__(
-        self, db: LofterDB, gates: SessionGateRegistry | None = None
-    ):
+    def __init__(self, db: LofterDB):
         self._db = db
-        self._gates = gates or SessionGateRegistry()
 
     async def add(self, session_id: str, raw: str) -> bool:
-        keys = normalize_author_query(raw)
-        async with self._gates.hold(session_id):
-            return await self._db.mutate_author_blocks(session_id, keys, True)
+        added = False
+        for kind, value, display in normalize_author_query(raw):
+            ok = await self._db.add_author_block(session_id, kind, value, display)
+            added = added or ok
+        return added
 
     async def remove(self, session_id: str, raw: str) -> bool:
-        keys = normalize_author_query(raw)
-        async with self._gates.hold(session_id):
-            return await self._db.mutate_author_blocks(session_id, keys, False)
+        removed = False
+        for kind, value, _ in normalize_author_query(raw):
+            ok = await self._db.remove_author_block(session_id, kind, value)
+            removed = removed or ok
+        return removed
 
     async def list_by_session(self, session_id: str) -> list[AuthorBlock]:
         rows = await self._db.list_author_blocks(session_id)

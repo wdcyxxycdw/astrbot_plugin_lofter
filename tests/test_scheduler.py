@@ -1,17 +1,11 @@
-import asyncio
-
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, patch
 
 from core.db import LofterDB
-from core.errors import SourceSchemaError
 from core.parser import Post
-from core.source_scan import SourcePage
 from core.scheduler import (
     SubscriptionScheduler,
-    fetch_blog_posts,
-    fetch_tag_posts,
     _check_tag_session,
     _check_blog_sub,
     _enrich_blog_posts,
@@ -21,8 +15,7 @@ from core.scheduler import (
 )
 from core.author_block import AuthorBlockStorage
 from core.filter import FilterRule
-from core.formatter import format_post, visible_images
-from core.storage import Subscription, SubscriptionStorage
+from core.storage import Subscription
 
 RICH_HTML = """\
 <!DOCTYPE html><html><head>
@@ -35,7 +28,6 @@ BARE_POST = Post(
     title="",
     summary="",
     url="https://user.lofter.com/post/abc123",
-    publish_time="2026-07-29 05:00:00",
 )
 
 
@@ -49,24 +41,6 @@ async def db(tmp_path):
 
 def _make_sub(target: str, role: str = "subscribe", sub_type: str = "tag", session_id: str = "sess1") -> Subscription:
     return Subscription(id=1, session_id=session_id, type=sub_type, role=role, target=target)
-
-
-async def _enrich_with_blocked_p2(posts, _client):
-    return [
-        Post(
-            post_id=post.post_id,
-            title=post.title,
-            summary=post.summary,
-            url=post.url,
-            author_username=(
-                "blockeduser" if post.post_id == "p2" else ""
-            ),
-            completeness=frozenset({
-                "title", "summary", "url", "author_username",
-            }),
-        )
-        for post in posts
-    ]
 
 
 def test_scheduler_requires_explicit_block_storage(db):
@@ -93,16 +67,10 @@ def test_scheduler_requires_explicit_block_storage(db):
 
 @pytest.mark.asyncio
 async def test_enrich_success():
-    source = AsyncMock()
-    source.get_post.return_value = Post(
-        post_id="abc123",
-        title="帖子标题",
-        author="作者名",
-        summary="这是摘要",
-        url=BARE_POST.url,
-    )
+    client = AsyncMock()
+    client.get.return_value = RICH_HTML
 
-    result = await _enrich_blog_posts([BARE_POST], source)
+    result = await _enrich_blog_posts([BARE_POST], client)
 
     assert len(result) == 1
     assert result[0].title == "帖子标题"
@@ -112,70 +80,11 @@ async def test_enrich_success():
 
 
 @pytest.mark.asyncio
-async def test_enrich_preserves_base_url_time_and_provenance():
-    base = Post(
-        post_id="abc123",
-        title="",
-        summary="",
-        url="https://user.lofter.com/post/abc123",
-        publish_time="2026-07-29 05:00:00",
-        source="mobile_blog",
-        completeness=frozenset({"url", "publish_time"}),
-        provenance={
-            "url": "mobile_blog",
-            "publish_time": "mobile_blog",
-        },
-    )
-    detail = Post(
-        post_id="abc123",
-        title="详情标题",
-        summary="",
-        url=base.url,
-        publish_time=base.publish_time,
-        source="embedded_json",
-        completeness=frozenset({"title", "url", "publish_time"}),
-        provenance={
-            "title": "embedded_json",
-            "url": "embedded_json",
-            "publish_time": "embedded_json",
-        },
-    )
-    source = AsyncMock()
-    source.get_post.return_value = detail
-
-    result = await _enrich_blog_posts([base], source)
-
-    assert result[0].title == "详情标题"
-    assert result[0].url == base.url
-    assert result[0].publish_time == base.publish_time
-    assert result[0].provenance["url"] == "mobile_blog"
-    assert result[0].provenance["publish_time"] == "mobile_blog"
-
-
-@pytest.mark.asyncio
-async def test_enrich_post_identity_mismatch_is_not_masked():
-    source = AsyncMock()
-    source.get_post.return_value = Post(
-        post_id="different", title="wrong", summary="", url=BARE_POST.url
-    )
-    with pytest.raises(SourceSchemaError):
-        await _enrich_blog_posts([BARE_POST], source)
-
-
-@pytest.mark.asyncio
-async def test_enrich_parser_identity_mismatch_is_not_masked():
-    source = AsyncMock()
-    source.get_post.side_effect = SourceSchemaError("embedded.post.id")
-    with pytest.raises(SourceSchemaError):
-        await _enrich_blog_posts([BARE_POST], source)
-
-
-@pytest.mark.asyncio
 async def test_enrich_fallback_on_error():
-    source = AsyncMock()
-    source.get_post.side_effect = Exception("source error")
+    client = AsyncMock()
+    client.get.side_effect = Exception("network error")
 
-    result = await _enrich_blog_posts([BARE_POST], source)
+    result = await _enrich_blog_posts([BARE_POST], client)
 
     assert len(result) == 1
     assert result[0].post_id == "abc123"
@@ -199,43 +108,25 @@ FULL_POST = Post(
 
 @pytest.mark.asyncio
 async def test_push_tag_label():
-    send = AsyncMock(return_value=True)
+    send = AsyncMock()
     await _push_tag_posts("sess1", [FULL_POST], TAG_RULE, send)
-    header = send.call_args.args[2]
-    assert header == "【标签「原创」有新内容】"
-    assert send.call_args.args[1] is FULL_POST
-    assert send.call_args.args[3] == frozenset({"tag"})
-
-
-@pytest.mark.asyncio
-async def test_push_tag_label_uses_actual_target_source():
-    send = AsyncMock(return_value=True)
-    rule = FilterRule(search_tags=["A", "B"])
-
-    await _push_tag_posts(
-        "sess1", [FULL_POST], rule, send,
-        sources={FULL_POST.post_id: {"B"}},
-    )
-
-    header = send.call_args.args[2]
-    assert header == "【标签「B」有新内容】"
+    text = send.call_args[0][1]
+    assert "【标签「原创」有新内容】" in text
 
 
 @pytest.mark.asyncio
 async def test_push_blog_label():
-    send = AsyncMock(return_value=True)
+    send = AsyncMock()
     await _push_blog_post("sess1", FULL_POST, "someuser", send)
-    assert send.call_args.args[2] == "【博主「someuser」有新内容】"
-    assert send.call_args.args[1] is FULL_POST
-    assert send.call_args.args[3] == frozenset({"blog"})
+    text = send.call_args[0][1]
+    assert "【博主「someuser」有新内容】" in text
 
 
 @pytest.mark.asyncio
 async def test_push_includes_author_summary_tags_url():
-    send = AsyncMock(return_value=True)
+    send = AsyncMock()
     await _push_tag_posts("sess1", [FULL_POST], TAG_RULE, send)
-    post = send.call_args.args[1]
-    text = format_post(post, header=send.call_args.args[2])
+    text = send.call_args[0][1]
     assert "作者：作者名" in text
     assert "这是摘要" in text
     assert "#原创" in text
@@ -244,61 +135,38 @@ async def test_push_includes_author_summary_tags_url():
 
 @pytest.mark.asyncio
 async def test_push_includes_images():
-    send = AsyncMock(return_value=True)
+    send = AsyncMock()
     await _push_tag_posts("sess1", [FULL_POST], TAG_RULE, send)
-    post = send.call_args.args[1]
-    assert visible_images(post) == FULL_POST.images
-
-
-@pytest.mark.asyncio
-async def test_push_does_not_send_unknown_images():
-    send = AsyncMock(return_value=True)
-    post = Post(
-        post_id="p-hidden-image",
-        title="Demo",
-        summary="",
-        images=["https://secret.example/image.jpg"],
-        url="https://u.lofter.com/post/p-hidden-image",
-        completeness=frozenset({"title", "url"}),
-    )
-
-    await _push_tag_posts("sess1", [post], TAG_RULE, send)
-
-    assert visible_images(send.call_args.args[1]) == []
+    images = send.call_args[0][2]
+    assert images == FULL_POST.images
 
 
 @pytest.mark.asyncio
 async def test_push_no_title_shows_placeholder():
-    send = AsyncMock(return_value=True)
-    post = Post(
-        post_id="p2",
-        title="",
-        summary="有摘要",
-        url="https://u.lofter.com/post/p2",
-        completeness=frozenset({"title", "summary", "url"}),
-    )
+    send = AsyncMock()
+    post = Post(post_id="p2", title="", summary="有摘要", url="https://u.lofter.com/post/p2")
     await _push_tag_posts("sess1", [post], TAG_RULE, send)
-    sent_post = send.call_args.args[1]
-    text = format_post(sent_post, header=send.call_args.args[2])
+    text = send.call_args[0][1]
     assert "(无标题)" in text
 
 
 @pytest.mark.asyncio
 async def test_push_reversed_order():
-    send = AsyncMock(return_value=True)
+    send = AsyncMock()
     posts = [
         Post(post_id=f"p{i}", title=f"帖子{i}", summary="", url=f"https://u.lofter.com/post/p{i}")
         for i in range(3)
     ]
     await _push_tag_posts("sess1", posts, TAG_RULE, send)
     calls = send.call_args_list
-    titles = [call.args[1].title for call in calls]
-    assert titles == ["帖子2", "帖子1", "帖子0"]
+    titles = [c[0][1] for c in calls]
+    assert "帖子2" in titles[0]
+    assert "帖子0" in titles[2]
 
 
 @pytest.mark.asyncio
 async def test_push_max_5_posts():
-    send = AsyncMock(return_value=True)
+    send = AsyncMock()
     posts = [
         Post(post_id=f"p{i}", title=f"帖子{i}", summary="", url=f"https://u.lofter.com/post/p{i}")
         for i in range(8)
@@ -310,135 +178,28 @@ async def test_push_max_5_posts():
 @pytest.mark.asyncio
 async def test_enrich_serial_order():
     posts = [
-        Post(
-            post_id="p1", title="", summary="",
-            url="https://u.lofter.com/post/p1",
-            publish_time="2026-07-29 05:00:00",
-        ),
-        Post(
-            post_id="p2", title="", summary="",
-            url="https://u.lofter.com/post/p2",
-            publish_time="2026-07-29 05:00:00",
-        ),
+        Post(post_id="p1", title="", summary="", url="https://u.lofter.com/post/p1"),
+        Post(post_id="p2", title="", summary="", url="https://u.lofter.com/post/p2"),
     ]
-    source = AsyncMock()
-    source.get_post.side_effect = [
-        Post(post_id="p1", title="标题1", summary="", url=posts[0].url),
-        Post(post_id="p2", title="标题2", summary="", url=posts[1].url),
+    client = AsyncMock()
+    client.get.side_effect = [
+        "<html><head><title>标题1-作者</title></head></html>",
+        "<html><head><title>标题2-作者</title></head></html>",
     ]
 
-    result = await _enrich_blog_posts(posts, source)
+    result = await _enrich_blog_posts(posts, client)
 
     assert result[0].title == "标题1"
     assert result[1].title == "标题2"
-    assert [call.args[0] for call in source.get_post.await_args_list] == [
-        posts[0].url, posts[1].url,
-    ]
-
-
-def _source_page(
-    ids: list[str], cursor: str | None = None, *, source="mobile_tag", exhausted=False
-) -> SourcePage:
-    posts = _make_posts(ids)
-    return SourcePage(
-        items=posts,
-        source=source,
-        next_cursor=cursor,
-        exhausted=exhausted,
-        sort="new",
-        mapped_count=len(posts),
-        dropped_count=0,
-        complete=True,
-    )
-
-
-@pytest.mark.asyncio
-async def test_fetch_tag_posts_follows_cursor_and_fetches_complete_images():
-    source = AsyncMock()
-    source.list_tag.side_effect = [
-        _source_page(["p1", "p2"], "next"),
-        _source_page(["p2", "p3"], exhausted=True),
-    ]
-
-    def detail(url):
-        post_id = url.rsplit("/", 1)[-1]
-        return Post(
-            post_id=post_id,
-            title="",
-            summary="",
-            images=[
-                f"https://img.example/{post_id}-1.jpg",
-                f"https://img.example/{post_id}-2.jpg",
-            ],
-            url=url,
-            completeness=frozenset({"images", "url"}),
-        )
-
-    source.get_post.side_effect = detail
-
-    posts = await fetch_tag_posts(["A"], source, limit=3)
-
-    assert [post.post_id for post in posts] == ["p1", "p2", "p3"]
-    assert all(len(post.images) == 2 for post in posts)
-    assert all("images" in post.completeness for post in posts)
-    assert [call.args[1] for call in source.list_tag.await_args_list] == [None, "next"]
-    assert source.get_post.await_count == 3
-
-
-@pytest.mark.asyncio
-async def test_fetch_blog_posts_follows_cursor_and_dedupes():
-    source = AsyncMock()
-    source.list_blog.side_effect = [
-        _source_page(["p1", "p2"], "next", source="mobile_blog"),
-        _source_page(["p2", "p3"], exhausted=True, source="mobile_blog"),
-    ]
-
-    posts = await fetch_blog_posts(
-        _make_sub("someuser", sub_type="blog"), source, limit=3
-    )
-
-    assert [post.post_id for post in posts] == ["p1", "p2", "p3"]
-    assert all("images" not in post.completeness for post in posts)
-    assert [call.args[1] for call in source.list_blog.await_args_list] == [None, "next"]
-    source.get_post.assert_not_awaited()
 
 
 # ── 聚合标签轮询 ──────────────────────────────────────────────────────────────
 
 def _make_posts(ids: list[str], tags: list[str] | None = None) -> list[Post]:
     return [
-        Post(
-            post_id=pid,
-            title=f"帖子{pid}",
-            summary="",
-            url=f"https://u.lofter.com/post/{pid}",
-            tags=tags or [],
-            publish_time="2026-07-29 05:00:00",
-        )
+        Post(post_id=pid, title=f"帖子{pid}", summary="", url=f"https://u.lofter.com/post/{pid}", tags=tags or [])
         for pid in ids
     ]
-
-
-@pytest.mark.asyncio
-async def test_tag_target_skips_unknown_tags_without_excludes():
-    partial = Post(
-        post_id="p1",
-        title="Demo",
-        summary="",
-        url="https://u.lofter.com/post/p1",
-        publish_time="2026-07-29 05:00:00",
-        source="mobile_tag",
-        completeness=frozenset({"title", "url", "publish_time"}),
-    )
-    source = AsyncMock()
-    with patch("core.scheduler.fetch_tag_posts", return_value=[partial]):
-        from core.scheduler import _fetch_all_tag_targets
-        result = await _fetch_all_tag_targets(
-            FilterRule(search_tags=["A"]), source
-        )
-
-    assert result["A"] == [partial]
-    source.get_post.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -456,8 +217,6 @@ async def test_build_tag_rule():
 @pytest.mark.asyncio
 async def test_aggregate_tag_session(db):
     """两个 subscribe + 一个 exclude，合并拉取，exclude 正确过滤"""
-    await db.add_subscription("sess1", "tag", "原神")
-    await db.add_subscription("sess1", "tag", "崩铁")
     subs = [
         _make_sub("原神", "subscribe"),
         _make_sub("崩铁", "subscribe"),
@@ -485,9 +244,8 @@ async def test_aggregate_tag_session(db):
 
     sent: list[str] = []
 
-    async def send_func(session_id, post, header, source_types):
-        sent.append(format_post(post, header=header))
-        return True
+    async def send_func(session_id, text, images):
+        sent.append(text)
 
     client = AsyncMock()
 
@@ -503,256 +261,8 @@ async def test_aggregate_tag_session(db):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", [False, RuntimeError("send failed")], ids=["false", "exception"])
-async def test_poll_all_stops_same_session_blog_after_tag_send_failure(db, failure):
-    storage = SubscriptionStorage(db)
-    await storage.add("same", "tag", "tag")
-    await storage.add("same", "blog", "same-blog")
-    await storage.add("other", "blog", "other-blog")
-    await db.mark_seen_session("same", "tag", ["warmup"])
-    await db.mark_seen_session("same", "blog", ["warmup"])
-    await db.mark_seen_session("other", "blog", ["warmup"])
-    same_blog_fetches = 0
-    same_send_texts: list[str] = []
-
-    async def fetch_blog(sub, client):
-        nonlocal same_blog_fetches
-        same_blog_fetches += sub.session_id == "same"
-        return _make_posts([f"{sub.session_id}-blog"])
-
-    async def send(session_id, post, header, source_types):
-        if session_id == "same":
-            same_send_texts.append(format_post(post, header=header))
-            if isinstance(failure, Exception):
-                raise failure
-            return failure
-        return True
-
-    scheduler = SubscriptionScheduler(
-        storage, AsyncMock(), db, send,
-        block_storage=AuthorBlockStorage(db),
-    )
-    with (
-        patch("core.scheduler.fetch_tag_posts", return_value=_make_posts(["same-tag"])),
-        patch("core.scheduler.fetch_blog_posts", side_effect=fetch_blog),
-        patch("core.scheduler._enrich_blog_posts", side_effect=lambda items, client: items),
-    ):
-        await scheduler._poll_all()
-
-    assert same_blog_fetches == 1
-    assert len(same_send_texts) == 1
-    assert "same-blog" in same_send_texts[0]
-    assert "same-tag" not in same_send_texts[0]
-    assert await db.filter_unseen_session(
-        "same", "tag", ["same-tag"]
-    ) == ["same-tag"]
-    assert await db.filter_unseen_session(
-        "same", "blog", ["same-blog"]
-    ) == ["same-blog"]
-    assert await db.filter_unsent("same", ["same-tag", "same-blog"]) == [
-        "same-tag", "same-blog",
-    ]
-    assert await db.filter_unsent("other", ["other-blog"]) == []
-
-
-@pytest.mark.asyncio
-async def test_tag_checkpoint_isolated_by_actual_target_provenance(db):
-    await db.add_subscription("sess1", "tag", "A")
-    await db.add_subscription("sess1", "tag", "B")
-    await db.import_legacy_checkpoint("sess1", "tag", "A", "100")
-    posts_by_target = {
-        "A": _make_posts(["101"], tags=["A"]),
-        "B": _make_posts(["50"], tags=["B"]),
-    }
-    sent: list[str] = []
-
-    async def fetch(search_tags, client):
-        return posts_by_target[search_tags[0]]
-
-    async def send(session_id, post, header, source_types):
-        sent.append(format_post(post, header=header))
-        return True
-
-    with patch("core.scheduler.fetch_tag_posts", side_effect=fetch):
-        result = await _check_tag_session(
-            "sess1", [_make_sub("A"), _make_sub("B")], AsyncMock(), db,
-            send, AuthorBlockStorage(db),
-        )
-
-    rows = await db.transaction(lambda conn: conn.execute("""
-        SELECT s.target,sp.post_id FROM seen_posts sp
-        JOIN subscriptions s ON s.id=sp.subscription_id
-        ORDER BY s.target,sp.post_id
-    """).fetchall())
-    assert result is True
-    assert len(sent) == 2
-    assert rows == [("A", "101"), ("B", "50")]
-    assert await db.filter_unseen_targets(
-        "sess1", "tag", {"A": ["101"], "B": ["50"]}
-    ) == []
-
-
-@pytest.mark.asyncio
-async def test_tag_same_post_sends_once_and_marks_all_actual_sources(db):
-    await db.add_subscription("sess1", "tag", "A")
-    await db.add_subscription("sess1", "tag", "B")
-    await db.mark_seen_targets("sess1", "tag", {"A": ["warmup"], "B": ["warmup"]})
-    first = _make_posts(["00A_000B"], tags=["A", "B"])
-    second = _make_posts(["a_b"], tags=["B", "A"])
-    second[0].title = first[0].title
-    posts_by_target = {"A": first, "B": second}
-    send = AsyncMock(return_value=True)
-
-    async def fetch(search_tags, client):
-        return posts_by_target[search_tags[0]]
-
-    with patch("core.scheduler.fetch_tag_posts", side_effect=fetch):
-        await _check_tag_session(
-            "sess1", [_make_sub("A"), _make_sub("B")], AsyncMock(), db,
-            send, AuthorBlockStorage(db),
-        )
-
-    rows = await db.transaction(lambda conn: conn.execute("""
-        SELECT s.target,sp.post_id FROM seen_posts sp
-        JOIN subscriptions s ON s.id=sp.subscription_id
-        WHERE sp.post_id='a_b' ORDER BY s.target
-    """).fetchall())
-    send.assert_awaited_once()
-    assert rows == [("A", "a_b"), ("B", "a_b")]
-
-
-async def _assert_failed_tag_poll_state(db, send, blog_fetch):
-    checkpoints = await db.transaction(lambda conn: conn.execute(
-        "SELECT post_id FROM legacy_checkpoints ORDER BY post_id"
-    ).fetchall())
-    tag_seen = await db.transaction(lambda conn: conn.execute("""
-        SELECT COUNT(*) FROM seen_posts sp
-        JOIN subscriptions s ON s.id=sp.subscription_id
-        WHERE s.session_id='sess1' AND s.type='tag'
-    """).fetchone()[0])
-    deliveries = await db.transaction(lambda conn: conn.execute(
-        "SELECT COUNT(*) FROM deliveries WHERE session_id='sess1'"
-    ).fetchone()[0])
-    assert checkpoints == [("100",), ("40",)]
-    assert tag_seen == 0
-    assert deliveries == 0
-    send.assert_not_awaited()
-    blog_fetch.assert_not_awaited()
-
-
-async def _assert_retried_tag_poll_state(db, send, blog_fetch):
-    assert send.call_count == 2
-    blog_fetch.assert_awaited_once()
-    assert await db.transaction(lambda conn: conn.execute(
-        "SELECT COUNT(*) FROM legacy_checkpoints"
-    ).fetchone()[0]) == 0
-    rows = await db.transaction(lambda conn: conn.execute("""
-        SELECT s.target,sp.post_id FROM seen_posts sp
-        JOIN subscriptions s ON s.id=sp.subscription_id
-        WHERE s.session_id='sess1' AND s.type='tag'
-        ORDER BY s.target,sp.post_id
-    """).fetchall())
-    assert rows == [("A", "101"), ("B", "41")]
-    assert await db.filter_unseen_targets(
-        "sess1", "tag", {"A": ["101"], "B": ["41"]}
-    ) == []
-    assert await db.filter_unsent("sess1", ["101", "41"]) == []
-
-
-@pytest.mark.asyncio
-async def test_tag_second_page_failure_has_zero_db_or_send_side_effects(db):
-    await db.add_subscription("sess1", "tag", "A")
-    await db.import_legacy_checkpoint("sess1", "tag", "A", "100")
-    source = AsyncMock()
-    source.list_tag.side_effect = [
-        _source_page(["101"], "next"),
-        SourceSchemaError("response"),
-    ]
-    send = AsyncMock(return_value=True)
-
-    await _check_tag_session(
-        "sess1", [_make_sub("A")], source, db, send, AuthorBlockStorage(db)
-    )
-
-    assert await db.transaction(lambda conn: conn.execute(
-        "SELECT post_id FROM legacy_checkpoints"
-    ).fetchall()) == [("100",)]
-    assert await db.seen_count("sess1", "tag") == 0
-    assert await db.filter_unsent("sess1", ["101"]) == ["101"]
-    send.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_later_target_second_page_failure_keeps_all_targets_side_effect_free(db):
-    await db.add_subscription("sess1", "tag", "A")
-    await db.add_subscription("sess1", "tag", "B")
-    await db.import_legacy_checkpoint("sess1", "tag", "A", "100")
-    await db.import_legacy_checkpoint("sess1", "tag", "B", "40")
-    source = AsyncMock()
-    source.list_tag.side_effect = [
-        _source_page(["101"], exhausted=True),
-        _source_page(["41"], "b-next"),
-        SourceSchemaError("response"),
-    ]
-    send = AsyncMock(return_value=True)
-
-    await _check_tag_session(
-        "sess1", [_make_sub("A"), _make_sub("B")], source, db, send,
-        AuthorBlockStorage(db),
-    )
-
-    checkpoints = await db.transaction(lambda conn: conn.execute(
-        "SELECT post_id FROM legacy_checkpoints ORDER BY post_id"
-    ).fetchall())
-    assert checkpoints == [("100",), ("40",)]
-    assert await db.seen_count("sess1", "tag") == 0
-    assert await db.filter_unsent("sess1", ["101", "41"]) == ["101", "41"]
-    send.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_tag_fetch_failure_preserves_all_checkpoints_and_retries(db):
-    storage = SubscriptionStorage(db)
-    await storage.add("sess1", "tag", "A")
-    await storage.add("sess1", "tag", "B")
-    await storage.add("sess1", "blog", "blog")
-    await db.import_legacy_checkpoint("sess1", "tag", "A", "100")
-    await db.import_legacy_checkpoint("sess1", "tag", "B", "40")
-    send = AsyncMock(return_value=True)
-    scheduler = SubscriptionScheduler(
-        storage, AsyncMock(), db, send,
-        block_storage=AuthorBlockStorage(db),
-    )
-    blog_fetch = AsyncMock(return_value=[])
-    posts_by_target = {
-        "A": _make_posts(["101"], tags=["A"]),
-        "B": _make_posts(["41"], tags=["B"]),
-    }
-    failed = False
-
-    async def fetch(search_tags, client):
-        nonlocal failed
-        target = search_tags[0]
-        if target == "B" and not failed:
-            failed = True
-            raise RuntimeError("B failed")
-        return posts_by_target[target]
-
-    with (
-        patch("core.scheduler.fetch_tag_posts", side_effect=fetch),
-        patch("core.scheduler.fetch_blog_posts", blog_fetch),
-    ):
-        await scheduler._poll_all()
-        await _assert_failed_tag_poll_state(db, send, blog_fetch)
-        await scheduler._poll_all()
-
-    await _assert_retried_tag_poll_state(db, send, blog_fetch)
-
-
-@pytest.mark.asyncio
 async def test_warmup_no_push(db):
     """冷启动（seen_count=0）时 mark_seen 但不推送"""
-    await db.add_subscription("sess1", "tag", "原神")
     subs = [_make_sub("原神", "subscribe")]
     posts = _make_posts(["p1", "p2", "p3"])
 
@@ -761,9 +271,8 @@ async def test_warmup_no_push(db):
 
     sent: list[str] = []
 
-    async def send_func(session_id, post, header, source_types):
-        sent.append(format_post(post, header=header))
-        return True
+    async def send_func(session_id, text, images):
+        sent.append(text)
 
     client = AsyncMock()
 
@@ -778,7 +287,6 @@ async def test_warmup_no_push(db):
 @pytest.mark.asyncio
 async def test_new_post_pushed_after_warmup(db):
     """warmup 后新帖应该被推送"""
-    await db.add_subscription("sess1", "tag", "原神")
     subs = [_make_sub("原神", "subscribe")]
     old_posts = _make_posts(["p1", "p2"])
     new_post = Post(post_id="p3", title="新帖", summary="", url="https://u.lofter.com/post/p3")
@@ -791,9 +299,8 @@ async def test_new_post_pushed_after_warmup(db):
 
     sent: list[str] = []
 
-    async def send_func(session_id, post, header, source_types):
-        sent.append(format_post(post, header=header))
-        return True
+    async def send_func(session_id, text, images):
+        sent.append(text)
 
     client = AsyncMock()
 
@@ -811,7 +318,6 @@ async def test_new_post_pushed_after_warmup(db):
 
 @pytest.mark.asyncio
 async def test_tag_session_blocks_author_but_marks_seen(db):
-    await db.add_subscription("sess1", "tag", "原神")
     await db.add_author_block("sess1", "name", "屏蔽作者", "屏蔽作者")
     blocks = AuthorBlockStorage(db)
     subs = [_make_sub("原神", "subscribe")]
@@ -821,9 +327,8 @@ async def test_tag_session_blocks_author_but_marks_seen(db):
     ]
     sent: list[str] = []
 
-    async def send_func(session_id, post, header, source_types):
-        sent.append(format_post(post, header=header))
-        return True
+    async def send_func(session_id, text, images):
+        sent.append(text)
 
     with patch("core.scheduler.fetch_tag_posts", return_value=posts):
         await db.mark_seen_session("sess1", "tag", ["warmup"])
@@ -837,14 +342,12 @@ async def test_tag_session_blocks_author_but_marks_seen(db):
 
 @pytest.mark.asyncio
 async def test_tag_session_overflow_posts_remain_pending_until_next_poll(db):
-    await db.add_subscription("sess1", "tag", "原神")
     subs = [_make_sub("原神", "subscribe")]
     posts = _make_posts([f"p{i}" for i in range(8)])
     sent: list[str] = []
 
-    async def send_func(session_id, post, header, source_types):
-        sent.append(format_post(post, header=header))
-        return True
+    async def send_func(session_id, text, images):
+        sent.append(text)
 
     blocks = AuthorBlockStorage(db)
 
@@ -865,7 +368,6 @@ async def test_tag_session_overflow_posts_remain_pending_until_next_poll(db):
 
 @pytest.mark.asyncio
 async def test_blog_session_blocks_username_before_push(db):
-    await db.add_subscription("sess1", "blog", "blockeduser")
     await db.add_author_block("sess1", "username", "blockeduser", "blockeduser")
     blocks = AuthorBlockStorage(db)
     sub = _make_sub("blockeduser", sub_type="blog", session_id="sess1")
@@ -880,9 +382,8 @@ async def test_blog_session_blocks_username_before_push(db):
     ]
     sent: list[str] = []
 
-    async def send_func(session_id, post, header, source_types):
-        sent.append(format_post(post, header=header))
-        return True
+    async def send_func(session_id, text, images):
+        sent.append(text)
 
     with patch("core.scheduler.fetch_blog_posts", return_value=posts):
         await db.mark_seen_session("sess1", "blog", ["warmup"])
@@ -895,14 +396,12 @@ async def test_blog_session_blocks_username_before_push(db):
 
 @pytest.mark.asyncio
 async def test_blog_session_overflow_posts_remain_pending_until_next_poll(db):
-    await db.add_subscription("sess1", "blog", "someuser")
     sub = _make_sub("someuser", sub_type="blog", session_id="sess1")
     posts = _make_posts([f"p{i}" for i in range(8)])
     sent: list[str] = []
 
-    async def send_func(session_id, post, header, source_types):
-        sent.append(format_post(post, header=header))
-        return True
+    async def send_func(session_id, text, images):
+        sent.append(text)
 
     blocks = AuthorBlockStorage(db)
 
@@ -925,175 +424,36 @@ async def test_blog_session_overflow_posts_remain_pending_until_next_poll(db):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("result", [False, None])
-async def test_tag_send_false_or_none_does_not_ack(db, result):
-    await db.add_subscription("sess1", "tag", "tag")
-    await db.mark_seen_session("sess1", "tag", ["warmup"])
-    posts = _make_posts(["p1", "p2"])
-    send = AsyncMock(return_value=result)
-    with patch("core.scheduler.fetch_tag_posts", return_value=posts):
-        await _check_tag_session(
-            "sess1", [_make_sub("tag")], AsyncMock(), db, send, AuthorBlockStorage(db)
-        )
-    assert send.call_count == 1
-    assert await db.filter_unseen_session("sess1", "tag", ["p1", "p2"]) == ["p1", "p2"]
-    assert await db.filter_unsent("sess1", ["p1", "p2"]) == ["p1", "p2"]
-
-
-@pytest.mark.asyncio
-async def test_tag_send_exception_and_partial_success_stop_in_order(db):
-    await db.add_subscription("sess1", "tag", "tag")
-    await db.mark_seen_session("sess1", "tag", ["warmup"])
-    posts = _make_posts(["p0", "p1", "p2"])
-    send = AsyncMock(side_effect=[True, RuntimeError("send failed")])
-    with patch("core.scheduler.fetch_tag_posts", return_value=posts):
-        await _check_tag_session(
-            "sess1", [_make_sub("tag")], AsyncMock(), db, send, AuthorBlockStorage(db)
-        )
-    assert send.call_count == 2
-    assert await db.filter_unseen_session("sess1", "tag", ["p0", "p1", "p2"]) == ["p0", "p1"]
-    assert await db.filter_unsent("sess1", ["p0", "p1", "p2"]) == ["p0", "p1"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "side_effect",
-    [False, None, RuntimeError("send failed")],
-    ids=["false", "none", "exception"],
-)
-async def test_blog_send_failure_does_not_ack_and_stops(db, side_effect):
-    await db.add_subscription("sess1", "blog", "someuser")
-    await db.mark_seen_session("sess1", "blog", ["warmup"])
-    posts = _make_posts(["p0", "p1"])
-    if isinstance(side_effect, Exception):
-        send = AsyncMock(side_effect=side_effect)
-    else:
-        send = AsyncMock(return_value=side_effect)
-    with (
-        patch("core.scheduler.fetch_blog_posts", return_value=posts),
-        patch("core.scheduler._enrich_blog_posts", side_effect=lambda items, client: items),
-    ):
-        await _check_blog_sub(
-            _make_sub("someuser", sub_type="blog"), AsyncMock(), db, send,
-            AuthorBlockStorage(db),
-        )
-    assert send.call_count == 1
-    assert await db.filter_unseen_session("sess1", "blog", ["p0", "p1"]) == ["p0", "p1"]
-    assert await db.filter_unsent("sess1", ["p0", "p1"]) == ["p0", "p1"]
-
-
-@pytest.mark.asyncio
-async def test_legacy_numeric_tag_checkpoint_enforces_floor_once(db):
-    await db.add_subscription("sess1", "tag", "tag")
-    await db.import_legacy_checkpoint("sess1", "tag", "tag", "10")
-    posts = _make_posts(["9", "11", "12"])
-    send = AsyncMock(return_value=True)
-    with patch("core.scheduler.fetch_tag_posts", return_value=posts):
-        await _check_tag_session(
-            "sess1", [_make_sub("tag")], AsyncMock(), db, send, AuthorBlockStorage(db)
-        )
-    assert send.call_count == 2
-    assert await db.filter_unseen_session("sess1", "tag", ["9", "11", "12"]) == []
-    assert await db.transaction(lambda conn: conn.execute(
-        "SELECT COUNT(*) FROM legacy_checkpoints"
-    ).fetchone()[0]) == 0
-    send.reset_mock()
-    rolled = _make_posts(["8", "9"])
-    with patch("core.scheduler.fetch_tag_posts", return_value=rolled):
-        await _check_tag_session(
-            "sess1", [_make_sub("tag")], AsyncMock(), db, send, AuthorBlockStorage(db)
-        )
-    send.assert_not_awaited()
-    assert await db.filter_unseen_session("sess1", "tag", ["8", "9"]) == []
-
-
-@pytest.mark.asyncio
-async def test_checkpoint_send_failure_keeps_eligible_tag_retryable(db):
-    await db.add_subscription("sess1", "tag", "tag")
-    await db.import_legacy_checkpoint("sess1", "tag", "tag", "10")
-    posts = _make_posts(["9", "11"])
-    send = AsyncMock(return_value=False)
-    blocks = AuthorBlockStorage(db)
-    with patch("core.scheduler.fetch_tag_posts", return_value=posts):
-        await _check_tag_session(
-            "sess1", [_make_sub("tag")], AsyncMock(), db, send, blocks
-        )
-        assert await db.filter_unseen_session(
-            "sess1", "tag", ["9", "11"]
-        ) == ["11"]
-        assert await db.filter_unsent("sess1", ["9", "11"]) == ["9", "11"]
-        assert await db.transaction(lambda conn: conn.execute(
-            "SELECT COUNT(*) FROM legacy_checkpoints"
-        ).fetchone()[0]) == 0
-
-        send.reset_mock()
-        send.return_value = True
-        await _check_tag_session(
-            "sess1", [_make_sub("tag")], AsyncMock(), db, send, blocks
-        )
-
-    send.assert_awaited_once()
-    assert await db.filter_unseen_session("sess1", "tag", ["9", "11"]) == []
-    assert await db.filter_unsent("sess1", ["9", "11"]) == ["9"]
-
-
-@pytest.mark.asyncio
-async def test_empty_feed_preserves_checkpoint_for_first_observable_batch(db):
-    await db.add_subscription("sess1", "tag", "tag")
-    await db.import_legacy_checkpoint("sess1", "tag", "tag", "10")
-    with patch("core.scheduler.fetch_tag_posts", return_value=[]):
-        await _check_tag_session(
-            "sess1", [_make_sub("tag")], AsyncMock(), db,
-            AsyncMock(return_value=True), AuthorBlockStorage(db),
-        )
-    assert await db.transaction(lambda conn: conn.execute(
-        "SELECT post_id FROM legacy_checkpoints"
-    ).fetchall()) == [("10",)]
-    assert await db.seen_count("sess1", "tag") == 0
-
-
-@pytest.mark.asyncio
-async def test_legacy_opaque_checkpoint_suppresses_full_blog_fetch_once(db):
-    await db.add_subscription("sess1", "blog", "someuser")
-    await db.import_legacy_checkpoint(
-        "sess1", "blog", "someuser", "opaque-floor"
-    )
-    posts = _make_posts(["opaque-new", "opaque-old"])
-    send = AsyncMock(return_value=True)
-    with patch("core.scheduler.fetch_blog_posts", return_value=posts):
-        await _check_blog_sub(
-            _make_sub("someuser", sub_type="blog"), AsyncMock(), db, send,
-            AuthorBlockStorage(db),
-        )
-    send.assert_not_awaited()
-    assert await db.filter_unseen_session(
-        "sess1", "blog", ["opaque-new", "opaque-old"]
-    ) == []
-
-
-@pytest.mark.asyncio
 async def test_blog_session_fills_push_slots_when_enriched_post_is_blocked(db):
-    await db.add_subscription("sess1", "blog", "someuser")
     await db.add_author_block("sess1", "username", "blockeduser", "blockeduser")
     blocks = AuthorBlockStorage(db)
     sub = _make_sub("someuser", sub_type="blog", session_id="sess1")
     posts = _make_posts([f"p{i}" for i in range(8)])
-    for post in posts:
-        post.completeness |= {"author_username"}
     sent: list[str] = []
 
-    async def send_func(session_id, post, header, source_types):
-        sent.append(format_post(post, header=header))
-        return True
+    async def send_func(session_id, text, images):
+        sent.append(text)
+
+    async def enrich(enrich_posts, client):
+        enriched = []
+        for post in enrich_posts:
+            author_username = "blockeduser" if post.post_id == "p2" else ""
+            enriched.append(
+                Post(
+                    post_id=post.post_id,
+                    title=post.title,
+                    summary=post.summary,
+                    url=post.url,
+                    author_username=author_username,
+                )
+            )
+        return enriched
 
     post_ids = [p.post_id for p in posts]
 
     with (
         patch("core.scheduler.fetch_blog_posts", return_value=posts),
-        patch(
-            "core.scheduler._enrich_blog_posts",
-            side_effect=_enrich_with_blocked_p2,
-        ),
+        patch("core.scheduler._enrich_blog_posts", side_effect=enrich),
     ):
         await db.mark_seen_session("sess1", "blog", ["warmup"])
         await _check_blog_sub(sub, AsyncMock(), db, send_func, blocks)
@@ -1109,70 +469,3 @@ async def test_blog_session_fills_push_slots_when_enriched_post_is_blocked(db):
     assert len(sent) == 7
     assert await db.filter_unseen_session("sess1", "blog", post_ids) == []
     assert await db.filter_unsent("sess1", post_ids) == ["p2"]
-
-
-@pytest.mark.asyncio
-async def test_poll_single_session_only_delegates_target_session():
-    gates = AsyncMock()
-    service = AsyncMock()
-    queue = AsyncMock()
-    scheduler = SubscriptionScheduler(
-        AsyncMock(), AsyncMock(), AsyncMock(), AsyncMock(),
-        block_storage=AsyncMock(),
-        gates=gates,
-        subscription_service=service,
-        delivery_queue=queue,
-    )
-
-    with patch("core.scheduler._poll_delivery_session") as poll:
-        await scheduler._poll_single_session("target")
-
-    poll.assert_awaited_once_with(
-        "target",
-        scheduler._source,
-        service,
-        gates,
-        queue,
-        scheduler._send_func,
-    )
-
-
-@pytest.mark.asyncio
-async def test_poll_all_delegates_every_session_and_isolates_errors():
-    queue = AsyncMock()
-    queue.session_ids.return_value = ["first", "second"]
-    scheduler = SubscriptionScheduler(
-        AsyncMock(), AsyncMock(), AsyncMock(), AsyncMock(),
-        block_storage=AsyncMock(),
-        gates=AsyncMock(),
-        subscription_service=AsyncMock(),
-        delivery_queue=queue,
-    )
-    scheduler._poll_single_session = AsyncMock(
-        side_effect=[RuntimeError("first failed"), None]
-    )
-
-    await scheduler._poll_all()
-
-    assert scheduler._poll_single_session.await_args_list == [
-        call("first"), call("second")
-    ]
-
-
-@pytest.mark.asyncio
-async def test_poll_all_propagates_session_cancellation():
-    queue = AsyncMock()
-    queue.session_ids.return_value = ["cancelled"]
-    scheduler = SubscriptionScheduler(
-        AsyncMock(), AsyncMock(), AsyncMock(), AsyncMock(),
-        block_storage=AsyncMock(),
-        gates=AsyncMock(),
-        subscription_service=AsyncMock(),
-        delivery_queue=queue,
-    )
-    scheduler._poll_single_session = AsyncMock(
-        side_effect=asyncio.CancelledError
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        await scheduler._poll_all()

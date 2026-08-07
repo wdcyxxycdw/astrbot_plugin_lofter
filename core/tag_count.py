@@ -1,35 +1,19 @@
 from __future__ import annotations
 
-import logging
-import time
-from dataclasses import dataclass, field, replace
+import asyncio
+import csv
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Callable, Iterable, Literal
+from io import StringIO
+from pathlib import Path
+from typing import Literal
 
-from .count_formatters import (
-    build_count_csv,
-    build_count_csv_path,
-    format_count_result,
-    format_scanned_pages,
-)
-from .count_scanner import TagScanResult, scan_tags
-from .errors import SourceSchemaError
-from .expression_planner import (
-    BinaryNode,
-    CountExpressionError,
-    ExprNode,
-    TagNode,
-    UnaryNode,
-    minimum_cover_alternatives,
-    parse_count_expression,
-)
+from .dwr_parser import parse_dwr_response
 from .parser import Post
-from .post_fields import PostEvidenceLedger
-from .post_identity import consistent_blog_owner, post_url_identity
-from .source_scan import ContentSource, SCAN_DEADLINE_SECONDS
 
-logger = logging.getLogger(__name__)
-CountStatus = Literal["success", "partial", "failed"]
+
+class CountExpressionError(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -46,37 +30,213 @@ class CountResult:
 
 
 @dataclass(frozen=True)
-class CoverResult:
-    tags: frozenset[str]
+class TagScanResult:
+    tag: str
     candidate_ids: set[str]
     matched_ids: set[str]
-    scanned_pages: dict[str, int]
+    scanned_pages: int
     warnings: list[str]
-    complete: bool
-    reliable: bool
+
+
+@dataclass(frozen=True)
+class TagNode:
+    tag: str
+
+
+@dataclass(frozen=True)
+class UnaryNode:
+    op: Literal["not"]
+    child: "ExprNode"
+
+
+@dataclass(frozen=True)
+class BinaryNode:
+    op: Literal["and", "or"]
+    left: "ExprNode"
+    right: "ExprNode"
+
+
+ExprNode = TagNode | UnaryNode | BinaryNode
+
+
+@dataclass(frozen=True)
+class Token:
+    kind: Literal["tag", "and", "or", "not", "lparen", "rparen"]
+    value: str
+
+
+def _tokenize(raw: str) -> list[Token]:
+    normalized = _normalize_expression(raw)
+    tokens: list[Token] = []
+    i = 0
+    while i < len(normalized):
+        i = _append_next_token(normalized, i, tokens)
+    return tokens
+
+
+def _normalize_expression(raw: str) -> str:
+    return raw.translate(str.maketrans({"（": "(", "）": ")", "｜": "|", "－": "-"}))
+
+
+def _append_next_token(text: str, i: int, tokens: list[Token]) -> int:
+    ch = text[i]
+    if ch.isspace():
+        return i + 1
+    if ch == "|":
+        tokens.append(Token("or", ch))
+        return i + 1
+    if ch == "&":
+        tokens.append(Token("and", ch))
+        return i + 1
+    if ch == "-":
+        tokens.append(Token("not", ch))
+        return i + 1
+    if ch == "(":
+        tokens.append(Token("lparen", ch))
+        return i + 1
+    if ch == ")":
+        tokens.append(Token("rparen", ch))
+        return i + 1
+    end = _find_tag_end(text, i)
+    tokens.append(Token("tag", text[i:end]))
+    return end
+
+
+def _find_tag_end(text: str, start: int) -> int:
+    i = start
+    while i < len(text) and not text[i].isspace() and text[i] not in "|&-()":
+        i += 1
+    return i
+
+
+class _Parser:
+    def __init__(self, tokens: list[Token]):
+        self._tokens = tokens
+        self._pos = 0
+
+    def parse(self) -> ExprNode:
+        if not self._tokens:
+            raise CountExpressionError("表达式为空")
+        expr = self._parse_or()
+        if self._peek() is not None:
+            self._raise_remaining_error()
+        return expr
+
+    def _peek(self) -> Token | None:
+        if self._pos >= len(self._tokens):
+            return None
+        return self._tokens[self._pos]
+
+    def _take(self) -> Token:
+        token = self._tokens[self._pos]
+        self._pos += 1
+        return token
+
+    def _raise_remaining_error(self):
+        token = self._peek()
+        if token and token.kind == "rparen":
+            raise CountExpressionError("括号不匹配")
+        raise CountExpressionError("表达式语法错误")
+
+    def _parse_or(self) -> ExprNode:
+        node = self._parse_and()
+        while self._peek() and self._peek().kind == "or":
+            self._take()
+            node = BinaryNode("or", node, self._parse_and())
+        return node
+
+    def _parse_and(self) -> ExprNode:
+        node = self._parse_unary()
+        while self._peek() and self._peek().kind in {"and", "tag", "not", "lparen"}:
+            if self._peek().kind == "and":
+                self._take()
+            node = BinaryNode("and", node, self._parse_unary())
+        return node
+
+    def _parse_unary(self) -> ExprNode:
+        token = self._peek()
+        if token and token.kind == "not":
+            self._take()
+            return UnaryNode("not", self._parse_unary())
+        return self._parse_primary()
+
+    def _parse_primary(self) -> ExprNode:
+        token = self._peek()
+        if token is None:
+            raise CountExpressionError("表达式语法错误")
+        if token.kind == "tag":
+            return TagNode(self._take().value)
+        if token.kind == "lparen":
+            return self._parse_parenthesized()
+        if token.kind == "rparen":
+            raise CountExpressionError("括号不匹配")
+        raise CountExpressionError("表达式语法错误")
+
+    def _parse_parenthesized(self) -> ExprNode:
+        self._take()
+        if self._peek() is None:
+            raise CountExpressionError("括号不匹配")
+        node = self._parse_or()
+        if not self._peek() or self._peek().kind != "rparen":
+            raise CountExpressionError("括号不匹配")
+        self._take()
+        return node
+
+
+def parse_count_expression(raw: str) -> ExprNode:
+    return _Parser(_tokenize(raw)).parse()
+
+
+def is_admin_event(event) -> bool:
+    if _truthy_attr(event, "is_admin"):
+        return True
+    for holder in _admin_holders(event):
+        if _holder_is_admin(holder):
+            return True
+    return False
+
+
+def _admin_holders(event) -> list:
+    return [getattr(event, "sender", None), getattr(event, "message_obj", None)]
+
+
+def _holder_is_admin(holder) -> bool:
+    if holder is None:
+        return False
+    names = ("is_admin", "is_group_admin", "is_group_owner")
+    if any(_truthy_attr(holder, name) for name in names):
+        return True
+    return str(getattr(holder, "role", "")).lower() in {"admin", "owner", "administrator"}
+
+
+def _truthy_attr(obj, name: str) -> bool:
+    value = getattr(obj, name, False)
+    if callable(value):
+        try:
+            return bool(value())
+        except Exception:
+            return False
+    return bool(value)
 
 
 def parse_count_command_arg(raw: str) -> tuple[str, str]:
     normalized = raw.replace("＝", "=")
     if "=" not in normalized:
         raise CountExpressionError("请使用：名称 = 表达式")
-    name, expression = (
-        part.strip() for part in normalized.split("=", 1)
-    )
+    name, expression = (part.strip() for part in normalized.split("=", 1))
     if not name or not expression:
         raise CountExpressionError("请使用：名称 = 表达式")
     return name, expression
 
 
 def match_expression(expr: ExprNode, post: Post) -> bool:
-    if not post.has_fields({"tags"}):
-        raise SourceSchemaError("tags")
-    return _match(expr, {tag.casefold() for tag in post.tags})
+    tags = {tag.lower() for tag in post.tags}
+    return _match(expr, tags)
 
 
 def _match(expr: ExprNode, tags: set[str]) -> bool:
     if isinstance(expr, TagNode):
-        return expr.tag.casefold() in tags
+        return expr.tag.lower() in tags
     if isinstance(expr, UnaryNode):
         return not _match(expr.child, tags)
     if expr.op == "and":
@@ -86,358 +246,199 @@ def _match(expr: ExprNode, tags: set[str]) -> bool:
 
 def extract_positive_tags(expr: ExprNode) -> list[str]:
     result: list[str] = []
-    _collect_positive(expr, False, set(), result)
+    seen: set[str] = set()
+    _collect_positive_tags(expr, False, seen, result)
     return result
 
 
-def _collect_positive(
-    expr: ExprNode,
+def _collect_positive_tags(
+    node: ExprNode,
     negated: bool,
     seen: set[str],
     result: list[str],
-) -> None:
-    if isinstance(expr, TagNode):
-        key = expr.tag.casefold()
-        if not negated and key not in seen:
-            seen.add(key)
-            result.append(expr.tag)
+):
+    if isinstance(node, TagNode):
+        _append_positive_tag(node, negated, seen, result)
         return
-    if isinstance(expr, UnaryNode):
-        _collect_positive(expr.child, not negated, seen, result)
+    if isinstance(node, UnaryNode):
+        _collect_positive_tags(node.child, not negated, seen, result)
         return
-    _collect_positive(expr.left, negated, seen, result)
-    _collect_positive(expr.right, negated, seen, result)
+    _collect_positive_tags(node.left, negated, seen, result)
+    _collect_positive_tags(node.right, negated, seen, result)
+
+
+def _append_positive_tag(
+    node: TagNode,
+    negated: bool,
+    seen: set[str],
+    result: list[str],
+):
+    key = node.tag.lower()
+    if negated or key in seen:
+        return
+    seen.add(key)
+    result.append(node.tag)
 
 
 async def count_posts(
     expression: str,
-    source: ContentSource,
+    client,
     *,
+    parse_posts=parse_dwr_response,
     page_size: int = 20,
     tag_concurrency: int = 5,
-    _deadline: float = SCAN_DEADLINE_SECONDS,
-    _monotonic: Callable[[], float] = time.monotonic,
 ) -> CountResult:
     expr = parse_count_expression(expression)
-    positives = extract_positive_tags(expr)
-    aliases = _tag_aliases(expr)
-    if not positives:
-        return _empty_failed_result(
-            expression,
-            "表达式无法由正向标签提供可靠扫描证据",
-        )
-    planned = minimum_cover_alternatives(expr)
-    if planned == (frozenset(),):
-        return _exact_zero_result(expression)
-    attempts = planned or (frozenset(positives),)
-    deadline_at = _monotonic() + max(0.0, _deadline)
-    scans = await scan_tags(
-        _cover_tags(attempts, aliases),
-        source,
-        page_size,
-        lambda post: match_expression(expr, post),
-        tag_concurrency,
-        deadline_at,
-        _monotonic,
-    )
-    _validate_owner_evidence(scans.values())
-    conflicts = _conflicting_post_evidence(scans.values())
-    results = [
-        _evaluate_cover(cover, scans, bool(planned), conflicts)
-        for cover in attempts
-    ]
-    selected = _select_cover(results)
-    _log_attempts(expression, results, selected)
-    return _build_result(expression, selected)
+    positive_tags = extract_positive_tags(expr)
+    if not positive_tags:
+        raise CountExpressionError("至少需要一个正向 tag")
 
-
-def _tag_aliases(expr: ExprNode) -> dict[str, list[str]]:
-    result: dict[str, list[str]] = {}
-    _collect_tag_aliases(expr, result)
-    return result
-
-
-def _collect_tag_aliases(
-    expr: ExprNode, result: dict[str, list[str]]
-) -> None:
-    if isinstance(expr, TagNode):
-        aliases = result.setdefault(expr.tag.casefold(), [])
-        if expr.tag not in aliases:
-            aliases.append(expr.tag)
-        return
-    if isinstance(expr, UnaryNode):
-        _collect_tag_aliases(expr.child, result)
-        return
-    _collect_tag_aliases(expr.left, result)
-    _collect_tag_aliases(expr.right, result)
-
-
-def _cover_tags(
-    covers: tuple[frozenset[str], ...], aliases: dict[str, list[str]]
-) -> list[str]:
-    result: list[str] = []
-    included: set[str] = set()
-    for cover in covers:
-        for tag in sorted(cover):
-            key = tag.casefold()
-            if key in included:
-                continue
-            included.add(key)
-            result.extend(aliases.get(key, [tag]))
-    return result
-
-
-def _validate_owner_evidence(scans: Iterable[TagScanResult]) -> None:
-    evidence: dict[str, str] = {}
-    for scan in scans:
-        for post_id, owner in scan.owner_evidence.items():
-            try:
-                resolved = consistent_blog_owner(evidence.get(post_id, ""), owner)
-            except ValueError:
-                raise SourceSchemaError("post.owner") from None
-            if resolved:
-                evidence[post_id] = resolved
-
-
-def _conflicting_post_evidence(
-    scans: Iterable[TagScanResult],
-) -> set[str]:
-    values = list(scans)
-    ledger = PostEvidenceLedger()
-    for scan in values:
-        ledger.merge(scan.evidence, collect_conflicts=True)
-    conflicts = set(ledger.conflicted_ids)
-    conflicts.update(*(scan.conflicted_ids for scan in values))
-    conflicts.update(_conflicting_evidence_field(values, "tag_evidence"))
-    conflicts.update(
-        _conflicting_evidence_field(values, "publish_time_evidence")
-    )
-    conflicts.update(_conflicting_url_evidence(values))
-    return conflicts
-
-
-def _conflicting_url_evidence(scans: list[TagScanResult]) -> set[str]:
-    evidence: dict[str, str] = {}
-    conflicts: set[str] = set()
-    for scan in scans:
-        for post_id, value in scan.url_evidence.items():
-            existing = evidence.get(post_id)
-            if existing is None or existing == value:
-                evidence[post_id] = value
-                continue
-            old_owner = _url_owner(existing)
-            new_owner = _url_owner(value)
-            if bool(old_owner) != bool(new_owner):
-                evidence[post_id] = value if new_owner else existing
-            else:
-                conflicts.add(post_id)
-    return conflicts
-
-
-def _url_owner(url: str) -> str:
-    try:
-        return post_url_identity(url)[2]
-    except ValueError:
-        raise SourceSchemaError("post.url") from None
-
-
-def _conflicting_evidence_field(
-    scans: list[TagScanResult], field_name: str
-) -> set[str]:
-    evidence: dict[str, object] = {}
-    conflicts: set[str] = set()
-    for scan in scans:
-        for post_id, value in getattr(scan, field_name).items():
-            existing = evidence.setdefault(post_id, value)
-            if existing != value:
-                conflicts.add(post_id)
-    return conflicts
-
-
-def _evaluate_cover(
-    cover: frozenset[str],
-    scans: dict[str, TagScanResult],
-    enumerable: bool,
-    global_conflicts: set[str],
-) -> CoverResult:
-    selected = [scans[tag.casefold()] for tag in cover]
-    candidates: set[str] = set()
+    results = await _scan_positive_tags(positive_tags, client, page_size, parse_posts, expr, tag_concurrency)
+    seen_candidates: set[str] = set()
     matched: set[str] = set()
-    pages: dict[str, int] = {}
+    scanned_pages: dict[str, int] = {}
     warnings: list[str] = []
-    for scan in selected:
-        candidates.update(scan.candidate_ids)
-        matched.update(scan.matched_ids)
-        pages[scan.tag] = scan.scanned_pages
-        warnings.extend(scan.warnings)
-    if any("重复作品字段冲突" in warning for warning in warnings):
-        if "重复作品字段冲突" not in warnings:
-            warnings.append("重复作品字段冲突")
-    matched.difference_update(global_conflicts)
-    if global_conflicts and "重复作品字段冲突" not in warnings:
-        warnings.append("重复作品字段冲突")
-    return CoverResult(
-        tags=cover,
-        candidate_ids=candidates,
-        matched_ids=matched,
-        scanned_pages=pages,
-        warnings=warnings,
-        complete=bool(selected) and not global_conflicts and enumerable and all(
-            scan.complete for scan in selected
-        ),
-        reliable=any(scan.reliable for scan in selected),
-    )
+    for item in results:
+        seen_candidates.update(item.candidate_ids)
+        matched.update(item.matched_ids)
+        scanned_pages[item.tag] = item.scanned_pages
+        warnings.extend(item.warnings)
 
-
-def _select_cover(results: list[CoverResult]) -> CoverResult:
-    reliable = [result for result in results if result.reliable]
-    proven_ids: set[str] = set()
-    for result in reliable:
-        proven_ids.update(result.matched_ids)
-    complete = [
-        result for result in results
-        if result.complete and proven_ids <= result.matched_ids
-    ]
-    if complete:
-        return min(complete, key=_success_score)
-    if reliable:
-        selected = max(reliable, key=_partial_score)
-        warnings = selected.warnings
-        complete = selected.complete
-        if complete:
-            complete = False
-            warnings = [
-                *warnings,
-                "完整 cover 未覆盖其他可靠扫描证据",
-            ]
-        return replace(
-            selected,
-            matched_ids=proven_ids,
-            complete=complete,
-            warnings=warnings,
-        )
-    return min(results, key=_failed_score)
-
-
-def _success_score(
-    result: CoverResult,
-) -> tuple[int, int, int, tuple[str, ...]]:
-    return (
-        sum(result.scanned_pages.values()),
-        len(result.candidate_ids),
-        len(result.tags),
-        tuple(sorted(result.tags)),
-    )
-
-
-def _partial_score(
-    result: CoverResult,
-) -> tuple[int, int, int, int]:
-    return (
-        len(result.matched_ids),
-        len(result.candidate_ids),
-        -sum(result.scanned_pages.values()),
-        -len(result.tags),
-    )
-
-
-def _failed_score(
-    result: CoverResult,
-) -> tuple[int, tuple[str, ...]]:
-    return len(result.tags), tuple(sorted(result.tags))
-
-
-def _build_result(
-    expression: str, cover: CoverResult
-) -> CountResult:
-    status, error = _result_status(cover)
     return CountResult(
         name="",
         expression=expression,
-        count=len(cover.matched_ids),
-        status=status,
-        error=error,
-        counted_at=_now_text(),
-        candidates=len(cover.candidate_ids),
-        scanned_pages=cover.scanned_pages,
-        warnings=cover.warnings,
-    )
-
-
-def _exact_zero_result(expression: str) -> CountResult:
-    return CountResult(
-        name="",
-        expression=expression,
-        count=0,
-        status="success",
+        count=len(matched),
+        status="成功",
         error="",
         counted_at=_now_text(),
+        candidates=len(seen_candidates),
+        scanned_pages=scanned_pages,
+        warnings=warnings,
     )
 
 
-def _empty_failed_result(
-    expression: str, error: str
-) -> CountResult:
-    return CountResult(
-        name="",
-        expression=expression,
-        count=0,
-        status="failed",
-        error=error,
-        counted_at=_now_text(),
-    )
+async def _scan_positive_tags(
+    tags: list[str],
+    client,
+    page_size: int,
+    parse_posts,
+    expr: ExprNode,
+    tag_concurrency: int,
+) -> list[TagScanResult]:
+    semaphore = asyncio.Semaphore(max(1, tag_concurrency))
+    tasks = [_scan_tag_with_limit(tag, semaphore, client, page_size, parse_posts, expr) for tag in tags]
+    return await asyncio.gather(*tasks)
 
 
-def _result_status(
-    cover: CoverResult,
-) -> tuple[CountStatus, str]:
-    if cover.complete:
-        return "success", ""
-    if cover.reliable:
-        return "partial", "没有完整 cover 扫描完成"
-    return "failed", "没有获得可靠扫描证据"
+async def _scan_tag_with_limit(
+    tag: str,
+    semaphore: asyncio.Semaphore,
+    client,
+    page_size: int,
+    parse_posts,
+    expr: ExprNode,
+) -> TagScanResult:
+    async with semaphore:
+        return await _scan_tag_pages(tag, client, page_size, parse_posts, expr)
 
 
-def _log_attempts(
-    expression: str,
-    results: list[CoverResult],
-    selected: CoverResult,
-) -> None:
-    attempts = [
-        {
-            "tags": sorted(item.tags),
-            "complete": item.complete,
-            "reliable": item.reliable,
-            "candidates": len(item.candidate_ids),
-        }
-        for item in results
-    ]
-    logger.info(
-        "count expression=%r attempts=%r selected=%r",
-        expression,
-        attempts,
-        sorted(selected.tags),
-    )
+async def _scan_tag_pages(
+    tag: str,
+    client,
+    page_size: int,
+    parse_posts,
+    expr: ExprNode,
+) -> TagScanResult:
+    offset = 0
+    seen_for_tag: set[str] = set()
+    candidate_ids: set[str] = set()
+    matched_ids: set[str] = set()
+    scanned_pages = 0
+    warnings: list[str] = []
+    while True:
+        try:
+            posts = await _fetch_page(tag, client, offset, page_size, parse_posts)
+        except RuntimeError as e:
+            warnings.append(f"标签「{tag}」扫描失败：{e}")
+            return TagScanResult(tag, candidate_ids, matched_ids, scanned_pages, warnings)
+        if not posts:
+            return TagScanResult(tag, candidate_ids, matched_ids, scanned_pages, warnings)
+        scanned_pages += 1
+        if not _count_new_posts(posts, expr, seen_for_tag, candidate_ids, matched_ids):
+            _append_repeat_page_warning(tag, offset, warnings)
+            return TagScanResult(tag, candidate_ids, matched_ids, scanned_pages, warnings)
+        offset += page_size
+
+
+def _append_repeat_page_warning(tag: str, offset: int, warnings: list[str]):
+    if offset <= 0:
+        return
+    warnings.append(f"标签「{tag}」疑似分页未生效或接口返回重复页")
+
+
+async def _fetch_page(tag: str, client, offset: int, page_size: int, parse_posts) -> list[Post]:
+    raw = await client.search_tag(tag, offset=offset, limit=page_size)
+    return await parse_posts(raw)
+
+
+def _count_new_posts(
+    posts: list[Post],
+    expr: ExprNode,
+    seen_for_tag: set[str],
+    seen_candidates: set[str],
+    matched: set[str],
+) -> bool:
+    has_new = False
+    for post in posts:
+        if post.post_id in seen_for_tag:
+            continue
+        has_new = True
+        seen_for_tag.add(post.post_id)
+        if post.post_id in seen_candidates:
+            continue
+        seen_candidates.add(post.post_id)
+        if match_expression(expr, post):
+            matched.add(post.post_id)
+    return has_new
+
+
+def build_count_csv_path(base_dir, counted_at: str) -> Path:
+    timestamp = datetime.strptime(counted_at, "%Y-%m-%d %H:%M:%S").strftime("%Y%m%d_%H%M%S")
+    return Path(base_dir) / f"lofter_count_{timestamp}.csv"
+
+
+def build_count_csv(rows: list[CountResult]) -> str:
+    output = StringIO()
+    fieldnames = ["名称", "条件", "作品数", "候选作品", "扫描页数", "状态", "错误信息", "统计时间"]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(_csv_row(row))
+    return output.getvalue()
+
+
+def _csv_row(row: CountResult) -> dict[str, str | int]:
+    return {
+        "名称": row.name,
+        "条件": row.expression,
+        "作品数": row.count,
+        "候选作品": row.candidates,
+        "扫描页数": format_scanned_pages(row.scanned_pages),
+        "状态": row.status,
+        "错误信息": _format_error_with_warnings(row),
+        "统计时间": row.counted_at,
+    }
+
+
+def format_scanned_pages(scanned_pages: dict[str, int]) -> str:
+    return "；".join(f"{tag}:{pages}" for tag, pages in scanned_pages.items())
+
+
+def _format_error_with_warnings(row: CountResult) -> str:
+    parts = [row.error] if row.error else []
+    parts.extend(row.warnings)
+    return "；".join(parts)
 
 
 def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-__all__ = [
-    "BinaryNode",
-    "CountExpressionError",
-    "CountResult",
-    "ExprNode",
-    "TagNode",
-    "UnaryNode",
-    "build_count_csv",
-    "build_count_csv_path",
-    "count_posts",
-    "extract_positive_tags",
-    "format_count_result",
-    "format_scanned_pages",
-    "match_expression",
-    "parse_count_command_arg",
-    "parse_count_expression",
-]

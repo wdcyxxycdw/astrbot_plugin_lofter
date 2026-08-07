@@ -12,9 +12,6 @@ class Subscription:
     role: Literal["subscribe", "exclude"]
     target: str
     created_at: int = 0
-    state: Literal["warming", "active"] = "active"
-    revision: int = 1
-    initialized_at: int | None = None
 
 
 class SubscriptionStorage:
@@ -47,14 +44,4 @@ class SubscriptionStorage:
 
 
 def _row_to_sub(r: tuple) -> Subscription:
-    return Subscription(
-        id=r[0],
-        session_id=r[1],
-        type=r[2],
-        role=r[3],
-        target=r[4],
-        created_at=r[5],
-        state=r[6] if len(r) > 6 else "active",
-        revision=r[7] if len(r) > 7 else 1,
-        initialized_at=r[8] if len(r) > 8 else None,
-    )
+    return Subscription(id=r[0], session_id=r[1], type=r[2], role=r[3], target=r[4], created_at=r[5])

@@ -1,562 +1,214 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
 
-from .errors import SourceError, SourcePartialError, SourceSchemaError
-from .parser import Post
-from .post_consumers import ensure_subscription_posts
-from .post_fields import merge_post_fields, validate_post_evidence
-from .post_time import parse_publish_time
-from .source_scan import SourcePage, collect_pages
+from .dwr_engine import execute_dwr
+from .dwr_parser import parse_dwr_response
+from .filter import FilterRule, apply_filter, parse_tag_expr
+from .formatter import format_post
+from .parser import Post, parse_blog_posts
+from .scheduler import fetch_tag_posts
+from .utils import _split_text
 
-_MOBILE_REASONS = frozenset({
-    "mobile_incomplete",
-    "mobile_sort_mismatch",
-    "mobile_publish_time_missing",
-    "mobile_publish_time_invalid",
-    "mobile_order_regressed",
-    "mobile_http",
-    "mobile_timeout",
-    "mobile_retry_exhausted",
-    "mobile_challenge",
-    "mobile_business",
-    "mobile_schema",
-    "mobile_partial",
-    "mobile_limit",
-    "mobile_source_error",
-    "mobile_cursor_restart",
-})
-
-
-@dataclass(frozen=True)
-class FixtureBundle:
-    baseline: Post
-    candidate: Post
+POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
 
 
 class NetworkStepsMixin:
-    async def _step_01_runtime(self) -> object:
-        key = "runtime"
-        name = "运行时与隔离存储"
-        started = self._timed_start()
+
+    async def _step_01_config_rw(self) -> object:
+        name = "配置读写"
+        t0 = self._timed_start()
         details: list[str] = []
         try:
-            self._runtime = await self._create_runtime()
-            details.append("临时 SQLite 已初始化")
-            details.append("生产数据库未注入健康检查运行时")
-            task = self._production_scheduler._task
-            if task is None or task.done():
-                raise RuntimeError("production scheduler is not running")
-            if self._production_scheduler._interval <= 0:
-                raise RuntimeError("production scheduler interval is invalid")
-            details.append("生产 scheduler task 正在运行")
-            return self._pass(
-                key,
-                name,
-                self._timed_end(started),
-                details,
-                {"runtime_isolated": True},
-            )
-        except Exception as exc:
-            return self._fail(
-                key,
-                name,
-                self._timed_end(started),
-                exc,
-                details,
-                facts={"runtime_isolated": self._runtime is not None},
-            )
+            cookie = await self._db.get_config("lofter_cookie") or ""
+            details.append(f"Cookie 存在，长度 {len(cookie)}")
 
-    async def _step_02_mobile_direct(self) -> object:
-        key = "mobile_direct"
-        name = "Mobile 标签直连"
-        started = self._timed_start()
-        details: list[str] = []
-        facts: dict[str, str | int | bool] = {
-            "mobile_eligible": False,
-            "mobile_fallback_reason": "mobile_source_error",
-            "mobile_item_count": 0,
-            "mobile_time_count": 0,
-            "mobile_regression_count": 0,
-            "mobile_equal_count": 0,
-            "mobile_first_regression_pair_ordinal": 0,
-        }
-        diagnose = getattr(self._source, "diagnose_mobile_tag", None)
-        if not callable(diagnose):
-            return self._fail(
-                key,
-                name,
-                self._timed_end(started),
-                SourceSchemaError("response"),
-                ["source 未提供 Mobile-only 诊断入口"],
-                facts=facts,
-            )
-        try:
-            diagnostic = await diagnose(self.TEST_TAG, 20, "new")
-            reason = _safe_mobile_reason(diagnostic.fallback_reason)
-            facts.update({
-                "mobile_eligible": reason is None,
-                "mobile_fallback_reason": reason or "无",
-                "mobile_item_count": _safe_count(
-                    diagnostic.item_count
-                ),
-                "mobile_time_count": _safe_count(
-                    diagnostic.time_count
-                ),
-                "mobile_regression_count": _safe_count(
-                    diagnostic.regression_count
-                ),
-                "mobile_equal_count": _safe_count(
-                    diagnostic.equal_count
-                ),
-                "mobile_first_regression_pair_ordinal": _safe_count(
-                    diagnostic.first_regression_pair_ordinal
-                ),
-            })
-            if reason == "mobile_order_regressed":
-                details.extend(_mobile_order_details(facts))
-            if diagnostic.error is not None:
-                return self._fail(
-                    key,
-                    name,
-                    self._timed_end(started),
-                    diagnostic.error,
-                    [*details, f"fallback={reason}"],
-                    facts=facts,
-                )
-            page = diagnostic.page
-            if page is None:
-                raise SourceSchemaError("response")
-            if page.source != "mobile_tag":
-                raise SourceSchemaError("response")
-            if reason is not None:
-                return self._fail(
-                    key,
-                    name,
-                    self._timed_end(started),
-                    SourceSchemaError("response"),
-                    [*details, f"fallback={reason}"],
-                    facts=facts,
-                )
-            _validate_page(page)
-            self._artifacts["mobile_page"] = page
-            details.append("source=mobile_tag")
-            details.append(f"映射 {page.mapped_count}，丢弃 {page.dropped_count}")
-            return self._pass(
-                key,
-                name,
-                self._timed_end(started),
-                details,
-                facts,
-            )
-        except Exception as exc:
-            facts.update({
-                "mobile_eligible": False,
-                "mobile_fallback_reason": _exception_mobile_reason(exc),
-            })
-            return self._fail(
-                key,
-                name,
-                self._timed_end(started),
-                exc,
-                details,
-                facts=facts,
-            )
+            await self._db.set_config(self.TEST_CONFIG_KEY, "v1")
+            val = await self._db.get_config(self.TEST_CONFIG_KEY)
+            assert val == "v1", f"期望 v1，实际 {val}"
+            details.append(f"set_config('{self.TEST_CONFIG_KEY}', 'v1') OK")
+            details.append("get_config 往返值匹配")
 
-    async def _step_03_dwr_direct(self) -> object:
-        key = "dwr_direct"
-        name = "DWR 标签直连"
-        started = self._timed_start()
+            self._client.update_cookie(cookie)
+            details.append("client.update_cookie 无异常")
+            return self._pass(name, self._timed_end(t0), details)
+        except Exception as e:
+            return self._fail(name, self._timed_end(t0), e, details)
+
+    async def _step_02_dwr_engine(self) -> object:
+        name = "DWR 引擎"
+        t0 = self._timed_start()
         details: list[str] = []
         try:
-            page = await self._source.list_tag(
-                self.TEST_TAG, "v1:dwr:0", 20, "new"
-            )
-            _validate_page(page)
-            if page.source != "dwr":
-                raise SourceSchemaError("response")
-            self._artifacts["dwr_page"] = page
-            details.append("source=dwr")
-            details.append(f"映射 {page.mapped_count}，丢弃 {page.dropped_count}")
-            return self._pass(
-                key,
-                name,
-                self._timed_end(started),
-                details,
-                {"dwr_verified": True},
-            )
-        except Exception as exc:
-            return self._fail(
-                key,
-                name,
-                self._timed_end(started),
-                exc,
-                details,
-                facts={"dwr_verified": False},
-            )
+            import dukpy  # noqa: F401
+            details.append("dukpy 加载成功")
 
-    async def _step_04_production_orchestration(self) -> object:
-        key = "production_orchestration"
-        name = "生产标签编排"
-        started = self._timed_start()
+            sample_js = "dwr.engine._remoteHandleCallback('0','0',[{answer:42}]);"
+            items = await execute_dwr(sample_js)
+            details.append(f"样本 JS 执行结果: {items}")
+            return self._pass(name, self._timed_end(t0), details)
+        except Exception as e:
+            return self._fail(name, self._timed_end(t0), e, details)
+
+    async def _step_03_http_get(self) -> object:
+        name = "HTTP GET"
+        t0 = self._timed_start()
         details: list[str] = []
         try:
-            page = await collect_pages(
-                lambda cursor: self._source.list_tag(
-                    self.TEST_TAG, cursor, 20, "new"
-                ),
-                limit=20,
-            )
-            _validate_page(page)
-            if page.source not in {"mobile_tag", "dwr"}:
-                raise SourceSchemaError("response")
-            reason = _page_mobile_reason(page)
-            self._artifacts["production_page"] = page
-            source = _safe_source(page.source)
-            details.append(f"source={source}")
-            details.append(f"restarted={'yes' if page.restarted else 'no'}")
-            details.append(f"fallback={reason or '无'}")
-            return self._pass(
-                key,
-                name,
-                self._timed_end(started),
-                details,
-                {
-                    "production_source": source,
-                    "production_restarted": page.restarted,
-                    "production_fallback_reason": reason or "无",
-                    "production_partial_reason": "无",
-                },
-            )
-        except Exception as exc:
-            reason = _exception_mobile_reason(exc)
-            if reason == "无":
-                reason = "mobile_source_error" if hasattr(
-                    exc, "mobile_fallback_reason"
-                ) else "无"
-            facts = _production_failure_facts(exc, reason)
-            details.extend(_production_partial_details(facts))
-            return self._fail(
-                key,
-                name,
-                self._timed_end(started),
-                exc,
-                details,
-                facts=facts,
-            )
+            url = "https://www.lofter.com/"
+            html = await self._client.get(url)
+            details.append(f"GET {url} → {len(html)} bytes")
+            return self._pass(name, self._timed_end(t0), details)
+        except Exception as e:
+            return self._fail(name, self._timed_end(t0), e, details)
 
-    async def _step_05_fixture_detail(self) -> object:
-        key = "fixture_detail"
-        name = "Fixture 与单帖补全"
-        started = self._timed_start()
+    async def _step_04_dwr_search(self) -> object:
+        name = "DWR 标签搜索"
+        t0 = self._timed_start()
         details: list[str] = []
-        provider = "未建立"
-        phase = "candidate_selection"
-        ordinal = 0
-        total = 0
         try:
-            selected = _select_fixture_candidates(self._artifacts)
-            if selected is None:
-                provider_pages = _provider_pages(self._artifacts)
-                if not provider_pages:
-                    blockers = self._dependency_blockers(
-                        "production_orchestration", "mobile_direct", "dwr_direct"
-                    )
-                    return self._skip(key, name, blockers)
-                return self._inconclusive(
-                    key,
-                    name,
-                    self._timed_end(started),
-                    ["健康来源合计不足两个不同帖子"],
-                    {
-                        "fixture_provider": "未建立",
-                        "fixture_phase": phase,
-                        "fixture_candidate_ordinal": ordinal,
-                        "fixture_candidate_total": total,
-                    },
-                )
-            provider, candidates, evidence = selected
-            total = len(candidates)
-            enriched: list[Post] = []
-            for ordinal, candidate in enumerate(candidates, 1):
-                phase = "detail_fetch"
-                detail = await self._source.get_post(candidate.url)
-                phase = "list_detail_merge"
-                merged = merge_post_fields(candidate, detail)
-                phase = "full_evidence_validate"
-                validate_post_evidence((*evidence, candidate, detail, merged))
-                phase = "subscription_validate"
-                checked = await ensure_subscription_posts(
-                    [merged], _MemoryPostSource(merged), {"images"}
-                )
-                post = checked[0]
-                if not post.author_username:
-                    raise SourceSchemaError("author")
-                enriched.append(post)
-            phase = "fixture_order"
-            ordinal = 0
-            baseline, candidate = _order_fixture_posts(enriched)
-            bundle = FixtureBundle(baseline, candidate)
-            self._artifacts["fixture_bundle"] = bundle
-            details.append("两个不同帖子已通过真实单帖入口补全")
-            details.append(f"provider={provider}")
-            return self._pass(
-                key,
-                name,
-                self._timed_end(started),
-                details,
-                {"fixture_ready": True, "fixture_provider": provider},
-            )
-        except Exception as exc:
-            facts = {
-                "fixture_ready": False,
-                "fixture_provider": provider,
-                "fixture_phase": phase,
-                "fixture_candidate_ordinal": ordinal,
-                "fixture_candidate_total": total,
-            }
-            details.extend(_fixture_failure_details(facts))
-            return self._fail(
-                key,
-                name,
-                self._timed_end(started),
-                exc,
-                details,
-                facts=facts,
-            )
+            raw = await self._client.search_tag(self.TEST_TAG, limit=20)
+            self._artifacts["raw_dwr"] = raw
+            details.append(f"search_tag('{self.TEST_TAG}', limit=20) → {len(raw)} bytes")
+            return self._pass(name, self._timed_end(t0), details)
+        except Exception as e:
+            return self._fail(name, self._timed_end(t0), e, details)
 
-    async def _step_06_blog(self) -> object:
-        key = "blog"
-        name = "博主页生产编排"
-        started = self._timed_start()
-        blockers = self._dependency_blockers("fixture_detail")
-        if blockers:
-            return self._skip(key, name, blockers)
-        bundle = self._artifacts.get("fixture_bundle")
-        if not isinstance(bundle, FixtureBundle):
-            return self._skip(key, name, ("fixture_detail",))
-        owner = bundle.baseline.author_username
-        if not owner:
-            return self._fail(
-                key,
-                name,
-                self._timed_end(started),
-                SourceSchemaError("author"),
-                [],
-            )
+    async def _step_05_dwr_parse(self) -> object:
+        name = "DWR 响应解析"
+        t0 = self._timed_start()
+        details: list[str] = []
+        raw_dwr = self._artifacts.get("raw_dwr")
+        if raw_dwr is None:
+            return self._skip(name, "依赖 step 4 (raw_dwr) 未就绪")
         try:
-            page = await collect_pages(
-                lambda cursor: self._source.list_blog(owner, cursor, 20),
-                limit=20,
-            )
-            _validate_page(page)
-            if page.source not in {"mobile_blog", "html_blog"}:
-                raise SourceSchemaError("response")
-            source = _safe_source(page.source)
-            self._artifacts["blog_page"] = page
-            return self._pass(
-                key,
-                name,
-                self._timed_end(started),
-                [f"source={source}", f"映射 {page.mapped_count}"],
-                {"blog_source": source},
-            )
-        except Exception as exc:
-            return self._fail(
-                key,
-                name,
-                self._timed_end(started),
-                exc,
-                [],
-            )
+            posts = await parse_dwr_response(raw_dwr)
+            self._artifacts["tag_posts"] = posts
+            details.append(f"解析出 {len(posts)} 条帖子")
+            if posts:
+                p = posts[0]
+                details.append(f"样本 #1: title={p.title!r}, author={p.author!r}, images={len(p.images)}")
+            return self._pass(name, self._timed_end(t0), details)
+        except Exception as e:
+            return self._fail(name, self._timed_end(t0), e, details)
 
+    async def _step_06_blog_fetch(self) -> object:
+        name = "博主主页抓取"
+        t0 = self._timed_start()
+        details: list[str] = []
+        try:
+            url = f"https://{self.TEST_BLOG}.lofter.com"
+            html = await self._client.get(url)
+            self._artifacts["blog_html"] = html
+            details.append(f"GET {url} → {len(html)} bytes")
+            return self._pass(name, self._timed_end(t0), details)
+        except Exception as e:
+            return self._fail(name, self._timed_end(t0), e, details)
 
-class _MemoryPostSource:
-    def __init__(self, post: Post) -> None:
-        self._post = post
+    async def _step_07_blog_parse(self) -> object:
+        name = "博主主页解析"
+        t0 = self._timed_start()
+        details: list[str] = []
+        blog_html = self._artifacts.get("blog_html")
+        if blog_html is None:
+            return self._skip(name, "依赖 step 6 (blog_html) 未就绪")
+        try:
+            posts = await parse_blog_posts(blog_html)
+            self._artifacts["blog_posts"] = posts
+            details.append(f"解析出 {len(posts)} 条帖子")
+            if posts:
+                details.append(f"样本 #1: title={posts[0].title!r}, url={posts[0].url}")
+            return self._pass(name, self._timed_end(t0), details)
+        except Exception as e:
+            return self._fail(name, self._timed_end(t0), e, details)
 
-    async def get_post(self, url: str) -> Post:
-        if url != self._post.url:
-            raise SourceSchemaError("post.url")
-        return self._post
+    async def _step_08_post_parse(self) -> object:
+        name = "单帖解析"
+        t0 = self._timed_start()
+        details: list[str] = []
+        blog_posts: list[Post] | None = self._artifacts.get("blog_posts")
+        if not blog_posts:
+            return self._skip(name, "依赖 step 7 (blog_posts) 未就绪或为空")
+        try:
+            from .parser import parse_post_page
+            post = blog_posts[0]
+            html = await self._client.get(post.url)
+            rich = await parse_post_page(html, post.url)
+            self._artifacts["rich_post"] = rich
+            details.append(f"URL: {post.url}")
+            details.append(f"title={rich.title!r}, author={rich.author!r}, images={len(rich.images)}")
+            return self._pass(name, self._timed_end(t0), details)
+        except Exception as e:
+            return self._fail(name, self._timed_end(t0), e, details)
 
+    async def _step_09_auto_parse(self) -> object:
+        name = "auto_parse 链路"
+        t0 = self._timed_start()
+        details: list[str] = []
+        blog_posts: list[Post] | None = self._artifacts.get("blog_posts")
+        try:
+            sample_url = "https://foo.lofter.com/post/abc123"
+            assert POST_PATTERN.search(sample_url), "POST_PATTERN 未命中"
+            details.append(f"(a) POST_PATTERN 匹配: {sample_url!r} OK")
 
-def _validate_page(page: SourcePage) -> None:
-    if not isinstance(page, SourcePage):
-        raise SourceSchemaError("response")
-    if not page.complete:
-        raise SourcePartialError(
-            page.mapped_count,
-            page.dropped_count,
-            reason="page_incomplete",
-            source=_safe_source(page.source),
-            restarted=page.restarted,
-            page_count=1,
-            unique_count=len({post.post_id for post in page.items}),
-        )
-    if page.sort != "new":
-        raise SourceSchemaError("sort")
+            if blog_posts:
+                post = blog_posts[0]
+                text = format_post(post)
+                assert text and len(text) > 0, "format_post 返回空字符串"
+                details.append(f"(b) format_post 返回 {len(text)} 字符")
 
+            long_content = "A" * 500 + "\n\n" + "B" * 500
+            chunks = _split_text(long_content)
+            assert len(chunks) >= 1, "split_text 返回空"
+            details.append(f"(c) _split_text 切出 {len(chunks)} 块")
+            return self._pass(name, self._timed_end(t0), details)
+        except Exception as e:
+            return self._fail(name, self._timed_end(t0), e, details)
 
-def _provider_pages(
-    artifacts: dict[str, object]
-) -> list[tuple[str, SourcePage]]:
-    providers = (
-        ("production", "production_page"),
-        ("mobile", "mobile_page"),
-        ("dwr", "dwr_page"),
-    )
-    return [
-        (name, page)
-        for name, artifact in providers
-        if isinstance((page := artifacts.get(artifact)), SourcePage)
-    ]
+    async def _step_10_filter(self) -> object:
+        name = "过滤链路"
+        t0 = self._timed_start()
+        details: list[str] = []
+        tag_posts: list[Post] | None = self._artifacts.get("tag_posts")
+        if tag_posts is None:
+            return self._skip(name, "依赖 step 5 (tag_posts) 未就绪")
+        try:
+            excl = f"{self.TEST_TAG}_unlikely_excl"
+            subs, excls = parse_tag_expr(f"{self.TEST_TAG} -{excl}")
+            details.append(f"parse_tag_expr → subs={subs}, excls={excls}")
 
+            rule = FilterRule(search_tags=subs, exclude_tags=excls)
+            filtered = apply_filter(tag_posts, rule)
+            details.append(f"apply_filter: {len(tag_posts)} → {len(filtered)} 条")
+            assert len(filtered) <= len(tag_posts)
+            return self._pass(name, self._timed_end(t0), details)
+        except Exception as e:
+            return self._fail(name, self._timed_end(t0), e, details)
 
-def _select_fixture_candidates(
-    artifacts: dict[str, object]
-) -> tuple[str, list[Post], tuple[Post, ...]] | None:
-    pages = _provider_pages(artifacts)
-    for provider, page in pages:
-        posts = _unique_posts([page])
-        if len(posts) >= 2:
-            validate_post_evidence((*page.evidence_items, *page.items))
-            return provider, posts[:2], (*page.evidence_items, *page.items)
-    if not pages:
-        return None
-    all_pages = [page for _, page in pages]
-    observed = tuple(
-        post
-        for page in all_pages
-        for post in (*page.evidence_items, *page.items)
-    )
-    validate_post_evidence(observed)
-    posts = _unique_posts(all_pages)
-    if len(posts) < 2:
-        return None
-    return "combined", posts[:2], observed
+    async def _step_11_format(self) -> object:
+        name = "格式化"
+        t0 = self._timed_start()
+        details: list[str] = []
+        tag_posts: list[Post] | None = self._artifacts.get("tag_posts")
+        try:
+            posts = tag_posts or []
+            post = posts[0] if posts else Post(post_id="x", title="测试标题", summary="摘要", author="作者", url="https://x.lofter.com/post/1")
 
+            t1 = format_post(post)
+            assert t1, "format_post 基础调用失败"
+            details.append(f"format_post(post) → {len(t1)} 字符")
 
-def _order_fixture_posts(posts: list[Post]) -> tuple[Post, Post]:
-    if len(posts) != 2:
-        raise SourceSchemaError("response")
-    ordered = sorted(
-        posts,
-        key=lambda post: parse_publish_time(post.publish_time) or -1,
-    )
-    if parse_publish_time(ordered[0].publish_time) is None:
-        raise SourceSchemaError("publish_time")
-    if parse_publish_time(ordered[1].publish_time) is None:
-        raise SourceSchemaError("publish_time")
-    return ordered[0], ordered[1]
+            t2 = format_post(post, header="【测试头部】")
+            assert t2.startswith("【测试头部】"), "header 未出现"
+            details.append("format_post(header=...) OK")
 
+            t3 = format_post(post, body="自定义正文")
+            assert "自定义正文" in t3, "body 未出现"
+            details.append("format_post(body=...) OK")
 
-def _unique_posts(pages: list[SourcePage]) -> list[Post]:
-    posts: dict[str, Post] = {}
-    for page in pages:
-        for post in page.items:
-            if not post.post_id or not post.url:
-                continue
-            current = posts.get(post.post_id)
-            posts[post.post_id] = (
-                post if current is None else merge_post_fields(current, post)
-            )
-    return list(posts.values())
-
-
-def _page_mobile_reason(page: SourcePage) -> str | None:
-    for diagnostic in page.diagnostics:
-        prefix = "mobile_fallback:"
-        if diagnostic.startswith(prefix):
-            return _safe_mobile_reason(diagnostic[len(prefix):])
-    return None
-
-
-def _exception_mobile_reason(error: BaseException) -> str:
-    return _safe_mobile_reason(
-        getattr(error, "mobile_fallback_reason", None)
-    ) or "无"
-
-
-def _safe_mobile_reason(value: object) -> str | None:
-    return value if isinstance(value, str) and value in _MOBILE_REASONS else None
-
-
-def _safe_source(value: str) -> str:
-    known = {"dwr", "html_blog", "mobile_blog", "mobile_tag"}
-    return value if value in known else "unknown"
-
-
-def _safe_count(value: object) -> int:
-    return value if type(value) is int and value >= 0 else 0
-
-
-def _mobile_order_details(
-    facts: dict[str, str | int | bool],
-) -> list[str]:
-    return [
-        f"items={facts['mobile_item_count']}",
-        f"times={facts['mobile_time_count']}",
-        f"regressions={facts['mobile_regression_count']}",
-        f"equals={facts['mobile_equal_count']}",
-        "first-regression-pair="
-        f"{facts['mobile_first_regression_pair_ordinal']}",
-    ]
-
-
-def _production_failure_facts(
-    error: BaseException, fallback_reason: str
-) -> dict[str, str | int | bool]:
-    if not isinstance(error, SourcePartialError):
-        return {
-            "production_source": "unknown",
-            "production_restarted": "unknown",
-            "production_fallback_reason": fallback_reason,
-            "production_partial_reason": "unknown",
-            "production_page_count": 0,
-            "production_unique_count": 0,
-            "production_evidence_count": 0,
-        }
-    restarted: str | bool = (
-        error.restarted if error.restarted is not None else "unknown"
-    )
-    return {
-        "production_source": error.source,
-        "production_restarted": restarted,
-        "production_fallback_reason": fallback_reason,
-        "production_partial_reason": error.reason,
-        "production_page_count": error.page_count,
-        "production_unique_count": error.unique_count,
-        "production_evidence_count": error.evidence_count,
-    }
-
-
-def _production_partial_details(
-    facts: dict[str, str | int | bool],
-) -> list[str]:
-    if facts["production_partial_reason"] == "unknown":
-        return []
-    restarted = {
-        True: "yes",
-        False: "no",
-        "unknown": "unknown",
-    }.get(facts["production_restarted"], "unknown")
-    return [
-        f"partial={facts['production_partial_reason']}",
-        f"source={facts['production_source']}",
-        f"restarted={restarted}",
-        f"pages={facts['production_page_count']}",
-        f"unique={facts['production_unique_count']}",
-        f"evidence={facts['production_evidence_count']}",
-    ]
-
-
-def _fixture_failure_details(
-    facts: dict[str, str | int | bool],
-) -> list[str]:
-    details = [f"phase={facts['fixture_phase']}"]
-    ordinal = facts["fixture_candidate_ordinal"]
-    total = facts["fixture_candidate_total"]
-    if type(ordinal) is int and ordinal > 0:
-        details.append(f"candidate={ordinal}/{total}")
-    return details
+            t4 = format_post(post, include_time=True)
+            assert t4, "include_time 调用失败"
+            details.append("format_post(include_time=True) OK")
+            return self._pass(name, self._timed_end(t0), details)
+        except Exception as e:
+            return self._fail(name, self._timed_end(t0), e, details)

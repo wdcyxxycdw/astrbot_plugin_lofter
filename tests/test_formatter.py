@@ -1,24 +1,13 @@
 import pytest
 from core.parser import Post
-from core.formatter import format_post, visible_images
+from core.formatter import format_post
 
 DIVIDER = "──────────────"
 
 
 def make_post(**kwargs):
-    defaults = dict(
-        post_id="1",
-        title="测试标题",
-        summary="摘要内容",
-        url="https://example.lofter.com/post/1",
-    )
-    values = {**defaults, **kwargs}
-    if "completeness" not in values:
-        values["completeness"] = frozenset({
-            "title", "summary", "content", "images", "tags", "author",
-            "author_username", "publish_time", "url",
-        })
-    return Post(**values)
+    defaults = dict(post_id="1", title="测试标题", summary="摘要内容", url="https://example.lofter.com/post/1")
+    return Post(**{**defaults, **kwargs})
 
 
 def test_basic_all_fields():
@@ -81,41 +70,6 @@ def test_body_override():
     result = format_post(post, body="覆盖内容")
     assert "覆盖内容" in result
     assert "原始摘要" not in result
-
-
-def test_known_summary_renders_without_known_content():
-    post = make_post(
-        summary="可信摘要",
-        content="poisoned content",
-        source="mobile_detail",
-        completeness=frozenset({"title", "summary", "url"}),
-    )
-
-    result = format_post(post)
-
-    assert "可信摘要" in result
-    assert "poisoned content" not in result
-
-
-def test_unknown_fields_are_not_rendered_as_real_values():
-    post = make_post(
-        title="secret title",
-        author="secret author",
-        tags=["secret-tag"],
-        summary="secret body",
-        publish_time="2099-01-01",
-        source="mobile_tag",
-        completeness=frozenset({"url"}),
-    )
-
-    result = format_post(post, include_time=True)
-
-    assert "(标题未知)" in result
-    assert "secret" not in result
-    assert "2099-01-01" not in result
-    assert "部分字段未知" in result
-    assert post.url in result
-    assert visible_images(post) == []
 
 
 def test_divider_and_url_always_present():

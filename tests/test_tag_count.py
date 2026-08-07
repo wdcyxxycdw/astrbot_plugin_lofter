@@ -6,9 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from core.errors import SourceSchemaError, SourceTimeoutError
 from core.parser import Post
-from core.source_scan import SourcePage
 from core.tag_count import (
     CountExpressionError,
     CountResult,
@@ -16,6 +14,7 @@ from core.tag_count import (
     build_count_csv_path,
     count_posts,
     extract_positive_tags,
+    is_admin_event,
     match_expression,
     parse_count_command_arg,
     parse_count_expression,
@@ -27,30 +26,27 @@ def _post(tags: list[str]) -> Post:
     return Post(post_id="p", title="", summary="", tags=tags)
 
 
-def _timed_post(post_id: str, tags: list[str], time: str) -> Post:
-    return Post(
-        post_id=post_id,
-        title="",
-        summary="",
-        tags=tags,
-        publish_time=time,
-    )
+class DummyEvent:
+    def __init__(self, admin):
+        self.is_admin = admin
 
 
-def _page(items, cursor=None, *, exhausted=None, restarted=False, complete=True):
-    if exhausted is None:
-        exhausted = cursor is None
-    return SourcePage(
-        items=items,
-        source="mobile_tag",
-        next_cursor=cursor,
-        exhausted=exhausted,
-        sort="new",
-        mapped_count=len(items),
-        dropped_count=0 if complete else 1,
-        complete=complete,
-        restarted=restarted,
-    )
+def test_is_admin_event_reads_boolean_attribute():
+    assert is_admin_event(DummyEvent(True)) is True
+    assert is_admin_event(DummyEvent(False)) is False
+
+
+class CallableAdminEvent:
+    def __init__(self, admin):
+        self._admin = admin
+
+    def is_admin(self):
+        return self._admin
+
+
+def test_is_admin_event_reads_callable_attribute():
+    assert is_admin_event(CallableAdminEvent(True)) is True
+    assert is_admin_event(CallableAdminEvent(False)) is False
 
 
 def test_build_count_csv_path(tmp_path):
@@ -223,225 +219,168 @@ def test_parse_count_command_arg_rejects_missing_equals():
 
 @pytest.mark.asyncio
 async def test_count_posts_dedupes_candidates_and_matches_expression():
-    source = AsyncMock()
-    pages = {
-        ("A", None): _page([
-            _timed_post("1", ["A", "B"], "2026-01-10 00:00:00"),
-            _timed_post("2", ["A"], "2026-01-09 00:00:00"),
-        ], "a-2"),
-        ("A", "a-2"): _page([]),
-        ("B", None): _page([
-            _timed_post("1", ["A", "B"], "2026-01-10 00:00:00"),
-            _timed_post("3", ["B"], "2026-01-09 00:00:00"),
-        ], "b-2"),
-        ("B", "b-2"): _page([]),
-    }
+    client = AsyncMock()
+    client.search_tag.side_effect = ["raw-a-1", "", "raw-b-1", ""]
 
-    async def list_tag(tag, cursor, limit, sort):
-        assert (limit, sort) == (20, "new")
-        return pages[(tag, cursor)]
+    async def parser(raw):
+        if raw == "raw-a-1":
+            return [
+                Post(post_id="1", title="", summary="", tags=["A", "B"]),
+                Post(post_id="2", title="", summary="", tags=["A"]),
+            ]
+        if raw == "raw-b-1":
+            return [
+                Post(post_id="1", title="", summary="", tags=["A", "B"]),
+                Post(post_id="3", title="", summary="", tags=["B"]),
+            ]
+        return []
 
-    source.list_tag.side_effect = list_tag
-    result = await count_posts("A B", source, page_size=20)
+    result = await count_posts("A B", client, parse_posts=parser, page_size=20)
 
-    assert result.status == "success"
     assert result.count == 1
-    assert result.candidates == 2
-    assert result.scanned_pages == {"A": 1}
-    assert {call.args[0] for call in source.list_tag.call_args_list} == {
-        "A",
-        "B",
-    }
+    assert result.candidates == 3
+    assert client.search_tag.call_args_list[0].kwargs == {"offset": 0, "limit": 20}
 
 
 @pytest.mark.asyncio
 async def test_count_posts_continues_tag_pages_when_page_is_only_global_duplicates():
-    source = AsyncMock()
-    pages = {
-        ("A", None): _page([
-            _timed_post("p1", ["A", "B"], "2026-01-10 00:00:00"),
-            _timed_post("p2", ["A", "B"], "2026-01-09 00:00:00"),
-        ], "a-2"),
-        ("A", "a-2"): _page([]),
-        ("B", None): _page([
-            _timed_post("p1", ["A", "B"], "2026-01-10 00:00:00"),
-            _timed_post("p2", ["A", "B"], "2026-01-09 00:00:00"),
-        ], "b-2"),
-        ("B", "b-2"): _page([
-            _timed_post("p3", ["B"], "2026-01-08 00:00:00")
-        ], "b-4"),
-        ("B", "b-4"): _page([]),
-    }
-    source.list_tag.side_effect = (
-        lambda tag, cursor, limit, sort: pages[(tag, cursor)]
-    )
+    client = AsyncMock()
 
-    result = await count_posts("A|B", source, page_size=2)
+    async def search_tag(tag, *, offset, limit):
+        pages = {
+            ("A", 0): "raw-a-1",
+            ("A", 2): "",
+            ("B", 0): "raw-b-1",
+            ("B", 2): "raw-b-2",
+            ("B", 4): "",
+        }
+        return pages[(tag, offset)]
+
+    client.search_tag.side_effect = search_tag
+
+    async def parser(raw):
+        if raw == "raw-a-1":
+            return [
+                Post(post_id="p1", title="", summary="", tags=["A"]),
+                Post(post_id="p2", title="", summary="", tags=["A"]),
+            ]
+        if raw == "raw-b-1":
+            return [
+                Post(post_id="p1", title="", summary="", tags=["B"]),
+                Post(post_id="p2", title="", summary="", tags=["B"]),
+            ]
+        if raw == "raw-b-2":
+            return [Post(post_id="p3", title="", summary="", tags=["B"])]
+        return []
+
+    result = await count_posts("A|B", client, parse_posts=parser, page_size=2)
 
     assert result.count == 3
-    cursors_by_tag = {"A": [], "B": []}
-    for item in source.list_tag.call_args_list:
-        cursors_by_tag[item.args[0]].append(item.args[1])
-    assert cursors_by_tag == {
-        "A": [None, "a-2"],
-        "B": [None, "b-2", "b-4"],
-    }
+    offsets_by_tag = {"A": [], "B": []}
+    for item in client.search_tag.call_args_list:
+        offsets_by_tag[item.args[0]].append(item.kwargs["offset"])
+    assert offsets_by_tag == {"A": [0, 2], "B": [0, 2, 4]}
 
 
 @pytest.mark.asyncio
 async def test_count_posts_scans_multiple_positive_tags_concurrently():
-    source = AsyncMock()
+    client = AsyncMock()
     active_tags: set[str] = set()
     overlaps: list[set[str]] = []
 
-    async def list_tag(tag, cursor, limit, sort):
+    async def search_tag(tag, *, offset, limit):
         active_tags.add(tag)
         if len(active_tags) > 1:
             overlaps.append(set(active_tags))
         await asyncio.sleep(0.01)
         active_tags.remove(tag)
-        return _page([])
+        return ""
 
-    source.list_tag.side_effect = list_tag
-    result = await count_posts("A|B", source, page_size=20)
+    client.search_tag.side_effect = search_tag
+
+    async def parser(raw):
+        return []
+
+    result = await count_posts("A|B", client, page_size=20, parse_posts=parser)
 
     assert result.count == 0
     assert {"A", "B"} in overlaps
 
 
 @pytest.mark.asyncio
-async def test_count_posts_uses_one_deadline_and_cancels_all_tag_tasks():
-    source = AsyncMock()
-    started: set[str] = set()
-    stopped: set[str] = set()
-
-    async def list_tag(tag, cursor, limit, sort):
-        started.add(tag)
-        try:
-            await asyncio.Event().wait()
-        finally:
-            stopped.add(tag)
-
-    source.list_tag.side_effect = list_tag
-    result = await count_posts(
-        "A|B", source, tag_concurrency=2, _deadline=0.05
-    )
-    assert result.status == "failed"
-    assert result.count == 0
-    assert result.candidates == 0
-    assert result.scanned_pages == {"A": 0, "B": 0}
-    assert started == {"A", "B"}
-    assert stopped == {"A", "B"}
-
-
-@pytest.mark.asyncio
-async def test_count_posts_does_not_return_success_after_absolute_deadline():
-    source = AsyncMock()
-    source.list_tag.return_value = _page([])
-    clock = iter([0.0, 0.0, 2.0])
-    result = await count_posts(
-        "A", source, _deadline=1.0, _monotonic=lambda: next(clock)
-    )
-    assert result.status == "partial"
-    assert result.count == 0
-
-
-@pytest.mark.asyncio
-async def test_count_posts_propagates_source_timeout_without_success():
-    source = AsyncMock()
-    source.list_tag.side_effect = SourceTimeoutError()
-
-    result = await count_posts("A", source)
-
-    assert result.status == "failed"
-    assert result.count == 0
-    assert result.candidates == 0
-
-
-@pytest.mark.asyncio
-async def test_count_posts_preserves_scan_completed_before_deadline():
-    source = AsyncMock()
-    source.list_tag.return_value = _page([])
-    clock = iter([0.0, 0.0, 0.5, 2.0])
-    result = await count_posts(
-        "A", source, _deadline=1.0, _monotonic=lambda: next(clock)
-    )
-    assert result.status == "success"
-    assert result.count == 0
-    assert result.warnings == []
-
-
-@pytest.mark.asyncio
-async def test_count_posts_reports_failed_without_positive_scan_evidence():
-    source = AsyncMock()
-    result = await count_posts("-R18", source)
-
-    assert result.status == "failed"
-    assert result.count == 0
-    assert result.candidates == 0
-    assert result.scanned_pages == {}
-    source.list_tag.assert_not_awaited()
+async def test_count_posts_rejects_expression_without_positive_tag():
+    client = AsyncMock()
+    with pytest.raises(CountExpressionError, match="至少需要一个正向 tag"):
+        await count_posts("-R18", client)
 
 
 @pytest.mark.asyncio
 async def test_count_posts_records_warning_when_one_tag_scan_fails():
-    source = AsyncMock()
+    client = AsyncMock()
 
-    async def list_tag(tag, cursor, limit, sort):
-        if tag == "A" and cursor is None:
-            return _page([
-                _timed_post("p1", ["A"], "2026-01-10 00:00:00")
-            ], "a-20")
-        if tag == "A":
-            return _page([])
-        raise SourceSchemaError("response")
+    async def search_tag(tag, *, offset, limit):
+        return f"raw-{tag}-{offset}"
 
-    source.list_tag.side_effect = list_tag
-    result = await count_posts("A|B", source)
+    client.search_tag.side_effect = search_tag
+
+    async def parser(raw):
+        if raw == "raw-A-0":
+            return [Post(post_id="p1", title="", summary="", tags=["A"])]
+        if raw == "raw-A-20":
+            return []
+        raise RuntimeError("LOFTER 返回非 DWR 响应：响应片段：{ status: 4009 }")
+
+    result = await count_posts("A|B", client, parse_posts=parser)
 
     assert result.count == 1
     assert result.candidates == 1
     assert result.scanned_pages == {"A": 1, "B": 0}
-    assert result.warnings == [
-        "标签「B」扫描失败：内容源响应结构无效（response）"
-    ]
+    assert result.warnings == ["标签「B」扫描失败：LOFTER 返回非 DWR 响应：响应片段：{ status: 4009 }"]
 
 
 @pytest.mark.asyncio
 async def test_count_posts_propagates_unexpected_scan_errors():
-    source = AsyncMock()
-    source.list_tag.side_effect = ValueError("source bug")
+    client = AsyncMock()
+    client.search_tag.return_value = "raw-a-1"
 
-    with pytest.raises(ValueError, match="source bug"):
-        await count_posts("A", source)
+    async def parser(raw):
+        raise ValueError("parser bug")
+
+    with pytest.raises(ValueError, match="parser bug"):
+        await count_posts("A", client, parse_posts=parser)
 
 
 @pytest.mark.asyncio
 async def test_count_posts_reports_scanned_pages():
-    source = AsyncMock()
-    source.list_tag.side_effect = [
-        _page([
-            _timed_post("p1", ["A"], "2026-01-10 00:00:00")
-        ], "a-1"),
-        _page([
-            _timed_post("p2", ["A"], "2026-01-09 00:00:00")
-        ], "a-2"),
-        _page([]),
-    ]
+    client = AsyncMock()
+    client.search_tag.side_effect = ["raw-a-1", "raw-a-2", ""]
 
-    result = await count_posts("A", source, page_size=1)
+    async def parser(raw):
+        if raw == "raw-a-1":
+            return [Post(post_id="p1", title="", summary="", tags=["A"])]
+        if raw == "raw-a-2":
+            return [Post(post_id="p2", title="", summary="", tags=["A"])]
+        return []
+
+    result = await count_posts("A", client, parse_posts=parser, page_size=1)
 
     assert result.scanned_pages == {"A": 2}
     assert result.warnings == []
 
 
 @pytest.mark.asyncio
-async def test_count_posts_warns_when_positive_cursor_page_repeats_tag_posts():
-    source = AsyncMock()
-    post = _timed_post("p1", ["A"], "2026-01-10 00:00:00")
-    source.list_tag.side_effect = [_page([post], "a-1"), _page([post], "a-2")]
+async def test_count_posts_warns_when_positive_offset_page_repeats_tag_posts():
+    client = AsyncMock()
+    client.search_tag.side_effect = ["raw-a-1", "raw-a-duplicate"]
 
-    result = await count_posts("A", source, page_size=1)
+    async def parser(raw):
+        if raw == "raw-a-1":
+            return [Post(post_id="p1", title="", summary="", tags=["A"])]
+        if raw == "raw-a-duplicate":
+            return [Post(post_id="p1", title="", summary="", tags=["A"])]
+        return []
+
+    result = await count_posts("A", client, parse_posts=parser, page_size=1)
 
     assert result.scanned_pages == {"A": 2}
     assert result.warnings == ["标签「A」疑似分页未生效或接口返回重复页"]
@@ -513,8 +452,7 @@ async def test_handle_count_all_falls_back_when_csv_send_raises(tmp_path):
             return [("全部", "A")]
 
     class FakeEvent:
-        def is_admin(self):
-            return True
+        is_admin = True
 
         def plain_result(self, text: str):
             return text
