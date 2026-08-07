@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+from functools import wraps
 
 import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
@@ -163,11 +164,22 @@ async def _search_unique_posts(source: ContentSource, keyword: str, limit: int):
     return page.items
 
 
+def _stop_after_lofter_command(handler):
+    @wraps(handler)
+    async def wrapped(self, event, *args, **kwargs):
+        async for result in handler(self, event, *args, **kwargs):
+            yield result
+        event.stop_event()
+
+    wrapped.stops_lofter_command = True
+    return wrapped
+
+
 @register(
     "astrbot_plugin_lofter",
     "user",
     "解析 Lofter 链接，订阅 Lofter 标签/博主，搜索 Lofter 内容，支持标签表达式统计",
-    "v2.0.12",
+    "v2.0.13",
 )
 class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -362,6 +374,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("search")
+    @_stop_after_lofter_command
     async def search(self, event: AstrMessageEvent):
         """搜索 Lofter 标签内容。用法：/lofter search <标签名>"""
         if not is_admin_event(event):
@@ -399,6 +412,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             yield event.chain_result(chain)
 
     @lofter.command("list")
+    @_stop_after_lofter_command
     async def sub_list(self, event: AstrMessageEvent):
         """查看当前会话的订阅列表"""
         subs = await self._storage.list_by_session(event.unified_msg_origin)
@@ -417,6 +431,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("cookie")
+    @_stop_after_lofter_command
     async def set_cookie(self, event: AstrMessageEvent):
         """更新 Lofter Cookie。用法：/lofter cookie <cookie值>"""
         if not is_admin_event(event):
@@ -432,6 +447,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("block-author")
+    @_stop_after_lofter_command
     async def block_author(self, event: AstrMessageEvent):
         """屏蔽作者。用法：/lofter block-author <昵称或用户名>"""
         if not is_admin_event(event):
@@ -446,6 +462,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("unblock-author")
+    @_stop_after_lofter_command
     async def unblock_author(self, event: AstrMessageEvent):
         """解除作者屏蔽。用法：/lofter unblock-author <昵称或用户名>"""
         if not is_admin_event(event):
@@ -459,6 +476,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         yield event.plain_result(f"已解除屏蔽作者「{raw}」" if ok else f"未找到作者「{raw}」的屏蔽记录")
 
     @lofter.command("block-list")
+    @_stop_after_lofter_command
     async def block_list(self, event: AstrMessageEvent):
         """查看当前会话屏蔽作者列表"""
         blocks = await self._author_blocks.list_by_session(event.unified_msg_origin)
@@ -473,6 +491,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("count")
+    @_stop_after_lofter_command
     async def count(self, event: AstrMessageEvent):
         """保存并执行标签表达式统计。用法：/lofter count <名称> = <表达式>"""
         if not is_admin_event(event):
@@ -481,12 +500,14 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         async for result in self.handle_count(event): yield result
 
     @lofter.command("count-list")
+    @_stop_after_lofter_command
     async def count_list(self, event: AstrMessageEvent):
         """查看已保存的全局统计条件。用法：/lofter count-list"""
         async for result in self.handle_count_list(event): yield result
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("count-del")
+    @_stop_after_lofter_command
     async def count_del(self, event: AstrMessageEvent):
         """按名称或编号删除统计条件。用法：/lofter count-del <名称或编号>"""
         if not is_admin_event(event):
@@ -496,6 +517,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("count-all")
+    @_stop_after_lofter_command
     async def count_all(self, event: AstrMessageEvent):
         """执行所有已保存统计条件并生成 CSV。用法：/lofter count-all"""
         if not is_admin_event(event):
@@ -505,6 +527,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("subtag")
+    @_stop_after_lofter_command
     async def sub_tag(self, event: AstrMessageEvent):
         """订阅标签。用法：/lofter subtag <标签名> [-排除标签]"""
         if not is_admin_event(event):
@@ -539,6 +562,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("subtagpreview")
+    @_stop_after_lofter_command
     async def sub_tag_preview(self, event: AstrMessageEvent):
         """订阅标签并立即预览最新内容。用法：/lofter subtagpreview <标签名> [-排除]"""
         if not is_admin_event(event):
@@ -578,6 +602,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("subblog")
+    @_stop_after_lofter_command
     async def sub_blog(self, event: AstrMessageEvent):
         """订阅博主。用法：/lofter subblog <用户名>"""
         if not is_admin_event(event):
@@ -599,6 +624,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("unsubtag")
+    @_stop_after_lofter_command
     async def unsub_tag(self, event: AstrMessageEvent):
         """取消订阅标签。用法：/lofter unsubtag <标签名>"""
         if not is_admin_event(event):
@@ -615,6 +641,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("unexcludetag")
+    @_stop_after_lofter_command
     async def unexclude_tag(self, event: AstrMessageEvent):
         """取消排除标签。用法：/lofter unexcludetag <标签名>"""
         if not is_admin_event(event):
@@ -631,6 +658,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("unsubblog")
+    @_stop_after_lofter_command
     async def unsub_blog(self, event: AstrMessageEvent):
         """取消订阅博主。用法：/lofter unsubblog <用户名>"""
         if not is_admin_event(event):
@@ -647,6 +675,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("unsub")
+    @_stop_after_lofter_command
     async def unsub_by_index(self, event: AstrMessageEvent):
         """按编号取消订阅。用法：/lofter unsub <编号>（编号来自 /lofter list）"""
         if not is_admin_event(event):
@@ -673,6 +702,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("test")
+    @_stop_after_lofter_command
     async def run_e2e_test(self, event: AstrMessageEvent):
         """运行端到端集成测试（真实网络 + 真实推送）。用法：/lofter test"""
         if not is_admin_event(event):

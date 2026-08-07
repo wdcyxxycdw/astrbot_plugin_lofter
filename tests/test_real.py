@@ -6,7 +6,7 @@
     export LOFTER_TAG="标签名"
     export LOFTER_BLOG="用户名"
 
-    LOFTER_RUN_LIVE=1 uv run pytest tests/test_real.py -v -s
+    LOFTER_RUN_LIVE=1 uv run pytest -q tests/test_real.py
 """
 
 import os
@@ -65,15 +65,8 @@ async def _live_source():
 async def test_real_parse_post():
     async with _live_client() as client:
         html = await client.get(POST_URL, credentialed=True)
-    print(f"\n[HTML 长度] {len(html)} 字符")
-
     post = await parse_post_page(html, POST_URL)
     assert post is not None, "解析结果为 None，可能选择器不匹配"
-
-    print(f"[post_id]  {post.post_id}")
-    print(f"[title]    {post.title}")
-    print(f"[images]   {len(post.images)} 张: {post.images}")
-    print(f"[summary 前100字] {post.summary[:100] if post.summary else ''}")
     assert post.post_id, "未能提取 post_id"
 
 
@@ -83,10 +76,6 @@ async def test_real_default_source_image_post():
     async with _live_source() as source:
         post = await source.get_post(IMAGE_POST_URL)
     expected_count = int(IMAGE_EXPECTED_COUNT) if IMAGE_EXPECTED_COUNT else None
-    print(
-        f"[image source] {post.source} known={'images' in post.completeness} "
-        f"count={len(post.images)}"
-    )
     assert post.source == "mobile_detail"
     assert "images" in post.completeness
     assert post.images
@@ -100,15 +89,7 @@ async def test_real_tag_dwr():
     """通过 DWR TagBean.search 获取标签帖子列表"""
     async with _live_client() as client:
         raw = await client.search_tag(TAG, limit=20)
-    print(f"\n[DWR 响应长度] {len(raw)} 字符")
-
     posts = await parse_dwr_response(raw)
-    print(f"[解析到帖子数] {len(posts)}")
-    for p in posts[:3]:
-        print(f"  - {p.post_id} | {p.url}")
-        if p.summary:
-            print(f"    summary 前50字: {p.summary[:50]}")
-
     assert len(posts) > 0, "未从 DWR 响应中解析到帖子"
     assert all(p.post_id for p in posts), "存在缺少 post_id 的帖子"
     assert all(p.url for p in posts), "存在缺少 url 的帖子"
@@ -120,13 +101,7 @@ async def test_real_parse_blog():
     url = f"https://{BLOG}.lofter.com"
     async with _live_client() as client:
         html = await client.get(url, credentialed=True)
-    print(f"\n[博主页 HTML 长度] {len(html)} 字符")
-
     posts = await parse_blog_posts(html)
-    print(f"[解析到帖子数] {len(posts)}")
-    for p in posts[:3]:
-        print(f"  - {p.post_id} | {p.title} | {p.url}")
-
     assert len(posts) > 0, "博主页未解析到任何帖子"
 
 
@@ -141,10 +116,6 @@ async def test_real_enrich_blog_posts():
     assert len(enriched) == 1
 
     post = enriched[0]
-    print(f"\n[post_id] {post.post_id}")
-    print(f"[title]   {post.title}")
-    print(f"[author]  {post.author}")
-    print(f"[summary 前50字] {post.summary[:50] if post.summary else '(空)'}")
-    print(f"[images]  {len(post.images)} 张")
-
-    assert post.post_id == posts[0].post_id, "enriched 应保留原始 post_id"
+    same_post_id = post.post_id == posts[0].post_id
+    if not same_post_id:
+        pytest.fail("enriched 未保留原始 post_id")

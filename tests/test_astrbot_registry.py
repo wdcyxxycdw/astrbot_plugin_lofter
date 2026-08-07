@@ -56,6 +56,7 @@ class DeniedEvent:
 
     def __init__(self):
         self.admin_calls = 0
+        self.stop_calls = 0
 
     def is_admin(self):
         self.admin_calls += 1
@@ -63,6 +64,9 @@ class DeniedEvent:
 
     def plain_result(self, text):
         return text
+
+    def stop_event(self):
+        self.stop_calls += 1
 
 
 @pytest.mark.asyncio
@@ -88,6 +92,8 @@ async def test_real_registry_has_expected_command_permission_filters():
         ]
         by_command = {_command_name(item, CommandFilter): item for item in handlers}
         assert set(by_command) == ADMIN_COMMANDS | PUBLIC_COMMANDS
+        for registered_handler in by_command.values():
+            assert registered_handler.handler.stops_lofter_command is True
         for command in ADMIN_COMMANDS:
             permissions = [f for f in by_command[command].event_filters if isinstance(f, PermissionTypeFilter)]
             assert len(permissions) == 1
@@ -102,6 +108,7 @@ async def test_real_registry_has_expected_command_permission_filters():
         results = [item async for item in downgraded.handler(plugin, event)]
         assert results == [ADMIN_ONLY_MESSAGE]
         assert event.admin_calls == 1
+        assert event.stop_calls == 1
     finally:
         star_handlers_registry._handlers[:] = handlers_before
         star_handlers_registry.star_handlers_map.clear()

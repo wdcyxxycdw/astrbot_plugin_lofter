@@ -2,7 +2,7 @@
 
 AstrBot 插件，用于解析 Lofter 链接、订阅 Lofter 标签/博主、搜索内容、屏蔽作者和统计标签作品。
 
-当前版本：**v2.0.12**。
+当前版本：**v2.0.13**。
 
 ## 功能
 
@@ -48,7 +48,7 @@ AstrBot 插件，用于解析 Lofter 链接、订阅 Lofter 标签/博主、搜�
 2. 按内容类型和失败原因回退到页面 embedded JSON、HTML 或 DWR 标签接口。
 3. DWR 响应在受限子进程中执行并提取对象图。
 4. 各来源都执行 canonical 帖子身份、字段证据和来源一致性校验；证据冲突时 fail closed，而不是拼接不可信结果。
-5. Mobile detail 图片字段兼容 `photoLinks` 与 `firstImageUrl`；双字段同时出现时必须解析为相同的有序 URL 列表，否则 fail closed。
+5. Mobile detail 以非 `null` 的 `photoLinks` 作为权威完整图库；仅当该字段缺失或为 `null` 时回退 `firstImageUrl`。空数组表示已知无图，权威字段 malformed 时 fail closed；合法 `photoLinks` 不与首图预览字段做相等校验。
 6. 所有来源 observation 都保留用于冲突验证。restart 默认延续旧业务结果的 coverage obligation；仅 Mobile 标签 cursor 切换到 DWR offset 0 时开启新业务 scope，旧 Mobile 结果不与 DWR 结果拼接，显式 dropped/unmapped evidence 仍必须被覆盖。
 
 HTML 仍是博主页面等路径的回退来源，但不再是唯一解析方式。
@@ -73,7 +73,7 @@ https://username.lofter.com/post/xxxxxx
 - `/lofter block-list`
 - `/lofter count-list`
 
-其余 `/lofter` 命令均为管理员命令，并同时经过 AstrBot 权限过滤器和 handler 内检查。自动链接解析不属于管理命令。
+其余 `/lofter` 命令均为管理员命令，并同时经过 AstrBot 权限过滤器和 handler 内检查。18 个合法子命令会先完整产出全部回复，再在 handler 正常耗尽后停止当前事件继续传播；异常、取消或消费者提前关闭时不会误停止。裸 `/lofter`、未知子命令、自动链接解析和 LLM 工具仍保持各自原有的框架传播边界。
 
 ### 命令
 
@@ -218,6 +218,12 @@ SQLite 文件位于：
 旧版 `subscriptions.json` 会通过 version 2 marker 原子导入，源文件保留。Schema v1–v4 会在单个 transaction 中迁移到 v5，并在提交前校验结构和外键。
 
 当前版本**没有**自动清理 accepted/dead/seen 的 retention、dead delivery 恢复命令或 ReportStore。数据库会随历史记录持续增长，需要部署方自行监控和备份；不要直接修改状态表绕过队列协议。
+
+## 开发验证边界
+
+- 五图 live-hybrid 只在第一阶段匿名请求显式配置的真实 canary；关闭内容源后立即封锁出站网络，再复用生产 `SubscriptionService`、`SubscriptionScheduler`、`DeliveryQueue` 和 SQLite，通过本地 fake QQ context 验证完整图库的 pending、claim、Plain、Nodes、accepted 和 seen。该测试不连接真实 adapter、NapCat 或 QQ，不下载图片，也不输出真实内容。
+- 九步 live E2E 复用生产 `E2ETestRunner` 和真实 Lofter 网络，但注入本地 fake `PushSendResult`，不会真实发送。实际 `/lofter test` 的真实发送行为不变；外部 feed 无法提供足够 fixture 时，测试明确报告 inconclusive/skip。
+- 其他真实网络测试只断言安全状态和数量，不打印 Cookie、帖子字段、正文、图片 URL 或原始响应。
 
 ## 许可证
 

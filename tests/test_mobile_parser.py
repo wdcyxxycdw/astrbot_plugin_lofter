@@ -4,7 +4,6 @@ from pathlib import Path
 import pytest
 
 from core.errors import (
-    PostEvidenceError,
     SourceBusinessError,
     SourceChallengeError,
     SourceClosingError,
@@ -30,6 +29,7 @@ from core.parser import Post
 from core.post_fields import merge_post_fields
 
 FIXTURES = Path(__file__).parent / "fixtures" / "lofter"
+_TEST_MISSING = object()
 
 
 def _fixture(name):
@@ -177,11 +177,16 @@ def test_detail_maps_first_image_url_with_detail_provenance():
     assert post.provenance["images"] == "mobile_detail"
 
 
-def test_detail_image_aliases_must_match_in_order():
-    images = ["https://media.example.invalid/one.jpg"]
+def test_detail_photo_links_are_authoritative_over_preview_variants():
+    full_images = [
+        f"https://media.example.invalid/full-{index}.jpg" for index in range(5)
+    ]
+    previews = [
+        f"https://preview.example.invalid/preview-{index}.jpg" for index in range(3)
+    ]
     item = _nested_detail_item(
-        photoLinks=images,
-        firstImageUrl=json.dumps(images),
+        photoLinks=full_images,
+        firstImageUrl=json.dumps(previews),
     )
 
     post = parse_mobile_post_detail({
@@ -189,28 +194,86 @@ def test_detail_image_aliases_must_match_in_order():
         "response": {"posts": [item]},
     })
 
+    assert post.images == full_images
+    assert post.provenance["images"] == "mobile_detail"
+
+
+@pytest.mark.parametrize(
+    "preview",
+    [
+        '["https://media.example.invalid/two.jpg"]',
+        '["https://media.example.invalid/one.jpg?preview=1"]',
+        '["https://preview.example.invalid/other.jpg"]',
+        "[not-json",
+    ],
+)
+def test_detail_ignores_first_image_url_when_photo_links_are_known(preview):
+    images = [
+        "https://media.example.invalid/one.jpg",
+        "https://media.example.invalid/two.jpg",
+    ]
+    item = _nested_detail_item(photoLinks=images, firstImageUrl=preview)
+
+    post = parse_mobile_post_detail({
+        "meta": {"status": 200, "msg": "demo"},
+        "response": {"posts": [item]},
+    })
+
     assert post.images == images
+    assert "images" in post.completeness
 
 
-def test_detail_rejects_conflicting_image_aliases():
+@pytest.mark.parametrize("value", [[], "[]"])
+def test_detail_empty_photo_links_are_known_and_do_not_fallback(value):
     item = _nested_detail_item(
-        photoLinks=["https://media.example.invalid/one.jpg"],
-        firstImageUrl='["https://media.example.invalid/two.jpg"]',
+        photoLinks=value,
+        firstImageUrl='["https://media.example.invalid/fallback.jpg"]',
     )
 
-    with pytest.raises(PostEvidenceError) as exc_info:
+    post = parse_mobile_post_detail({
+        "meta": {"status": 200, "msg": "demo"},
+        "response": {"posts": [item]},
+    })
+
+    assert post.images == []
+    assert "images" in post.completeness
+
+
+def test_detail_rejects_malformed_photo_links_even_with_valid_fallback():
+    item = _nested_detail_item(
+        photoLinks="[not-json",
+        firstImageUrl='["https://media.example.invalid/fallback.jpg"]',
+    )
+
+    with pytest.raises(SourceSchemaError) as exc_info:
         parse_mobile_post_detail({
             "meta": {"status": 200, "msg": "demo"},
             "response": {"posts": [item]},
         })
 
-    assert exc_info.value.diagnostic == "alias_value_conflict:images:mobile_image_aliases"
+    assert exc_info.value.location == "photoLinks"
 
 
-@pytest.mark.parametrize(
-    ("value", "known"), [(None, False), ("[]", True)],
-)
-def test_detail_first_image_url_handles_null_and_known_empty(value, known):
+@pytest.mark.parametrize("photo_links", [_TEST_MISSING, None])
+def test_detail_falls_back_when_photo_links_are_missing_or_null(photo_links):
+    images = ["https://media.example.invalid/fallback.jpg"]
+    item = _nested_detail_item(firstImageUrl=json.dumps(images))
+    if photo_links is _TEST_MISSING:
+        item["post"].pop("photoLinks", None)
+    else:
+        item["post"]["photoLinks"] = photo_links
+
+    post = parse_mobile_post_detail({
+        "meta": {"status": 200, "msg": "demo"},
+        "response": {"posts": [item]},
+    })
+
+    assert post.images == images
+    assert "images" in post.completeness
+
+
+@pytest.mark.parametrize("value", [[], "[]"])
+def test_detail_first_image_url_known_empty_fallback(value):
     item = _nested_detail_item(photoLinks=None, firstImageUrl=value)
 
     post = parse_mobile_post_detail({
@@ -219,7 +282,38 @@ def test_detail_first_image_url_handles_null_and_known_empty(value, known):
     })
 
     assert post.images == []
-    assert ("images" in post.completeness) is known
+    assert "images" in post.completeness
+
+
+@pytest.mark.parametrize(
+    ("photo_links", "first_image"),
+    [
+        (_TEST_MISSING, _TEST_MISSING),
+        (_TEST_MISSING, None),
+        (None, _TEST_MISSING),
+        (None, None),
+    ],
+)
+def test_detail_images_are_unknown_when_both_fields_are_unavailable(
+    photo_links, first_image
+):
+    item = _nested_detail_item()
+    for key, value in (
+        ("photoLinks", photo_links),
+        ("firstImageUrl", first_image),
+    ):
+        if value is _TEST_MISSING:
+            item["post"].pop(key, None)
+        else:
+            item["post"][key] = value
+
+    post = parse_mobile_post_detail({
+        "meta": {"status": 200, "msg": "demo"},
+        "response": {"posts": [item]},
+    })
+
+    assert post.images == []
+    assert "images" not in post.completeness
 
 
 def test_detail_rejects_malformed_first_image_url():

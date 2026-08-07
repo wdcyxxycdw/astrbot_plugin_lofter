@@ -4,7 +4,7 @@
 
 AstrBot 插件，功能：自动解析 Lofter 帖子链接、订阅标签/博主并定时推送、搜索标签内容、统计标签表达式，以及按会话屏蔽作者。
 
-当前插件版本为 v2.0.12，数据库 Schema 为 v5。
+当前插件版本为 v2.0.13，数据库 Schema 为 v5。
 
 ## 文件结构
 
@@ -56,6 +56,14 @@ core/
 
 四个 LLM 工具 `lofter_content`、`lofter_subscription`、`lofter_author_block`、`lofter_count` 全部只允许管理员调用。工具不暴露 Cookie 更新、真实 E2E 测试或链接 parse。
 
+### 命令传播边界
+
+18 个合法 `/lofter` 子命令由保留 handler 元数据的 async-generator decorator 统一包装：先转发全部 yield，只有底层 handler 正常耗尽后才调用 `event.stop_event()`。
+
+- decorator 位于命令函数最内层，不在入口停止事件，也不使用无条件 `finally`。
+- handler 异常、任务取消或消费者提前关闭时不会停止事件。
+- 裸 `/lofter`、未知子命令、自动链接解析和四个 LLM 工具不使用该包装，保持原有框架边界。
+
 ## 内容源与 HTTP 边界
 
 `DefaultContentSource` 实现 `ContentSource`：
@@ -66,7 +74,8 @@ core/
 - 所有来源 observation 都保留为 evidence，用于 canonical ID、URL、owner 和字段冲突验证。
 - restart 默认要求新 scope 覆盖旧业务 identity；仅 Mobile 标签 cursor 切换到 DWR offset 0 时开启新业务 scope，旧 Mobile items 不再构成 DWR coverage obligation，也不与 DWR 业务结果拼接。
 - explicit dropped/unmapped `evidence_items` 始终保留为 coverage obligation，不因 scope 切换消失。
-- canonical ID、URL、owner、字段别名和重复 occurrence 发生冲突时 fail closed；Mobile detail 图片仅接受 `photoLinks`/`firstImageUrl`，两个别名必须解析为相同有序列表。
+- canonical ID、URL、owner、一般字段别名和重复 occurrence 发生冲突时 fail closed。
+- Mobile detail 中非 `null` 的 `photoLinks` 是权威完整图库；仅当该字段缺失或为 `null` 时回退 `firstImageUrl`。`photoLinks=[]` 或 `"[]"` 表示已知无图；权威字段 malformed 时 fail closed，合法权威字段完全忽略首图预览的差异或 malformed。
 
 HTTP client 使用长生命周期 `aiohttp.ClientSession` 和 `DummyCookieJar`：
 
@@ -281,6 +290,11 @@ Claim transaction：
 - 报告区分 `HEALTHY`、`DEGRADED` 和 `INCONCLUSIVE`，且不暴露 Cookie、URL、post ID、owner、正文、图片 URL、完整 adapter response、异常文本、业务 payload 或原始异常。
 
 该命令仅管理员可执行，不暴露给 LLM tool。开发回归只使用离线 fake；普通 pytest 通过 marker 和 socket guard 隔离真实网络，只有显式 live 配置才允许真实测试。
+
+开发侧另有两条不改变 `/lofter test` 生产行为的 live 验证路径：
+
+- 五图 live-hybrid 的唯一真实阶段匿名抓取显式配置的 canary；关闭内容源后封锁全部出站网络，再使用生产订阅服务、scheduler、delivery queue、SQLite 和本地 fake QQ context 验证 `pending → sending → accepted → seen` 以及 Plain 加五个 Nodes。它不连接真实 adapter、NapCat 或 QQ，不下载图片，不输出真实内容。
+- 九步 fake-send E2E 使用生产 `E2ETestRunner` 和真实 Lofter 网络，但注入本地 fake `PushSendResult`；外部 feed 不足以形成 fixture 时明确报告 inconclusive/skip，不伪造成功。真实测试不打印 Cookie、URL、post ID、owner、正文、图片 URL 或原始响应。
 
 ## QQ adapter 契约测试
 

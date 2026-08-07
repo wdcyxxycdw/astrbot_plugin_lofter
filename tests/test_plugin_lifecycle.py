@@ -21,6 +21,7 @@ class _AdminCommandEvent:
     def __init__(self, message_str: str, platform_name: str = "test"):
         self.message_str = message_str
         self._platform_name = platform_name
+        self.stop_calls = 0
 
     def is_admin(self):
         return True
@@ -33,6 +34,9 @@ class _AdminCommandEvent:
 
     def chain_result(self, chain):
         return chain
+
+    def stop_event(self):
+        self.stop_calls += 1
 
 
 class _FakeSubscriptionSource:
@@ -184,6 +188,7 @@ async def test_send_push_normalizes_framework_completion_and_false_on_error():
     main = _load_main_module()
     plugin = object.__new__(main.LofterPlugin)
     plugin._max_images = 2
+    main.MessageChain = lambda components: SimpleNamespace(chain=components)
     platform = SimpleNamespace(meta=lambda: SimpleNamespace(name="test"))
     plugin.context = SimpleNamespace(
         get_platform_inst=MagicMock(return_value=platform),

@@ -57,17 +57,26 @@ def _load_main_module():
     star_module.register = _identity_decorator
     core_star = types.ModuleType("astrbot.core.star")
     core_star.StarTools = MagicMock
-    sys.modules.update({
+    module_stubs = {
         "astrbot.api.message_components": components,
         "astrbot.api.event": event_module,
         "astrbot.api.star": star_module,
         "astrbot.core.star": core_star,
-    })
-    spec = importlib.util.spec_from_file_location(module_name, ROOT / "main.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    sys.modules["main"] = module
-    spec.loader.exec_module(module)
+    }
+    previous = {name: sys.modules.get(name) for name in module_stubs}
+    sys.modules.update(module_stubs)
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, ROOT / "main.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        sys.modules["main"] = module
+        spec.loader.exec_module(module)
+    finally:
+        for name, original in previous.items():
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
     return module
 
 
@@ -161,6 +170,7 @@ class DeniedEvent:
 
     def __init__(self):
         self.admin_calls = 0
+        self.stop_calls = 0
 
     def is_admin(self):
         self.admin_calls += 1
@@ -168,6 +178,9 @@ class DeniedEvent:
 
     def plain_result(self, text):
         return text
+
+    def stop_event(self):
+        self.stop_calls += 1
 
 
 @pytest.mark.asyncio
@@ -182,6 +195,7 @@ async def test_admin_handler_body_rejects_after_registry_permission_downgrade(ha
 
     assert results == [ADMIN_ONLY_MESSAGE]
     assert event.admin_calls == 1
+    assert event.stop_calls == 1
 
 
 def test_config_validation_defaults_invalid_types_and_clamps_bounds():

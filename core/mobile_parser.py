@@ -8,7 +8,6 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
 
 from .errors import (
-    PostEvidenceError,
     SourceBusinessError,
     SourceChallengeError,
     SourceLimitError,
@@ -600,18 +599,13 @@ def _tags(value: Any) -> list[str]:
 
 
 def _detail_images(post: Mapping[str, Any]) -> tuple[list[str], bool]:
-    aliases = [
-        (key, post[key]) for key in ("photoLinks", "firstImageUrl")
-        if key in post and post[key] is not None
-    ]
-    if not aliases:
-        return [], False
-    images = [_url_list(value, key) for key, value in aliases]
-    if len(images) == 2 and images[0] != images[1]:
-        raise PostEvidenceError(
-            "alias_value_conflict", "images", "mobile_image_aliases"
-        )
-    return images[0], True
+    photo_links = post.get("photoLinks", _MISSING)
+    if photo_links is not _MISSING and photo_links is not None:
+        return _url_list(photo_links, "photoLinks"), True
+    first_image = post.get("firstImageUrl", _MISSING)
+    if first_image is not _MISSING and first_image is not None:
+        return _url_list(first_image, "firstImageUrl"), True
+    return [], False
 
 
 def _url_list(value: Any, location: str) -> list[str]:

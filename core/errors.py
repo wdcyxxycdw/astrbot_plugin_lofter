@@ -240,7 +240,6 @@ def _safe_post_evidence_origin(value: str) -> str:
         "embedded_url_aliases",
         "embedded_text_aliases",
         "embedded_image_aliases",
-        "mobile_image_aliases",
     }
     return value if value in known else "unknown"
 
