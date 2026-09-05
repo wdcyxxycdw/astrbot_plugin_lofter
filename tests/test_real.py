@@ -28,10 +28,15 @@ def skip_if_missing(*vars_):
     return pytest.mark.skipif(bool(missing), reason="缺少环境变量")
 
 
+@pytest.fixture
+async def client():
+    async with LofterClient(COOKIE) as instance:
+        yield instance
+
+
 @pytest.mark.asyncio
 @skip_if_missing(COOKIE, POST_URL)
-async def test_real_parse_post():
-    client = LofterClient(COOKIE)
+async def test_real_parse_post(client):
     html = await client.get(POST_URL)
     print(f"\n[HTML 长度] {len(html)} 字符")
 
@@ -43,13 +48,13 @@ async def test_real_parse_post():
     print(f"[images]   {len(post.images)} 张: {post.images}")
     print(f"[summary 前100字] {post.summary[:100] if post.summary else ''}")
     assert post.post_id, "未能提取 post_id"
+    assert post.content or post.images or post.summary, "未抓到实际内容，可能返回了登录页"
 
 
 @pytest.mark.asyncio
 @skip_if_missing(COOKIE, TAG)
-async def test_real_tag_dwr():
+async def test_real_tag_dwr(client):
     """通过 DWR TagBean.search 获取标签帖子列表"""
-    client = LofterClient(COOKIE)
     raw = await client.search_tag(TAG, limit=20)
     print(f"\n[DWR 响应长度] {len(raw)} 字符")
 
@@ -67,8 +72,7 @@ async def test_real_tag_dwr():
 
 @pytest.mark.asyncio
 @skip_if_missing(COOKIE, BLOG)
-async def test_real_parse_blog():
-    client = LofterClient(COOKIE)
+async def test_real_parse_blog(client):
     url = f"https://{BLOG}.lofter.com"
     html = await client.get(url)
     print(f"\n[博主页 HTML 长度] {len(html)} 字符")
@@ -83,8 +87,7 @@ async def test_real_parse_blog():
 
 @pytest.mark.asyncio
 @skip_if_missing(COOKIE, BLOG)
-async def test_real_enrich_blog_posts():
-    client = LofterClient(COOKIE)
+async def test_real_enrich_blog_posts(client):
     url = f"https://{BLOG}.lofter.com"
     html = await client.get(url)
     posts = await parse_blog_posts(html)
@@ -101,3 +104,4 @@ async def test_real_enrich_blog_posts():
     print(f"[images]  {len(post.images)} 张")
 
     assert post.post_id == posts[0].post_id, "enriched 应保留原始 post_id"
+    assert post.content or post.images or post.summary, "详情抓取未返回实际内容"

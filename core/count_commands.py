@@ -124,11 +124,15 @@ class LofterCountCommandsMixin:
 
 
 def _format_count_result(result: CountResult) -> str:
+    if result.status == "失败":
+        return f"「{result.name}」统计失败：{result.error or '未取得有效数据'}"
+    label = "部分完成" if result.status == "部分完成" else "扫描结束"
     lines = [
-        f"「{result.name}」统计完成：{result.count} 个作品",
+        f"「{result.name}」{label}：已发现 {result.count} 个作品",
         f"候选作品：{result.candidates}",
         f"扫描页数：{format_scanned_pages(result.scanned_pages) or '无'}",
         f"条件：{result.expression}",
+        "范围：当前账号通过 DWR 可检索的作品，不代表平台全量总数",
     ]
     lines.extend(f"提示：{warning}" for warning in result.warnings)
     return "\n".join(lines)
