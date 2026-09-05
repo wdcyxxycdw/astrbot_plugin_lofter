@@ -7,6 +7,7 @@ import json
 import re
 from datetime import datetime
 from typing import Optional
+from bs4 import BeautifulSoup
 
 from .dwr_engine import execute_dwr
 from .parser import Post, extract_lofter_username
@@ -20,7 +21,10 @@ def _validate_dwr_response(body: str):
     text = body.strip()
     if not text:
         raise RuntimeError(f"DWR 响应为空：{_DWR_HINT}")
-    if _looks_like_html(text) or _DWR_CALLBACK not in text:
+    has_callback = any(name in text for name in (
+        _DWR_CALLBACK, "dwr.engine._remoteHandleException", "dwr.engine._remoteHandleBatchException",
+    ))
+    if _looks_like_html(text) or not has_callback:
         raise RuntimeError(f"LOFTER 返回非 DWR 响应：{_DWR_HINT}。响应片段：{_response_preview(text)}")
 
 
@@ -82,6 +86,32 @@ def _extract_images(value) -> list[str]:
     return []
 
 
+def _post_images(post: dict) -> list[str]:
+    photos = post.get("photoLinks") or []
+    if isinstance(photos, str):
+        try:
+            photos = json.loads(photos)
+        except ValueError:
+            photos = []
+    urls = []
+    if isinstance(photos, list):
+        for photo in photos:
+            if isinstance(photo, dict):
+                url = photo.get("raw") or photo.get("orign") or photo.get("middle")
+                if isinstance(url, str) and url:
+                    urls.append(url)
+    return list(dict.fromkeys(urls)) or _extract_images(post.get("firstImageUrl"))
+
+
+def _post_tags(post: dict) -> list[str]:
+    tags = post.get("tagList") or post.get("tag") or ""
+    if isinstance(tags, str):
+        tags = tags.split(",")
+    if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
+        raise RuntimeError("DWR 帖子标签结构异常，无法准确筛选或统计")
+    return [tag.strip() for tag in tags if tag.strip()]
+
+
 def _map_post(item: object) -> Optional[Post]:
     if not isinstance(item, dict):
         return None
@@ -93,7 +123,7 @@ def _map_post(item: object) -> Optional[Post]:
     url = post.get("blogPageUrl", "")
     post_id = _extract_post_id(url)
     if not post_id:
-        return None
+        raise RuntimeError("DWR 帖子缺少有效 URL/ID，不能静默忽略后统计")
 
     blog = post.get("blogInfo") or {}
     author = blog.get("blogNickName") or blog.get("blogName") or "" if isinstance(blog, dict) else ""
@@ -101,19 +131,23 @@ def _map_post(item: object) -> Optional[Post]:
     if not username and isinstance(blog, dict):
         username = blog.get("blogName") or ""
 
-    raw_tags = post.get("tag") or ""
-    tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
+    tags = _post_tags(post)
+    content = post.get("content") or ""
+    body = BeautifulSoup(content, "lxml").get_text(separator="\n").strip() if isinstance(content, str) else ""
+    timestamp = int(post.get("publishTime") or 0)
 
     return Post(
         post_id=post_id,
         url=url,
         title=post.get("title") or "",
-        summary=_extract_summary(post.get("dirContent") or post.get("content") or ""),
+        summary=_extract_summary(post.get("dirContent") or post.get("digest") or content),
         author=author,
         author_username=username,
         tags=tags,
-        publish_time=_fmt_time(post.get("publishTime") or 0),
-        images=_extract_images(post.get("firstImageUrl")),
+        publish_time=_fmt_time(timestamp),
+        publish_time_ms=timestamp,
+        images=_post_images(post),
+        content=body,
     )
 
 
@@ -126,5 +160,7 @@ async def parse_dwr_response(body: str) -> list[Post]:
         p = _map_post(item)
         if p:
             posts.append(p)
-    posts.sort(key=lambda p: p.publish_time, reverse=True)
+    if items and not posts:
+        raise RuntimeError("DWR 返回非空列表，但未识别到帖子：不能作为空页处理")
+    posts.sort(key=lambda p: p.publish_time_ms, reverse=True)
     return posts

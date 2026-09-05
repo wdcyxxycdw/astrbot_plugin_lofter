@@ -274,7 +274,7 @@ async def test_migration_v2_to_v3_adds_count_conditions(tmp_path):
     await db.initialize()
     await db.upsert_count_condition("条件", "原神")
     assert await db.list_count_conditions() == [("条件", "原神")]
-    assert await db.get_config("schema_version") == "4"
+    assert await db.get_config("schema_version") == "5"
     await db.close()
 
 
@@ -335,5 +335,38 @@ async def test_migration_v3_to_v4_adds_author_blocks(tmp_path):
     migrated = LofterDB(db_path)
     await migrated.initialize()
     assert await migrated.add_author_block("sess1", "username", "someuser", "someuser") is True
-    assert await migrated.get_config("schema_version") == "4"
+    assert await migrated.get_config("schema_version") == "5"
     await migrated.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_posts_survive_reopen_and_delivery_is_atomic(tmp_path):
+    from core.parser import Post
+
+    path = str(tmp_path / "pending.db")
+    db = LofterDB(path)
+    await db.initialize()
+    post = Post("a_1", "标题", "摘要", images=["https://image/a.png"], tags=["A"], content="全文")
+    await db.save_tag_page("s", "A", [post], 20, 1720000000123)
+    await db.enqueue_posts("s", "tag", "", [post])
+    await db.close()
+    db = LofterDB(path)
+    await db.initialize()
+    try:
+        assert await db.pending_posts("s", "tag", "") == [post]
+        assert await db.tag_scan_cursor("s", "A") == (20, 1720000000123)
+        await db._run(lambda: db._conn.execute("""
+            CREATE TRIGGER refuse_sent BEFORE INSERT ON sent_posts
+            BEGIN SELECT RAISE(ABORT, 'disk failure'); END;
+        """))
+        with pytest.raises(sqlite3.IntegrityError, match="disk failure"):
+            await db.mark_delivered("s", "tag", "a_1")
+        assert await db.filter_unseen_session("s", "tag", ["a_1"]) == ["a_1"]
+        assert await db.pending_posts("s", "tag", "") == [post]
+        await db._run(lambda: db._conn.execute("DROP TRIGGER refuse_sent"))
+        await db.mark_delivered("s", "tag", "a_1")
+        assert await db.filter_unsent("s", ["a_1"]) == []
+        assert await db.filter_unseen_session("s", "tag", ["a_1"]) == []
+        assert await db.pending_posts("s", "tag", "") == []
+    finally:
+        await db.close()

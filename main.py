@@ -65,6 +65,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
 
     async def terminate(self):
         await self._scheduler.stop()
+        await self._client.close()
         await self._db.close()
 
     @staticmethod
@@ -113,10 +114,9 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         mc.message(text)
         for u in images[:self._max_images]:
             mc.url_image(u)
-        try:
-            await self.context.send_message(session_id, mc)
-        except Exception as e:
-            logger.error("推送消息失败 session=%s: %s", session_id, e)
+        sent = await self.context.send_message(session_id, mc)
+        if sent is False:
+            raise RuntimeError(f"推送失败：未找到会话 {session_id} 对应的平台")
 
     # ──────────────────────────────────────────
     # 自动解析消息中的 Lofter 链接
@@ -226,6 +226,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         lines.append("\n用 /lofter unsub <编号> 取消订阅")
         yield event.plain_result("\n".join(lines))
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("cookie")
     async def set_cookie(self, event: AstrMessageEvent):
         """更新 Lofter Cookie。用法：/lofter cookie <cookie值>"""
@@ -419,14 +420,15 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         else:
             yield event.plain_result(f"删除失败，请重新 list 确认编号")
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("test")
     async def run_e2e_test(self, event: AstrMessageEvent):
-        """运行端到端集成测试（真实网络 + 真实推送）。用法：/lofter test"""
+        """运行部署环境诊断（真实网络 + 真实推送）。开发期 E2E 见 e2e/。"""
         from .core.e2e_test import E2ETestRunner, format_report
         runner = E2ETestRunner(
             self._db, self._client, self._storage, self._scheduler, self._send_push
         )
-        yield event.plain_result("开始端到端测试，请等待……")
+        yield event.plain_result("开始运行环境诊断，请等待……")
         results = await runner.run_all(event.unified_msg_origin)
         yield event.plain_result(format_report(results))
 

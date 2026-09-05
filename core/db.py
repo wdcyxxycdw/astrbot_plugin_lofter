@@ -1,9 +1,12 @@
 import asyncio
 import sqlite3
+import json
+from dataclasses import asdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from .db_migrations import DDL, SCHEMA_VERSION, get_schema_version, migrate
+from .parser import Post
 
 
 class LofterDB:
@@ -152,6 +155,10 @@ class LofterDB:
                 "INSERT OR IGNORE INTO seen_posts(session_id,type,post_id) VALUES(?,?,?)",
                 [(session_id, sub_type, pid) for pid in post_ids],
             )
+            conn.executemany(
+                "DELETE FROM pending_posts WHERE session_id=? AND type=? AND post_id=?",
+                [(session_id, sub_type, pid) for pid in post_ids],
+            )
             conn.commit()
 
         await self._run(_mark)
@@ -167,6 +174,86 @@ class LofterDB:
             return row[0] if row else 0
 
         return await self._run(_count)
+
+    async def mark_delivered(self, session_id: str, sub_type: str, post_id: str):
+        conn = self._conn
+
+        def _mark():
+            with conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO seen_posts(session_id,type,post_id) VALUES(?,?,?)",
+                    (session_id, sub_type, post_id),
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO sent_posts(session_id,post_id) VALUES(?,?)",
+                    (session_id, post_id),
+                )
+                conn.execute("DELETE FROM pending_posts WHERE session_id=? AND post_id=?", (session_id, post_id))
+
+        await self._run(_mark)
+
+    async def enqueue_posts(self, session_id: str, sub_type: str, source: str, posts: list[Post]):
+        rows = [(session_id, sub_type, source, post.post_id, json.dumps(asdict(post), ensure_ascii=False)) for post in posts]
+
+        def _enqueue():
+            with self._conn:
+                self._conn.executemany(
+                    "INSERT OR IGNORE INTO pending_posts(session_id,type,source,post_id,payload) VALUES(?,?,?,?,?)",
+                    rows,
+                )
+
+        await self._run(_enqueue)
+
+    async def pending_posts(self, session_id: str, sub_type: str, source: str) -> list[Post]:
+        def _read():
+            return self._conn.execute(
+                "SELECT payload FROM pending_posts WHERE session_id=? AND type=? AND source=? ORDER BY rowid",
+                (session_id, sub_type, source),
+            ).fetchall()
+
+        return [Post(**json.loads(row[0])) for row in await self._run(_read)]
+
+    async def tag_scan_cursor(self, session_id: str, tag: str) -> tuple[int, int]:
+        def _read():
+            return self._conn.execute(
+                "SELECT offset,before_time FROM tag_scan_cursors WHERE session_id=? AND target=?",
+                (session_id, tag),
+            ).fetchone()
+
+        return await self._run(_read) or (0, 0)
+
+    async def save_tag_page(self, session_id: str, tag: str, posts: list[Post], offset: int, before: int):
+        rows = [(session_id, "tag", "", post.post_id, json.dumps(asdict(post), ensure_ascii=False)) for post in posts]
+
+        def _save():
+            with self._conn:
+                self._conn.executemany(
+                    "INSERT OR IGNORE INTO pending_posts(session_id,type,source,post_id,payload) VALUES(?,?,?,?,?)", rows,
+                )
+                self._conn.execute(
+                    "INSERT INTO tag_scan_cursors VALUES(?,?,?,?) ON CONFLICT(session_id,target) "
+                    "DO UPDATE SET offset=excluded.offset,before_time=excluded.before_time",
+                    (session_id, tag, offset, before),
+                )
+
+        await self._run(_save)
+
+    async def clear_tag_scan_cursor(self, session_id: str, tag: str):
+        def _clear():
+            with self._conn:
+                self._conn.execute("DELETE FROM tag_scan_cursors WHERE session_id=? AND target=?", (session_id, tag))
+
+        await self._run(_clear)
+
+    async def discard_pending(self, session_id: str, sub_type: str, post_ids: list[str]):
+        def _discard():
+            with self._conn:
+                self._conn.executemany(
+                    "DELETE FROM pending_posts WHERE session_id=? AND type=? AND post_id=?",
+                    [(session_id, sub_type, post_id) for post_id in post_ids],
+                )
+
+        await self._run(_discard)
 
     async def filter_unsent(self, session_id: str, post_ids: list[str]) -> list[str]:
         if not post_ids:
@@ -207,6 +294,8 @@ class LofterDB:
         def _clear():
             conn.execute("DELETE FROM seen_posts WHERE session_id=?", (session_id,))
             conn.execute("DELETE FROM sent_posts WHERE session_id=?", (session_id,))
+            conn.execute("DELETE FROM pending_posts WHERE session_id=?", (session_id,))
+            conn.execute("DELETE FROM tag_scan_cursors WHERE session_id=?", (session_id,))
             conn.commit()
 
         await self._run(_clear)

@@ -1,0 +1,23 @@
+[project]
+name = "lofter-development-e2e"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "astrbot==4.27.5",
+    "pytest>=8",
+    "pytest-asyncio>=1",
+    "pytest-dotenv>=0.5",
+    "dukpy>=0.5.1",
+    "beautifulsoup4>=4.11",
+    "lxml>=4.9",
+    "brotli>=1",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["."]
+env_files = ["../.env.test"]
+addopts = "--confcutdir=."
+markers = ["live: requests the real LOFTER DWR service"]

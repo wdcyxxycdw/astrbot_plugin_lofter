@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+import asyncio
+import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Awaitable, Literal
 
@@ -42,6 +44,8 @@ class E2ETestRunner(NetworkStepsMixin, FlowStepsMixin):
         self._scheduler = scheduler
         self._send_push = send_push
         self._artifacts: dict = {}
+        self.TEST_SESSION = f"__lofter_diagnostic_{uuid.uuid4().hex}__"
+        self.TEST_CONFIG_KEY = f"{self.TEST_SESSION}_kv"
 
     async def run_all(self, real_session_id: str) -> list[StepResult]:
         results: list[StepResult] = []
@@ -63,17 +67,16 @@ class E2ETestRunner(NetworkStepsMixin, FlowStepsMixin):
             self._step_14_subtag_full,
             self._step_15_subblog_full,
         ]
-        for fn in steps:
-            results.append(await fn())
-
-        results.append(await self._step_16_subtagpreview(real_session_id))
-        results.append(await self._step_17_seen_sent())
-        results.append(await self._step_18_scheduler_state())
-        results.append(await self._step_19_manual_poll())
-        results.append(await self._step_20_push_blog(real_session_id))
-
-        cleanup = await self._cleanup()
-        results.append(cleanup)
+        try:
+            for fn in steps:
+                results.append(await fn())
+            results.append(await self._step_16_subtagpreview(real_session_id))
+            results.append(await self._step_17_seen_sent())
+            results.append(await self._step_18_scheduler_state())
+            results.append(await self._step_19_manual_poll())
+            results.append(await self._step_20_push_blog(real_session_id))
+        finally:
+            results.append(await asyncio.shield(self._cleanup()))
         return results
 
     def _timed_start(self) -> float:
@@ -116,7 +119,7 @@ _STATUS_ICON = {"pass": "✓", "fail": "✗", "skip": "○"}
 
 
 def format_report(results: list[StepResult]) -> str:
-    lines = ["━━━ Lofter 端到端测试 ━━━", ""]
+    lines = ["━━━ Lofter 运行环境诊断 ━━━", ""]
 
     total = len(results)
     for i, r in enumerate(results, 1):
