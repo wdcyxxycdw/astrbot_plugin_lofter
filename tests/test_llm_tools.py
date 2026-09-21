@@ -58,6 +58,7 @@ def test_llm_tools_does_not_swallow_astrbot_import_chain_errors():
     original_modules = {name: sys.modules.get(name) for name in ("astrbot", "astrbot.api", "astrbot.api.event")}
     astrbot_mod = types.ModuleType("astrbot")
     api_mod = types.ModuleType("astrbot.api")
+    api_mod.logger = llm_tools.logger
     event_mod = types.ModuleType("astrbot.api.event")
 
     def fail_imported_attr(name):

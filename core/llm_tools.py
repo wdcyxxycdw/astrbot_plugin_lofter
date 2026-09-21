@@ -1,11 +1,12 @@
 import importlib.util
-import logging
 import sys
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+
+from astrbot.api import logger
 
 from .author_block import filter_blocked_posts
 from .count_commands import ADMIN_ONLY_MESSAGE, _format_count_list, _format_count_result
@@ -55,14 +56,6 @@ except ModuleNotFoundError:
             return decorator
 
     filter = _FallbackFilter()
-
-try:
-    from astrbot.api import logger
-except ModuleNotFoundError:
-    if not _astrbot_package_missing():
-        raise
-    logger = logging.getLogger(__name__)
-
 
 SUBSCRIPTION_ACTIONS = (
     "list",
