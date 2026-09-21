@@ -15,22 +15,30 @@ except ImportError:
 
 _SHIM = """
 var __result__ = null;
+var __called__ = false;
+var __error__ = null;
 function safeStringify(obj) {
-    var seen = [];
+    var ancestors = [];
     return JSON.stringify(obj, function(key, val) {
         if (typeof val === 'object' && val !== null) {
-            if (seen.indexOf(val) !== -1) return '[Circular]';
-            seen.push(val);
+            while (ancestors.length && ancestors[ancestors.length - 1] !== this) ancestors.pop();
+            if (ancestors.indexOf(val) !== -1) return '[Circular]';
+            ancestors.push(val);
         }
         return val;
     });
 }
-var dwr = {engine: {_remoteHandleCallback: function(_, __, result) {
-    __result__ = safeStringify(result);
-}}};
+var dwr = {engine: {
+    _remoteHandleCallback: function(_, __, result) {
+        __called__ = true;
+        __result__ = result;
+    },
+    _remoteHandleException: function(_, __, error) { __error__ = error; },
+    _remoteHandleBatchException: function(error) { __error__ = error; }
+}};
 """
 
-_EXTRACT = "safeStringify(__result__);"
+_EXTRACT = "safeStringify({called: __called__, result: __result__, error: __error__});"
 _SHIM_LINE_COUNT = len(_SHIM.splitlines())
 
 
@@ -41,13 +49,14 @@ def _execute_sync(body: str) -> list[dict]:
         result = dukpy.evaljs(_SHIM + body + "\n" + _EXTRACT)
     except Exception as exc:
         raise RuntimeError(_format_execute_error(body, exc)) from exc
-    if not result or result == "null":
-        return []
-    outer = json.loads(result)
-    if not isinstance(outer, str):
-        return outer if isinstance(outer, list) else []
-    inner = json.loads(outer)
-    return inner if isinstance(inner, list) else []
+    envelope = json.loads(result)
+    if envelope["error"] is not None:
+        raise RuntimeError("DWR 返回服务端异常，可能 Cookie 失效或触发风控")
+    if not envelope["called"]:
+        raise RuntimeError("DWR 未执行结果回调")
+    if not isinstance(envelope["result"], list):
+        raise RuntimeError("DWR 结果结构异常：预期帖子列表，不能作为空页处理")
+    return envelope["result"]
 
 
 def _format_execute_error(body: str, exc: Exception) -> str:

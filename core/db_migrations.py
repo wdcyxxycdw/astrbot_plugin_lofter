@@ -1,7 +1,7 @@
 import json
 import sqlite3
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 DDL = """
 CREATE TABLE IF NOT EXISTS config (
@@ -48,6 +48,23 @@ CREATE TABLE IF NOT EXISTS author_blocks (
     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     PRIMARY KEY (session_id, kind, value)
 );
+
+CREATE TABLE IF NOT EXISTS pending_posts (
+    session_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    source TEXT NOT NULL,
+    post_id TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    PRIMARY KEY (session_id, type, source, post_id)
+);
+
+CREATE TABLE IF NOT EXISTS tag_scan_cursors (
+    session_id TEXT NOT NULL,
+    target TEXT NOT NULL,
+    offset INTEGER NOT NULL,
+    before_time INTEGER NOT NULL,
+    PRIMARY KEY (session_id, target)
+);
 """
 
 
@@ -63,6 +80,8 @@ def migrate(conn: sqlite3.Connection, from_ver: int):
         _migrate_v2_to_v3(conn)
     if from_ver < 4:
         _migrate_v3_to_v4(conn)
+    if from_ver < 5:
+        _migrate_v4_to_v5(conn)
     conn.execute(
         "INSERT INTO config(key,value) VALUES('schema_version',?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -91,6 +110,28 @@ def _migrate_v3_to_v4(conn: sqlite3.Connection):
             created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
             PRIMARY KEY (session_id, kind, value)
         );
+    """)
+
+
+def _migrate_v4_to_v5(conn: sqlite3.Connection):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pending_posts (
+            session_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            source TEXT NOT NULL,
+            post_id TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            PRIMARY KEY (session_id, type, source, post_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tag_scan_cursors (
+            session_id TEXT NOT NULL,
+            target TEXT NOT NULL,
+            offset INTEGER NOT NULL,
+            before_time INTEGER NOT NULL,
+            PRIMARY KEY (session_id, target)
+        )
     """)
 
 

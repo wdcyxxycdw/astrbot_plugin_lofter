@@ -364,7 +364,7 @@ async def test_llm_count_run_saves_and_formats_result(monkeypatch):
     result = await runner.lofter_count(event, "run", name="米哈游安全", expression="原神 -R18")
 
     assert runner._db.upserts == [("米哈游安全", "原神 -R18")]
-    assert "「米哈游安全」统计完成：12 个作品" in result
+    assert "「米哈游安全」扫描结束：已发现 12 个作品" in result
     assert "条件：原神 -R18" in result
 
 

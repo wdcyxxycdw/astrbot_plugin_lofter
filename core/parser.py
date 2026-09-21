@@ -19,6 +19,7 @@ class Post:
     tags: list[str] = field(default_factory=list)
     publish_time: str = ""
     content: str = ""
+    publish_time_ms: int = 0
 
 
 _IMG_CDN_RE = re.compile(

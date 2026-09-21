@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import aiohttp
 from dataclasses import dataclass, field
 from datetime import datetime
 from io import StringIO
@@ -36,6 +37,7 @@ class TagScanResult:
     matched_ids: set[str]
     scanned_pages: int
     warnings: list[str]
+    complete: bool = False
 
 
 @dataclass(frozen=True)
@@ -280,6 +282,17 @@ def _append_positive_tag(
     result.append(node.tag)
 
 
+def _has_positive_anchor(node: ExprNode, negated: bool = False) -> bool:
+    if isinstance(node, TagNode):
+        return not negated
+    if isinstance(node, UnaryNode):
+        return _has_positive_anchor(node.child, not negated)
+    left = _has_positive_anchor(node.left, negated)
+    right = _has_positive_anchor(node.right, negated)
+    is_and = (node.op == "and") != negated
+    return (left or right) if is_and else (left and right)
+
+
 async def count_posts(
     expression: str,
     client,
@@ -292,6 +305,10 @@ async def count_posts(
     positive_tags = extract_positive_tags(expr)
     if not positive_tags:
         raise CountExpressionError("至少需要一个正向 tag")
+    if not _has_positive_anchor(expr):
+        raise CountExpressionError("每个 OR 分支都需要正向 tag 约束，例如 A|-B 无法完整统计")
+    if page_size < 1 or page_size > 20:
+        raise ValueError("page_size 必须在 1 到 20 之间")
 
     results = await _scan_positive_tags(positive_tags, client, page_size, parse_posts, expr, tag_concurrency)
     seen_candidates: set[str] = set()
@@ -304,12 +321,15 @@ async def count_posts(
         scanned_pages[item.tag] = item.scanned_pages
         warnings.extend(item.warnings)
 
+    complete = all(item.complete for item in results)
+    has_data = any(item.complete or item.scanned_pages for item in results)
+    status = "扫描结束" if complete else ("部分完成" if has_data else "失败")
     return CountResult(
         name="",
         expression=expression,
         count=len(matched),
-        status="成功",
-        error="",
+        status=status,
+        error="；".join(warnings) if status == "失败" else "",
         counted_at=_now_text(),
         candidates=len(seen_candidates),
         scanned_pages=scanned_pages,
@@ -326,8 +346,14 @@ async def _scan_positive_tags(
     tag_concurrency: int,
 ) -> list[TagScanResult]:
     semaphore = asyncio.Semaphore(max(1, tag_concurrency))
-    tasks = [_scan_tag_with_limit(tag, semaphore, client, page_size, parse_posts, expr) for tag in tags]
-    return await asyncio.gather(*tasks)
+    tasks = [asyncio.create_task(_scan_tag_with_limit(tag, semaphore, client, page_size, parse_posts, expr)) for tag in tags]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 async def _scan_tag_with_limit(
@@ -350,6 +376,7 @@ async def _scan_tag_pages(
     expr: ExprNode,
 ) -> TagScanResult:
     offset = 0
+    before = 0
     seen_for_tag: set[str] = set()
     candidate_ids: set[str] = set()
     matched_ids: set[str] = set()
@@ -357,17 +384,20 @@ async def _scan_tag_pages(
     warnings: list[str] = []
     while True:
         try:
-            posts = await _fetch_page(tag, client, offset, page_size, parse_posts)
-        except RuntimeError as e:
+            posts = await _fetch_page(tag, client, offset, page_size, parse_posts, before)
+        except (RuntimeError, aiohttp.ClientError, asyncio.TimeoutError) as e:
             warnings.append(f"标签「{tag}」扫描失败：{e}")
             return TagScanResult(tag, candidate_ids, matched_ids, scanned_pages, warnings)
         if not posts:
-            return TagScanResult(tag, candidate_ids, matched_ids, scanned_pages, warnings)
+            return TagScanResult(tag, candidate_ids, matched_ids, scanned_pages, warnings, complete=True)
         scanned_pages += 1
         if not _count_new_posts(posts, expr, seen_for_tag, candidate_ids, matched_ids):
             _append_repeat_page_warning(tag, offset, warnings)
             return TagScanResult(tag, candidate_ids, matched_ids, scanned_pages, warnings)
         offset += page_size
+        timestamps = [post.publish_time_ms for post in posts if post.publish_time_ms > 0]
+        if timestamps:
+            before = min(timestamps)
 
 
 def _append_repeat_page_warning(tag: str, offset: int, warnings: list[str]):
@@ -376,8 +406,9 @@ def _append_repeat_page_warning(tag: str, offset: int, warnings: list[str]):
     warnings.append(f"标签「{tag}」疑似分页未生效或接口返回重复页")
 
 
-async def _fetch_page(tag: str, client, offset: int, page_size: int, parse_posts) -> list[Post]:
-    raw = await client.search_tag(tag, offset=offset, limit=page_size)
+async def _fetch_page(tag: str, client, offset: int, page_size: int, parse_posts, before: int = 0) -> list[Post]:
+    cursor = {"before": before} if before else {}
+    raw = await client.search_tag(tag, offset=offset, limit=page_size, **cursor)
     return await parse_posts(raw)
 
 
@@ -436,7 +467,7 @@ def format_scanned_pages(scanned_pages: dict[str, int]) -> str:
 
 def _format_error_with_warnings(row: CountResult) -> str:
     parts = [row.error] if row.error else []
-    parts.extend(row.warnings)
+    parts.extend(warning for warning in row.warnings if warning not in row.error)
     return "；".join(parts)
 
 

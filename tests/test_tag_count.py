@@ -333,6 +333,7 @@ async def test_count_posts_records_warning_when_one_tag_scan_fails():
     result = await count_posts("A|B", client, parse_posts=parser)
 
     assert result.count == 1
+    assert result.status == "部分完成"
     assert result.candidates == 1
     assert result.scanned_pages == {"A": 1, "B": 0}
     assert result.warnings == ["标签「B」扫描失败：LOFTER 返回非 DWR 响应：响应片段：{ status: 4009 }"]
@@ -383,7 +384,56 @@ async def test_count_posts_warns_when_positive_offset_page_repeats_tag_posts():
     result = await count_posts("A", client, parse_posts=parser, page_size=1)
 
     assert result.scanned_pages == {"A": 2}
+    assert result.status == "部分完成"
     assert result.warnings == ["标签「A」疑似分页未生效或接口返回重复页"]
+
+
+@pytest.mark.asyncio
+async def test_all_failed_scans_are_not_reported_as_zero_matches():
+    client = AsyncMock()
+    client.search_tag.side_effect = RuntimeError("Cookie 失效")
+    result = await count_posts("A|B", client)
+    assert result.status == "失败"
+    assert "Cookie 失效" in result.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expression", ["A|-B", "-(A -B)", "(A B)|(-C -D)"])
+async def test_count_rejects_unbounded_negative_branches(expression):
+    client = AsyncMock()
+    with pytest.raises(CountExpressionError, match="每个 OR 分支"):
+        await count_posts(expression, client)
+    client.search_tag.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expression", ["A -B", "A|-(-B)", "A (B|-C)", "-(A|-B)"])
+async def test_count_accepts_bounded_branches(expression):
+    client = AsyncMock()
+    client.search_tag.return_value = "dwr.engine._remoteHandleCallback('0','0',[]);"
+    result = await count_posts(expression, client)
+    assert result.status == "扫描结束"
+    assert result.count == 0
+
+
+@pytest.mark.asyncio
+async def test_count_passes_oldest_raw_timestamp_to_next_page():
+    client = AsyncMock()
+    client.search_tag.side_effect = ["first", "second", "empty"]
+
+    async def parser(raw):
+        if raw == "first":
+            return [Post("a", "", "", tags=["A"], publish_time_ms=1720000000123)]
+        if raw == "second":
+            return [Post("b", "", "", tags=["A"], publish_time_ms=1710000000456)]
+        return []
+
+    result = await count_posts("A", client, parse_posts=parser)
+    assert result.count == 2
+    assert result.status == "扫描结束"
+    calls = client.search_tag.call_args_list
+    assert calls[1].kwargs == {"offset": 20, "limit": 20, "before": 1720000000123}
+    assert calls[2].kwargs == {"offset": 40, "limit": 20, "before": 1710000000456}
 
 
 def test_build_count_csv():

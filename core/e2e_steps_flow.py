@@ -156,7 +156,7 @@ class FlowStepsMixin:
 
             if not posts:
                 details.append("无可推送帖子，跳过推送")
-                return self._pass(name, self._timed_end(t0), details)
+                return self._skip(name, "无可推送帖子，未验证发送")
 
             post = posts[0]
             header = f"【标签「{self.TEST_TAG}」有新内容】"
@@ -186,8 +186,7 @@ class FlowStepsMixin:
             details.append("mark_sent + filter_unsent OK")
 
             conn = self._db._conn
-            loop = __import__("asyncio").get_event_loop()
-            await loop.run_in_executor(None, lambda: (
+            await self._db._run(lambda: (
                 conn.execute("DELETE FROM seen_posts WHERE session_id=? AND post_id IN (?,?)", (s, *fake_ids)),
                 conn.execute("DELETE FROM sent_posts WHERE session_id=? AND post_id IN (?,?)", (s, *fake_ids)),
                 conn.commit(),
@@ -220,7 +219,7 @@ class FlowStepsMixin:
         s = self.TEST_SESSION
         try:
             before = await self._db.seen_count(s, "tag")
-            await self._scheduler._poll_all()
+            await self._scheduler._poll_all(session_id=s)
             after = await self._db.seen_count(s, "tag")
             details.append(f"_poll_all 完成，sent_posts 变化: before={before}, after={after}")
             details.append("无新帖（符合 warmup 后预期）" if after == before else f"新增 {after - before} 条 seen（有新帖）")

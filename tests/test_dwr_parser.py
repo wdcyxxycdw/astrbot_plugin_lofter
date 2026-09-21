@@ -89,3 +89,48 @@ async def test_parse_dwr_response_rejects_non_dwr_response(body):
 async def test_parse_dwr_response_rejects_empty_response():
     with pytest.raises(RuntimeError, match="DWR 响应为空"):
         await parse_dwr_response("   ")
+
+
+@pytest.mark.asyncio
+async def test_shared_author_reference_is_preserved_without_recursing_forever():
+    body = """
+    var blog = {blogNickName: '同一个作者'};
+    blog.self = blog;
+    dwr.engine._remoteHandleCallback('0','0',[
+        {post:{blogPageUrl:'https://a.lofter.com/post/a_1',blogInfo:blog}},
+        {post:{blogPageUrl:'https://a.lofter.com/post/a_2',blogInfo:blog}}
+    ]);
+    """
+    posts = await parse_dwr_response(body)
+    assert [post.author for post in posts] == ["同一个作者", "同一个作者"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [
+    "dwr.engine._remoteHandleCallback('0','0',{status:4009});",
+    "dwr.engine._remoteHandleCallback('0','0',null);",
+    "dwr.engine._remoteHandleCallback('0','0',[{unexpected:'schema'}]);",
+    "dwr.engine._remoteHandleException('0','0',{message:'not logged in'});",
+    "// dwr.engine._remoteHandleCallback('0','0',[]);",
+])
+async def test_invalid_result_is_never_a_successful_empty_page(body):
+    with pytest.raises(RuntimeError):
+        await parse_dwr_response(body)
+
+
+@pytest.mark.asyncio
+async def test_dwr_preserves_tag_list_full_text_images_and_millisecond_cursor():
+    body = """
+    dwr.engine._remoteHandleCallback('0','0',[{post:{
+        blogPageUrl:'https://a.lofter.com/post/a_1',
+        tagList:['标签一','标签二'],
+        content:'<p>第一段</p><p>第二段</p>',
+        photoLinks:'[{"raw":"https://image/a.jpg?token=abc"},{"orign":"https://image/b.jpg"}]',
+        publishTime:1720000000123
+    }}]);
+    """
+    post, = await parse_dwr_response(body)
+    assert post.tags == ["标签一", "标签二"]
+    assert post.content == "第一段\n第二段"
+    assert post.images == ["https://image/a.jpg?token=abc", "https://image/b.jpg"]
+    assert post.publish_time_ms == 1720000000123

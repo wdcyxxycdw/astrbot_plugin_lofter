@@ -18,16 +18,52 @@ BLOG_URL = "https://{username}.lofter.com"
 MAX_PUSH_POSTS = 5
 
 
-async def fetch_tag_posts(search_tags: list[str], client: LofterClient) -> list[Post]:
+async def fetch_tag_posts(search_tags: list[str], client: LofterClient, *, db: LofterDB | None = None, session_id: str = "") -> list[Post]:
     seen_ids: set[str] = set()
     result: list[Post] = []
     for tag in search_tags:
-        raw = await client.search_tag(tag, limit=20)
-        posts = await parse_dwr_response(raw)
+        try:
+            posts = await _fetch_tag_pages(tag, client, db, session_id)
+        except Exception:
+            if db is None:
+                raise
+            logger.exception("Lofter 标签「%s」抓取中断，保留队列和翻页位置", tag)
+            continue
         for p in posts:
             if p.post_id not in seen_ids:
                 seen_ids.add(p.post_id)
                 result.append(p)
+    return result
+
+
+async def _fetch_tag_pages(tag: str, client: LofterClient, db: LofterDB | None, session_id: str) -> list[Post]:
+    offset, before = await db.tag_scan_cursor(session_id, tag) if db else (0, 0)
+    result = []
+    page_ids: set[str] = set()
+    warm = db is not None and await db.seen_count(session_id, "tag") > 0
+    while True:
+        raw = await client.search_tag(tag, limit=20, offset=offset, before=before)
+        posts = await parse_dwr_response(raw)
+        ids = {post.post_id for post in posts}
+        if not ids:
+            break
+        if not ids - page_ids:
+            raise RuntimeError(f"标签「{tag}」返回重复页，已保留翻页位置")
+        page_ids.update(ids)
+        result.extend(posts)
+        if not warm:
+            break
+        unseen = set(await db.filter_unseen_session(session_id, "tag", list(ids)))
+        pending = {post.post_id for post in await db.pending_posts(session_id, "tag", "")}
+        if not unseen - pending:
+            break
+        timestamps = [post.publish_time_ms for post in posts if post.publish_time_ms > 0]
+        if timestamps:
+            before = min(timestamps)
+        offset += 20
+        await db.save_tag_page(session_id, tag, [post for post in posts if post.post_id in unseen], offset, before)
+    if db:
+        await db.clear_tag_scan_cursor(session_id, tag)
     return result
 
 
@@ -89,12 +125,17 @@ async def _check_tag_session(
         return
 
     try:
-        posts = await fetch_tag_posts(rule.search_tags, client)
+        posts = await fetch_tag_posts(rule.search_tags, client, db=db, session_id=session_id)
     except Exception as e:
         logger.error("轮询标签 session=%s 失败: %s", session_id, e)
-        return
+        posts = []
 
+    pending = await db.pending_posts(session_id, "tag", "")
+    posts = list({post.post_id: post for post in pending + posts}.values())
+    original_ids = {post.post_id for post in posts}
     posts = apply_filter(posts, rule)
+    excluded_ids = list(original_ids - {post.post_id for post in posts})
+    await db.discard_pending(session_id, "tag", excluded_ids)
     if not posts:
         return
 
@@ -110,9 +151,11 @@ async def _check_tag_session(
 
     unseen_set = set(unseen_ids)
     new_posts = [p for p in posts if p.post_id in unseen_set]
+    await db.enqueue_posts(session_id, "tag", "", new_posts)
     blocks = await block_storage.list_by_session(session_id)
     visible_posts, blocked_posts = filter_blocked_posts(new_posts, blocks)
     blocked_ids = [p.post_id for p in blocked_posts]
+    await db.discard_pending(session_id, "tag", blocked_ids)
     if not visible_posts:
         await db.mark_seen_session(session_id, "tag", blocked_ids)
         return
@@ -121,15 +164,16 @@ async def _check_tag_session(
     actually_new_ids = await db.filter_unsent(session_id, visible_ids)
     actually_new_set = set(actually_new_ids)
     already_sent_ids = [pid for pid in visible_ids if pid not in actually_new_set]
+    await db.discard_pending(session_id, "tag", already_sent_ids)
     if not actually_new_ids:
         await db.mark_seen_session(session_id, "tag", blocked_ids + already_sent_ids)
         return
 
     to_push = [p for p in visible_posts if p.post_id in actually_new_set][:MAX_PUSH_POSTS]
-    pushed_ids = [p.post_id for p in to_push]
-    await _push_tag_posts(session_id, to_push, rule, send_func)
-    await db.mark_seen_session(session_id, "tag", blocked_ids + already_sent_ids + pushed_ids)
-    await db.mark_sent(session_id, pushed_ids)
+    await db.mark_seen_session(session_id, "tag", blocked_ids + already_sent_ids)
+    for post in reversed(to_push):
+        await _push_tag_posts(session_id, [post], rule, send_func)
+        await db.mark_delivered(session_id, "tag", post.post_id)
 
 
 async def _check_blog_sub(
@@ -143,7 +187,10 @@ async def _check_blog_sub(
         posts = await fetch_blog_posts(sub, client)
     except Exception as e:
         logger.error("轮询博主 %s 失败: %s", sub.target, e)
-        return
+        posts = []
+
+    pending = await db.pending_posts(sub.session_id, "blog", sub.target)
+    posts = list({post.post_id: post for post in pending + posts}.values())
 
     if not posts:
         return
@@ -160,9 +207,11 @@ async def _check_blog_sub(
 
     unseen_set = set(unseen_ids)
     new_posts = [p for p in posts if p.post_id in unseen_set]
+    await db.enqueue_posts(sub.session_id, "blog", sub.target, new_posts)
     blocks = await block_storage.list_by_session(sub.session_id)
     visible_posts, blocked_before_enrich = filter_blocked_posts(new_posts, blocks)
     blocked_before_ids = [p.post_id for p in blocked_before_enrich]
+    await db.discard_pending(sub.session_id, "blog", blocked_before_ids)
     if not visible_posts:
         await db.mark_seen_session(sub.session_id, "blog", blocked_before_ids)
         return
@@ -171,6 +220,7 @@ async def _check_blog_sub(
     actually_new_ids = await db.filter_unsent(sub.session_id, visible_ids)
     actually_new_set = set(actually_new_ids)
     already_sent_ids = [pid for pid in visible_ids if pid not in actually_new_set]
+    await db.discard_pending(sub.session_id, "blog", already_sent_ids)
     if not actually_new_ids:
         await db.mark_seen_session(sub.session_id, "blog", blocked_before_ids + already_sent_ids)
         return
@@ -188,19 +238,20 @@ async def _check_blog_sub(
         to_push.extend(visible_enriched)
         blocked_after_ids.extend(p.post_id for p in blocked_after_enrich)
 
+    await db.discard_pending(sub.session_id, "blog", blocked_after_ids)
+
     if not to_push:
         await db.mark_seen_session(sub.session_id, "blog", blocked_before_ids + already_sent_ids + blocked_after_ids)
         return
 
-    pushed_ids = [p.post_id for p in to_push]
-    for post in reversed(to_push[:MAX_PUSH_POSTS]):
-        await _push_blog_post(sub.session_id, post, sub.target, send_func)
     await db.mark_seen_session(
         sub.session_id,
         "blog",
-        blocked_before_ids + already_sent_ids + blocked_after_ids + pushed_ids,
+        blocked_before_ids + already_sent_ids + blocked_after_ids,
     )
-    await db.mark_sent(sub.session_id, pushed_ids)
+    for post in reversed(to_push):
+        await _push_blog_post(sub.session_id, post, sub.target, send_func)
+        await db.mark_delivered(sub.session_id, "blog", post.post_id)
 
 
 class SubscriptionScheduler:
@@ -221,6 +272,7 @@ class SubscriptionScheduler:
         self._block_storage = block_storage
         self._interval = interval_minutes * 60
         self._task: asyncio.Task | None = None
+        self._poll_lock = asyncio.Lock()
 
     def start(self):
         self._task = asyncio.create_task(self._loop())
@@ -238,22 +290,44 @@ class SubscriptionScheduler:
     async def _loop(self):
         while True:
             await asyncio.sleep(self._interval)
-            await self._poll_all()
+            try:
+                await self._poll_all()
+            except Exception:
+                logger.exception("Lofter 轮询失败，将在下一轮重试")
 
-    async def _poll_all(self):
-        subs = await self._storage.all()
+    async def _poll_all(self, session_id: str | None = None):
+        async with self._poll_lock:
+            await self._poll_subscriptions(session_id)
+
+    async def _poll_subscriptions(self, session_id: str | None):
+        subs = await self._storage.list_by_session(session_id) if session_id else await self._storage.all()
         by_session: dict[str, dict[str, list[Subscription]]] = {}
         for s in subs:
             by_session.setdefault(s.session_id, {"tag": [], "blog": []})
             by_session[s.session_id][s.type].append(s)
 
         async def _poll_session(session_id: str, typed: dict):
+            errors: list[Exception] = []
             if typed["tag"]:
-                await _check_tag_session(
-                    session_id, typed["tag"], self._client, self._db, self._send_func, self._block_storage
-                )
+                try:
+                    await _check_tag_session(
+                        session_id, typed["tag"], self._client, self._db, self._send_func, self._block_storage
+                    )
+                except Exception as exc:
+                    errors.append(exc)
             for sub in typed["blog"]:
-                await _check_blog_sub(sub, self._client, self._db, self._send_func, self._block_storage)
+                try:
+                    await _check_blog_sub(sub, self._client, self._db, self._send_func, self._block_storage)
+                except Exception as exc:
+                    logger.error("Lofter 博主「%s」轮询失败：%s", sub.target, exc)
+                    errors.append(exc)
+            if errors:
+                raise errors[0]
 
         tasks = [_poll_session(sid, typed) for sid, typed in by_session.items()]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for sid, result in zip(by_session, results):
+            if isinstance(result, BaseException):
+                logger.error("Lofter 轮询会话 %s 失败：%s", sid, result)
+        if session_id and results and isinstance(results[0], BaseException):
+            raise results[0]

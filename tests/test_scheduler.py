@@ -15,7 +15,7 @@ from core.scheduler import (
 )
 from core.author_block import AuthorBlockStorage
 from core.filter import FilterRule
-from core.storage import Subscription
+from core.storage import Subscription, SubscriptionStorage
 
 RICH_HTML = """\
 <!DOCTYPE html><html><head>
@@ -63,6 +63,30 @@ def test_scheduler_requires_explicit_block_storage(db):
         interval_minutes=5,
     )
     assert scheduler._block_storage is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["tag", "first-blog"])
+async def test_one_subscription_failure_does_not_block_later_subscriptions(db, failure):
+    storage = SubscriptionStorage(db)
+    await storage.add("sess1", "tag", "A")
+    await storage.add("sess1", "blog", "first-blog")
+    await storage.add("sess1", "blog", "second-blog")
+    scheduler = SubscriptionScheduler(
+        storage, AsyncMock(), db, AsyncMock(), block_storage=AuthorBlockStorage(db),
+    )
+    checked = []
+
+    async def check_blog(sub, *args):
+        checked.append(sub.target)
+        if sub.target == failure:
+            raise RuntimeError("发送失败")
+
+    tag_check = AsyncMock(side_effect=RuntimeError("发送失败") if failure == "tag" else None)
+    with patch("core.scheduler._check_tag_session", tag_check), patch("core.scheduler._check_blog_sub", check_blog):
+        with pytest.raises(RuntimeError, match="发送失败"):
+            await scheduler._poll_all(session_id="sess1")
+    assert checked == ["first-blog", "second-blog"]
 
 
 @pytest.mark.asyncio
@@ -227,7 +251,7 @@ async def test_aggregate_tag_session(db):
     posts_hsr = _make_posts(["h1"], tags=["崩铁"])
     posts_r18 = _make_posts(["r1"], tags=["原神", "R18"])
 
-    async def mock_fetch(search_tags, client):
+    async def mock_fetch(search_tags, client, **kwargs):
         result = []
         for tag in search_tags:
             if tag == "原神":
@@ -266,7 +290,7 @@ async def test_warmup_no_push(db):
     subs = [_make_sub("原神", "subscribe")]
     posts = _make_posts(["p1", "p2", "p3"])
 
-    async def mock_fetch(search_tags, client):
+    async def mock_fetch(search_tags, client, **kwargs):
         return posts
 
     sent: list[str] = []
@@ -291,10 +315,10 @@ async def test_new_post_pushed_after_warmup(db):
     old_posts = _make_posts(["p1", "p2"])
     new_post = Post(post_id="p3", title="新帖", summary="", url="https://u.lofter.com/post/p3")
 
-    async def mock_fetch_old(search_tags, client):
+    async def mock_fetch_old(search_tags, client, **kwargs):
         return old_posts
 
-    async def mock_fetch_new(search_tags, client):
+    async def mock_fetch_new(search_tags, client, **kwargs):
         return old_posts + [new_post]
 
     sent: list[str] = []
