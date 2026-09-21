@@ -291,12 +291,12 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         """执行所有已保存统计条件并生成 CSV。用法：/lofter count-all"""
         async for result in self.handle_count_all(event): yield result
 
-    @lofter.command("subtag")
+    @lofter.command("sub-tag")
     async def sub_tag(self, event: AstrMessageEvent):
-        """订阅标签。用法：/lofter subtag <标签名> [-排除标签]"""
+        """订阅标签。用法：/lofter sub-tag <标签名> [-排除标签]"""
         raw = self._cmd_arg(event.message_str)
         if not raw:
-            yield event.plain_result("请提供标签名，例如：/lofter subtag 原创\n支持排除：/lofter subtag 原神 -R18")
+            yield event.plain_result("请提供标签名，例如：/lofter sub-tag 原创\n支持排除：/lofter sub-tag 原神 -R18")
             return
         subscribes, excludes = parse_tag_expr(raw)
         session_id = event.unified_msg_origin
@@ -315,12 +315,12 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             parts.append(f"新增排除：{', '.join(added_excls)}")
         yield event.plain_result("\n".join(parts))
 
-    @lofter.command("subtagpreview")
+    @lofter.command("sub-tag-preview")
     async def sub_tag_preview(self, event: AstrMessageEvent):
-        """订阅标签并立即预览最新内容。用法：/lofter subtagpreview <标签名> [-排除]"""
+        """订阅标签并立即预览最新内容。用法：/lofter sub-tag-preview <标签名> [-排除]"""
         raw = self._cmd_arg(event.message_str)
         if not raw:
-            yield event.plain_result("请提供标签名，例如：/lofter subtagpreview 原创")
+            yield event.plain_result("请提供标签名，例如：/lofter sub-tag-preview 原创")
             return
         subscribes, excludes = parse_tag_expr(raw)
         session_id = event.unified_msg_origin
@@ -357,21 +357,21 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             chain += [Comp.Image.fromURL(u) for u in post.images[:self._max_images]]
             yield event.chain_result(chain)
 
-    @lofter.command("subblog")
+    @lofter.command("sub-blog")
     async def sub_blog(self, event: AstrMessageEvent):
-        """订阅博主。用法：/lofter subblog <用户名>"""
+        """订阅博主。用法：/lofter sub-blog <用户名>"""
         username = self._cmd_arg(event.message_str)
         if not username:
-            yield event.plain_result("请提供博主用户名，例如：/lofter subblog username")
+            yield event.plain_result("请提供博主用户名，例如：/lofter sub-blog username")
             return
         ok = await self._storage.add(event.unified_msg_origin, "blog", username)
         if ok:
             await self._warmup_blog(event.unified_msg_origin, username)
         yield event.plain_result(f"已订阅博主「{username}」" if ok else f"已经订阅过博主「{username}」了")
 
-    @lofter.command("unsubtag")
+    @lofter.command("unsub-tag")
     async def unsub_tag(self, event: AstrMessageEvent):
-        """取消订阅标签。用法：/lofter unsubtag <标签名>"""
+        """取消订阅标签。用法：/lofter unsub-tag <标签名>"""
         tag = self._cmd_arg(event.message_str)
         if not tag:
             yield event.plain_result("请提供标签名")
@@ -379,9 +379,9 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         ok = await self._storage.remove(event.unified_msg_origin, "tag", tag, "subscribe")
         yield event.plain_result(f"已取消订阅标签「{tag}」" if ok else f"未找到标签「{tag}」的订阅")
 
-    @lofter.command("unexcludetag")
+    @lofter.command("unexclude-tag")
     async def unexclude_tag(self, event: AstrMessageEvent):
-        """取消排除标签。用法：/lofter unexcludetag <标签名>"""
+        """取消排除标签。用法：/lofter unexclude-tag <标签名>"""
         tag = self._cmd_arg(event.message_str)
         if not tag:
             yield event.plain_result("请提供标签名")
@@ -389,9 +389,9 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         ok = await self._storage.remove(event.unified_msg_origin, "tag", tag, "exclude")
         yield event.plain_result(f"已取消排除标签「{tag}」" if ok else f"未找到标签「{tag}」的排除规则")
 
-    @lofter.command("unsubblog")
+    @lofter.command("unsub-blog")
     async def unsub_blog(self, event: AstrMessageEvent):
-        """取消订阅博主。用法：/lofter unsubblog <用户名>"""
+        """取消订阅博主。用法：/lofter unsub-blog <用户名>"""
         username = self._cmd_arg(event.message_str)
         if not username:
             yield event.plain_result("请提供博主用户名")

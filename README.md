@@ -66,18 +66,18 @@ https://...
 | 命令 | 说明 |
 |------|------|
 | `/lofter search <关键词>` | 搜索 Lofter 内容 |
-| `/lofter subtag <标签名> [-排除标签...]` | 订阅标签，可同时指定排除规则 |
-| `/lofter subtagpreview <标签名> [-排除标签...]` | 订阅标签并立即预览最新 3 条内容 |
-| `/lofter subblog <用户名>` | 订阅博主 |
+| `/lofter sub-tag <标签名> [-排除标签...]` | 订阅标签，可同时指定排除规则 |
+| `/lofter sub-tag-preview <标签名> [-排除标签...]` | 订阅标签并立即预览最新 3 条内容 |
+| `/lofter sub-blog <用户名>` | 订阅博主 |
 | `/lofter count <名称> = <表达式>` | 保存并执行标签表达式统计 |
 | `/lofter count-list` | 查看已保存的全局统计条件（带编号） |
 | `/lofter count-del <名称或编号>` | 按名称或 `count-list` 编号删除统计条件 |
 | `/lofter count-all` | 执行全部统计条件并生成 CSV |
 | `/lofter list` | 查看当前会话的订阅列表（带编号） |
 | `/lofter unsub <编号>` | 按编号取消订阅（编号来自 `/lofter list`） |
-| `/lofter unsubtag <标签名>` | 取消订阅指定标签 |
-| `/lofter unexcludetag <标签名>` | 取消指定标签的排除规则 |
-| `/lofter unsubblog <用户名>` | 取消订阅博主 |
+| `/lofter unsub-tag <标签名>` | 取消订阅指定标签 |
+| `/lofter unexclude-tag <标签名>` | 取消指定标签的排除规则 |
+| `/lofter unsub-blog <用户名>` | 取消订阅博主 |
 | `/lofter cookie <值>` | 机器人管理员更新全局 Lofter Cookie，立即生效 |
 | `/lofter block-author <昵称或用户名>` | 屏蔽当前会话中的指定作者 |
 | `/lofter unblock-author <昵称或用户名>` | 解除作者屏蔽 |
@@ -100,12 +100,12 @@ LLM 工具不会暴露 Cookie 更新和运行环境诊断命令；Lofter 链接�
 
 ### 订阅标签与排除规则
 
-`/lofter subtag` 支持在标签名后用 `-` 添加排除规则，排除规则可以单独删除，不影响订阅本身：
+`/lofter sub-tag` 支持在标签名后用 `-` 添加排除规则，排除规则可以单独删除，不影响订阅本身：
 
 ```
-/lofter subtag 原神                    # 订阅「原神」标签
-/lofter subtag 原神 -R18               # 订阅「原神」，同时排除带「R18」标签的帖子
-/lofter subtag 原神 -R18 -暴力         # 可同时添加多条排除规则
+/lofter sub-tag 原神                    # 订阅「原神」标签
+/lofter sub-tag 原神 -R18               # 订阅「原神」，同时排除带「R18」标签的帖子
+/lofter sub-tag 原神 -R18 -暴力         # 可同时添加多条排除规则
 ```
 
 订阅列表（`/lofter list`）会显示每条记录的编号和类型：
