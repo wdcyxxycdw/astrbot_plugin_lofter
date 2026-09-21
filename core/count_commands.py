@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import logging
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+
+from astrbot.api import logger
 
 from .tag_count import (
     CountExpressionError,
@@ -15,12 +16,6 @@ from .tag_count import (
     is_admin_event,
     parse_count_command_arg,
 )
-
-try:
-    from astrbot.api import logger
-except Exception:
-    logger = logging.getLogger(__name__)
-
 
 ADMIN_ONLY_MESSAGE = "只有管理员可以使用统计命令"
 
