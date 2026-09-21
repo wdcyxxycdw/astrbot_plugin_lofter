@@ -27,6 +27,17 @@ async def test_plugin_uses_installed_fetch_package(runtime):
     assert type(parsed) is Post
 
 
+@pytest.mark.parametrize("module_name", ["count_commands", "llm_tools"])
+async def test_plugin_uses_astrbot_logger(runtime, module_name):
+    import importlib
+
+    from astrbot.api import logger
+
+    package = runtime.plugin.__module__.rsplit(".", 1)[0]
+    module = importlib.import_module(f"{package}.core.{module_name}")
+    assert module.logger is logger
+
+
 async def test_dwr_diagnostic_uses_public_package_parser(runtime):
     import importlib
 
