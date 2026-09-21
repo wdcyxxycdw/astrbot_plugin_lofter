@@ -12,9 +12,7 @@
 import os
 import pytest
 
-from core.client import LofterClient
-from core.dwr_parser import parse_dwr_response
-from core.parser import parse_post_page, parse_blog_posts
+from lofter import LofterClient, parse_blog_posts, parse_dwr_response, parse_post_page
 from core.scheduler import _enrich_blog_posts
 
 COOKIE = os.getenv("LOFTER_COOKIE", "")

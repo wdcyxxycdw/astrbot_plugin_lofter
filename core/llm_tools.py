@@ -44,7 +44,7 @@ except ModuleNotFoundError:
 
 from .author_block import filter_blocked_posts
 from .count_commands import ADMIN_ONLY_MESSAGE, _format_count_list, _format_count_result
-from .dwr_parser import parse_dwr_response
+from lofter import parse_dwr_response
 from .filter import FilterRule, apply_filter, parse_tag_expr
 from .llm_tool_formatters import format_added_tag_result as _format_added_tag_result
 from .llm_tool_formatters import format_index_remove_result as _format_index_remove_result

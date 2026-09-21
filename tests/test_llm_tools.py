@@ -231,7 +231,7 @@ async def test_llm_author_block_block_list_unblock():
     assert await runner.lofter_author_block(event, "list") == "当前没有屏蔽作者"
 
 
-from core.parser import Post
+from lofter import Post
 
 
 class FakeClient:

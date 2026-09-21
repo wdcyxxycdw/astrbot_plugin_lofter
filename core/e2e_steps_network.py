@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import re
 
-from .dwr_engine import execute_dwr
-from .dwr_parser import parse_dwr_response
+from lofter import Post, parse_blog_posts, parse_dwr_response, parse_post_page
+
 from .filter import FilterRule, apply_filter, parse_tag_expr
 from .formatter import format_post
-from .parser import Post, parse_blog_posts
 from .scheduler import fetch_tag_posts
 from .utils import _split_text
 
@@ -40,12 +39,16 @@ class NetworkStepsMixin:
         t0 = self._timed_start()
         details: list[str] = []
         try:
-            import dukpy  # noqa: F401
-            details.append("dukpy 加载成功")
+            details.append("lftr DWR 解析器加载成功")
 
-            sample_js = "dwr.engine._remoteHandleCallback('0','0',[{answer:42}]);"
-            items = await execute_dwr(sample_js)
-            details.append(f"样本 JS 执行结果: {items}")
+            sample_js = (
+                "dwr.engine._remoteHandleCallback('0','0',[{post:{"
+                "blogPageUrl:'https://diagnostic.lofter.com/post/e2e',title:'诊断帖子',"
+                "content:'<p>诊断</p>',tagList:['诊断'],publishTime:1720000000000}}]);"
+            )
+            posts = await parse_dwr_response(sample_js)
+            assert posts and posts[0].post_id == "e2e"
+            details.append(f"样本 DWR 解析结果: {posts[0].post_id}")
             return self._pass(name, self._timed_end(t0), details)
         except Exception as e:
             return self._fail(name, self._timed_end(t0), e, details)
@@ -130,7 +133,6 @@ class NetworkStepsMixin:
         if not blog_posts:
             return self._skip(name, "依赖 step 7 (blog_posts) 未就绪或为空")
         try:
-            from .parser import parse_post_page
             post = blog_posts[0]
             html = await self._client.get(post.url)
             rich = await parse_post_page(html, post.url)

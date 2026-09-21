@@ -9,11 +9,7 @@ AstrBot 插件，功能：自动解析 Lofter 帖子链接提取图片、订阅�
 ```
 main.py            # 插件入口，注册所有命令和事件处理器
 core/
-  client.py        # HTTP 客户端，封装 GET 和 DWR 标签搜索
-  parser.py        # Post 数据模型 + 博主主页 HTML 解析
   formatter.py     # 统一帖子文本格式化（format_post），各推送/搜索/解析场景共用
-  dwr_parser.py    # DWR 响应解析，调用 dwr_engine 执行 JS，提取对象图
-  dwr_engine.py    # 用 dukpy 执行 DWR 响应脚本，提取对象图
   db.py            # SQLite 操作层（WAL 模式，async via run_in_executor）
   db_migrations.py # 数据库 schema 迁移定义和执行
   storage.py       # Subscription dataclass + SubscriptionStorage
@@ -27,6 +23,12 @@ core/
   e2e_steps_network.py   # E2E 步骤 mixin：step 01-11（配置/网络/解析/过滤/格式化）
   e2e_steps_flow.py      # E2E 步骤 mixin：step 12-20（搜索/订阅/调度/推送）
 ```
+
+## 抓取依赖
+
+PyPI 包 `lftr==0.1.0` 提供 HTTP 客户端、HTML/DWR 解析和 `Post` 模型，Python 导入名为 `lofter`。插件和 E2E 环境各自声明并锁定该依赖，不保留 `core/client.py`、`core/parser.py` 或 DWR 实现副本。
+
+插件通过 `from lofter import LofterClient, Post, parse_dwr_response, parse_blog_posts, parse_post_page` 使用公开 API。Cookie 由插件读取配置并传入客户端；会话、订阅、数据库、统计表达式和消息发送仍归插件管理。
 
 ## 数据库表
 
@@ -69,14 +71,11 @@ _poll_all → 按 (session_id, type) 分组 → 不同 session 并发
 
 新增 subscribe 记录时（`/lofter sub-tag`），立即抓取该 target 的当前帖子并 `mark_seen_session`，不推送。防止中途新增订阅触发全量旧帖推送。
 
-## DWR 请求关键参数
+## DWR 分页边界
 
-`POST https://www.lofter.com/dwr/call/plaincall/TagBean.search.dwr`
+DWR 请求构造与响应解析由 `lftr` 维护。插件仅传入标签、`limit`、`offset` 和上一页最早的毫秒时间戳 `before`；不得把 offset/before 固定为 0 用于翻页。
 
-- `c0-param3=string:new`：按最新排序
-- `c0-param6=number:{limit}`：返回条数
-- `c0-param7=number:0`：固定 0（不是 limit）
-- `c0-param8=number:0`：固定 0（传时间戳会导致内容不是最新）
+订阅补抓的停止条件、数据库游标和 pending 队列仍在 `core/scheduler.py`；统计分页与完整性判断仍在 `core/tag_count.py`。这些业务流程按页调用包，不使用有 100 条上限的快捷搜索分页接口替代完整扫描。
 
 ## 关键设计决策
 

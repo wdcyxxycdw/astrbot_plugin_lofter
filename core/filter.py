@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 
-from .parser import Post
+from lofter import Post
 
 
 @dataclass

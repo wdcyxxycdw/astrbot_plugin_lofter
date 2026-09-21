@@ -6,7 +6,7 @@ from core.filter import (
     matches,
     parse_tag_expr,
 )
-from core.parser import Post
+from lofter import Post
 
 
 def _make_post(tags: list[str], post_id: str = "1") -> Post:

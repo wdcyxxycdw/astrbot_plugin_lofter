@@ -3,7 +3,7 @@ import pytest_asyncio
 from unittest.mock import AsyncMock, patch
 
 from core.db import LofterDB
-from core.parser import Post
+from lofter import Post
 from core.scheduler import (
     SubscriptionScheduler,
     _check_tag_session,

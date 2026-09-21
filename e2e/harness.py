@@ -111,7 +111,8 @@ class Runtime:
         app.router.add_post("/dwr", self.dwr)
         app.router.add_get("/image.png", self.image)
         self.http = await self.stack.enter_async_context(TestServer(app))
-        self.client_module = __import__(self.plugin.__module__.rsplit(".", 1)[0] + ".core.client", fromlist=["client"])
+        import lofter.client as client_module
+        self.client_module = client_module
         self.original_dwr_url = self.client_module.DWR_SEARCH_URL
         self.client_module.DWR_SEARCH_URL = str(self.http.make_url("/dwr"))
         from http_fixture import post_server
@@ -149,6 +150,8 @@ class Runtime:
     async def close(self):
         if self.plugin:
             await self.plugin.terminate()
+        if hasattr(self, "original_dwr_url"):
+            self.client_module.DWR_SEARCH_URL = self.original_dwr_url
         if hasattr(self, "receiver"):
             self.receiver.cancel()
             with contextlib.suppress(asyncio.CancelledError):

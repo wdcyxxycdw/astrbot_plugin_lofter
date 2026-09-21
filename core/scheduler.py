@@ -2,14 +2,12 @@ import asyncio
 from typing import Callable, Awaitable
 
 from astrbot.api import logger
+from lofter import LofterClient, Post, parse_blog_posts, parse_dwr_response, parse_post_page
 
 from .author_block import AuthorBlockStorage, filter_blocked_posts
-from .client import LofterClient
 from .db import LofterDB
-from .dwr_parser import parse_dwr_response
 from .filter import FilterRule, apply_filter
 from .formatter import format_post
-from .parser import Post, parse_blog_posts, parse_post_page
 from .storage import Subscription, SubscriptionStorage
 
 SendFunc = Callable[[str, str, list], Awaitable[None]]

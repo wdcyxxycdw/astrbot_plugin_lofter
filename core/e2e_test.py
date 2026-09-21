@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Awaitable, Literal
 
-from .client import LofterClient
+from lofter import LofterClient
 from .db import LofterDB
 from .scheduler import SubscriptionScheduler
 from .storage import SubscriptionStorage

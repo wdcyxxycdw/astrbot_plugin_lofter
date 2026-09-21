@@ -6,7 +6,9 @@
 uv run --directory e2e --locked pytest -q
 ```
 
-测试使用固定版本 AstrBot 4.27.5 和真实 OneBot v11 适配器，不依赖已部署的机器人。需要 Python 3.12+，依赖和环境由 uv 单独管理。
+测试使用固定版本 AstrBot 4.27.5、已发布的 `lftr==0.1.0` 和真实 OneBot v11 适配器，不依赖已部署的机器人。需要 Python 3.12+，依赖和环境由 uv 单独管理。
+
+测试会确认插件实际使用 `lofter.LofterClient`，再让包的 HTTP 请求指向本地样本服务；不是保留插件内部抓取副本或直接调用消息处理函数。部署环境的 DWR 诊断也通过包的公开解析 API 验证。
 
 每次运行在临时目录创建 AstrBot 配置、数据库及插件目录，通过正式 PluginManager 加载当前工作区插件。OneBot 协议消息进入反向 WebSocket，经完整 PipelineScheduler 分发，发送请求由本地协议端接收并返回成功或失败回执。未配置模型服务，测试不会调用 LLM。
 

@@ -1,5 +1,5 @@
 import pytest
-from core.parser import Post
+from lofter import Post
 from core.formatter import format_post
 
 DIVIDER = "──────────────"
