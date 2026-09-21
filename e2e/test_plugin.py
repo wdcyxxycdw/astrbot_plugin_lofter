@@ -34,6 +34,24 @@ async def test_search_runs_through_plugin_loader_pipeline_and_onebot(runtime):
     assert runtime.dwr_requests[-1]["c0-param0"] == "string:%E5%BC%80%E5%8F%91%E6%B5%8B%E8%AF%95"
 
 
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("sub-tag", "请提供标签名，例如：/lofter sub-tag 原创"),
+        ("sub-tag-preview", "请提供标签名，例如：/lofter sub-tag-preview 原创"),
+        ("sub-blog", "请提供博主用户名，例如：/lofter sub-blog username"),
+        ("unsub-tag", "请提供标签名"),
+        ("unexclude-tag", "请提供标签名"),
+        ("unsub-blog", "请提供博主用户名"),
+    ],
+)
+async def test_hyphenated_subscription_commands_are_registered(runtime, command, expected):
+    _, requests = await runtime.message(f"/lofter {command}")
+    text = json.dumps(requests, ensure_ascii=False)
+    assert any(request["action"] == "send_group_msg" for request in requests)
+    assert expected in text
+
+
 async def test_count_command_scans_pages_and_sends_result(runtime):
     tag = "分页测试"
     runtime.pages[(tag, 0)] = dwr_posts([post("one", tag, 1720000000123)])
@@ -75,7 +93,7 @@ async def test_failed_send_retries_without_repeating_delivered_posts(runtime):
 
     tag = "推送重试"
     runtime.pages[(tag, 0)] = dwr_posts([post("seed", tag)])
-    event, _ = await runtime.message(f"/lofter subtag {tag}", group_id=21001)
+    event, _ = await runtime.message(f"/lofter sub-tag {tag}", group_id=21001)
     session_id = event.unified_msg_origin
     runtime.pages[(tag, 0)] = dwr_posts([post(str(i), tag) for i in range(8)])
     runtime.peer.fail_send_number = runtime.peer.send_count + 2
@@ -126,7 +144,7 @@ async def test_login_page_never_sends_an_empty_post(runtime):
 async def test_subscription_scans_past_first_page(runtime):
     tag = "补抓测试"
     runtime.pages[(tag, 0)] = dwr_posts([post("boundary", tag)])
-    event, _ = await runtime.message(f"/lofter subtag {tag}", group_id=21002)
+    event, _ = await runtime.message(f"/lofter sub-tag {tag}", group_id=21002)
     runtime.pages[(tag, 0)] = dwr_posts([post(f"backfill{i}", tag) for i in range(20)])
     runtime.pages[(tag, 20)] = dwr_posts([post("backfill20", tag), post("boundary", tag)])
     await runtime.plugin._scheduler._poll_all(session_id=event.unified_msg_origin)
@@ -138,7 +156,7 @@ async def test_subscription_scans_past_first_page(runtime):
 async def test_interrupted_subscription_scan_resumes_after_already_sent_first_page(runtime):
     tag = "断点测试"
     runtime.pages[(tag, 0)] = dwr_posts([post("resume_boundary", tag)])
-    event, _ = await runtime.message(f"/lofter subtag {tag}", group_id=21003)
+    event, _ = await runtime.message(f"/lofter sub-tag {tag}", group_id=21003)
     session_id = event.unified_msg_origin
     runtime.pages[(tag, 0)] = dwr_posts([post(f"resume{i}", tag) for i in range(20)])
     runtime.pages[(tag, 20)] = "<html>临时失败</html>"

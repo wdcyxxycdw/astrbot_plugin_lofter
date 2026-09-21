@@ -67,7 +67,7 @@ _poll_all → 按 (session_id, type) 分组 → 不同 session 并发
 
 ## Warmup 机制
 
-新增 subscribe 记录时（`/lofter subtag`），立即抓取该 target 的当前帖子并 `mark_seen_session`，不推送。防止中途新增订阅触发全量旧帖推送。
+新增 subscribe 记录时（`/lofter sub-tag`），立即抓取该 target 的当前帖子并 `mark_seen_session`，不推送。防止中途新增订阅触发全量旧帖推送。
 
 ## DWR 请求关键参数
 
@@ -86,10 +86,10 @@ _poll_all → 按 (session_id, type) 分组 → 不同 session 并发
 - tag 按 session 聚合拉取：同 session 所有 subscribe target 合并成一次多 API 调用，reduce 请求次数
 - blog 仍按行独立轮询：每个博主 URL 不同，无法聚合
 - 作者屏蔽按 session 隔离，同时支持昵称和 Lofter 用户名匹配；订阅轮询中被屏蔽作品仍写入 seen_posts，解除屏蔽后不补推旧内容
-- tag 统计独立于订阅：`/lofter count` 系列读取 `count_conditions`，不改变 `subtag` 订阅规则
+- tag 统计独立于订阅：`/lofter count` 系列读取 `count_conditions`，不改变 `sub-tag` 订阅规则
 - count 表达式支持 AND / OR / NOT / 括号，用于一次性统计组合标签条件
 - `count-all` 汇总所有已保存统计条件并输出 CSV，优先通过 AstrBot 文件消息发送
 - 统计按 `post_id` 去重；分页统计无人工页数上限，仅以空页或无新候选自然停止，保证精准统计
-- `subtagpreview` 只写 `mark_seen`，不写 `mark_sent`：用户主动预览，不污染推送去重状态
+- `sub-tag-preview` 只写 `mark_seen`，不写 `mark_sent`：用户主动预览，不污染推送去重状态
 - E2E 测试用隔离 session（`__lofter_e2e_test__`）跑真实网络，20 步失败不中断，测完强制清理；`db.clear_session` 和 `db.delete_config` 专为清理新增
 - LLM 工具按场景合并为 `lofter_content`、`lofter_subscription`、`lofter_author_block`、`lofter_count`；不暴露 Cookie 更新、真实 E2E 测试和链接 parse，避免敏感凭据或重副作用被模型主动调用
