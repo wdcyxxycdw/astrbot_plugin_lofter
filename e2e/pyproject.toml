@@ -7,9 +7,9 @@ dependencies = [
     "pytest>=8",
     "pytest-asyncio>=1",
     "pytest-dotenv>=0.5",
-    "dukpy>=0.5.1",
-    "beautifulsoup4>=4.11",
-    "lxml>=4.9",
+    "lftr==0.1.0",
+    "aiohttp>=3.8.0",
+    "cryptography>=42",
     "brotli>=1",
 ]
 

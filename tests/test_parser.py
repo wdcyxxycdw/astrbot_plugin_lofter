@@ -1,5 +1,5 @@
 import pytest
-from core.parser import extract_lofter_username, parse_post_page, parse_blog_posts
+from lofter import extract_lofter_username, parse_post_page, parse_blog_posts
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -234,9 +234,7 @@ P_ID_WITH_FULL_POST_HTML = """\
 
 @pytest.mark.asyncio
 async def test_body_text_extracted_from_p_id():
-    from core.parser import _extract_body_text, _make_soup
-    soup = _make_soup(P_ID_HTML)
-    content = _extract_body_text(soup)
+    content = (await parse_post_page(P_ID_HTML, POST_URL)).content
     assert "第一段正文内容" in content
     assert "第二段正文内容" in content
     assert "第三段正文内容" in content
@@ -244,17 +242,13 @@ async def test_body_text_extracted_from_p_id():
 
 @pytest.mark.asyncio
 async def test_body_text_fallback_to_txtcont():
-    from core.parser import _extract_body_text, _make_soup
-    soup = _make_soup(TXTCONT_FALLBACK_HTML)
-    content = _extract_body_text(soup)
+    content = (await parse_post_page(TXTCONT_FALLBACK_HTML, POST_URL)).content
     assert "超过一百字的正文内容" in content
 
 
 @pytest.mark.asyncio
 async def test_body_text_empty_when_no_content():
-    from core.parser import _extract_body_text, _make_soup
-    soup = _make_soup(NO_CONTENT_HTML)
-    content = _extract_body_text(soup)
+    content = (await parse_post_page(NO_CONTENT_HTML, POST_URL)).content
     assert content == ""
 
 

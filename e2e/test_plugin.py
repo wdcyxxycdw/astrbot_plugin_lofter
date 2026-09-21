@@ -18,6 +18,28 @@ def dwr_posts(posts):
     return "dwr.engine._remoteHandleCallback('0','0'," + json.dumps(posts) + ");"
 
 
+async def test_plugin_uses_installed_fetch_package(runtime):
+    from lofter import LofterClient, Post, parse_dwr_response
+
+    assert type(runtime.plugin._client) is LofterClient
+    assert runtime.client_module.__name__ == "lofter.client"
+    parsed, = await parse_dwr_response(dwr_posts([post("package", "依赖验证")]))
+    assert type(parsed) is Post
+
+
+async def test_dwr_diagnostic_uses_public_package_parser(runtime):
+    import importlib
+
+    module = importlib.import_module(runtime.plugin.__module__.rsplit(".", 1)[0] + ".core.e2e_test")
+    plugin = runtime.plugin
+    runner = module.E2ETestRunner(
+        plugin._db, plugin._client, plugin._storage, plugin._scheduler, plugin._send_push,
+    )
+    result = await runner._step_02_dwr_engine()
+    assert result.status == "pass", result.error
+    assert "样本 DWR 解析结果: e2e" in result.details
+
+
 async def test_search_runs_through_plugin_loader_pipeline_and_onebot(runtime):
     runtime.pages[("开发测试", 0)] = dwr_posts([{"post": {
         "blogPageUrl": "https://author.lofter.com/post/a_1", "title": "真实链路测试",

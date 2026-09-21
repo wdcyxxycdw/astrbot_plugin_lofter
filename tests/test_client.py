@@ -1,4 +1,4 @@
-import core.client as client
+import lofter.client as client
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer

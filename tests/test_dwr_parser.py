@@ -1,6 +1,6 @@
 import pytest
 
-from core.dwr_parser import parse_dwr_response
+from lofter import parse_dwr_response
 
 
 @pytest.mark.asyncio

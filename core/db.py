@@ -5,8 +5,9 @@ from dataclasses import asdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
+from lofter import Post
+
 from .db_migrations import DDL, SCHEMA_VERSION, get_schema_version, migrate
-from .parser import Post
 
 
 class LofterDB:

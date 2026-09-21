@@ -1,8 +1,8 @@
-import importlib
 import json
 import os
 
 import pytest
+from lofter import LofterClient, parse_dwr_response
 
 
 pytestmark = pytest.mark.live
@@ -13,7 +13,7 @@ async def live_client(runtime):
     original = runtime.plugin._client
     fixture_url = runtime.client_module.DWR_SEARCH_URL
     runtime.client_module.DWR_SEARCH_URL = runtime.original_dwr_url
-    async with runtime.client_module.LofterClient(os.environ["LOFTER_COOKIE"]) as client:
+    async with LofterClient(os.environ["LOFTER_COOKIE"]) as client:
         runtime.plugin._client = client
         try:
             yield client
@@ -32,13 +32,12 @@ async def test_real_dwr_search_reaches_onebot_receiver(runtime, live_client):
 
 
 async def test_real_dwr_pagination_returns_new_ids(runtime, live_client):
-    module = importlib.import_module(runtime.plugin.__module__.rsplit(".", 1)[0] + ".core.dwr_parser")
     tag = os.environ["LOFTER_TAG"]
-    first = await module.parse_dwr_response(await live_client.search_tag(tag))
+    first = await parse_dwr_response(await live_client.search_tag(tag))
     assert first, "分页样本标签必须有作品"
     before = min(post.publish_time_ms for post in first)
     assert before > 0, "缺少分页所需的毫秒时间戳"
-    second = await module.parse_dwr_response(await live_client.search_tag(tag, offset=20, before=before))
+    second = await parse_dwr_response(await live_client.search_tag(tag, offset=20, before=before))
     assert second, "分页样本标签需要足够多的作品以验证第二页"
     assert {post.post_id for post in second} - {post.post_id for post in first}, "DWR 第二页没有新增 ID，分页仍未生效"
     assert min(post.publish_time_ms for post in second) <= before

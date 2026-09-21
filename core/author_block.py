@@ -1,8 +1,9 @@
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from lofter import Post
+
 from .db import LofterDB
-from .parser import Post
 
 AuthorBlockKey = tuple[str, str, str]
 

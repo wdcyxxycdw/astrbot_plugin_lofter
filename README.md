@@ -17,6 +17,14 @@ AstrBot 插件，用于解析 Lofter 链接、订阅 Lofter 标签/博主、搜�
 
 在 AstrBot WebUI 的插件市场中搜索 `lofter` 安装，或将本仓库克隆到 `data/plugins/` 目录。
 
+抓取与解析由独立包 [lftr](https://pypi.org/project/lftr/) 提供，当前固定依赖 `lftr==0.1.0`（Python 导入名为 `lofter`）。通过插件管理器安装时由 `requirements.txt` 安装；手工部署需在 AstrBot 使用的 Python 环境中安装这些依赖：
+
+```sh
+python -m pip install -r requirements.txt
+```
+
+插件仍负责 Cookie 配置、SQLite、标签统计、订阅调度和消息发送；HTTP、DWR/HTML 解析及 `Post` 数据模型统一使用 `lftr`，不再在插件内维护副本。Cookie 仍由本插件读取原配置并传给客户端，无需新增配置或迁移数据库。抓取实现的独立仓库见 [wdcyxxycdw/lofter](https://github.com/wdcyxxycdw/lofter)。
+
 ## 配置
 
 在 WebUI 插件配置页填写以下参数：

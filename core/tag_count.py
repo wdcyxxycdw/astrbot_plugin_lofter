@@ -9,8 +9,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Literal
 
-from .dwr_parser import parse_dwr_response
-from .parser import Post
+from lofter import Post, parse_dwr_response
 
 
 class CountExpressionError(ValueError):

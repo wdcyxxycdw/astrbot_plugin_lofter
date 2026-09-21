@@ -3,7 +3,7 @@ import pytest_asyncio
 
 from core.author_block import AuthorBlock, filter_blocked_posts, normalize_author_query
 from core.db import LofterDB
-from core.parser import Post
+from lofter import Post
 
 
 def make_post(**kwargs):

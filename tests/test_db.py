@@ -341,7 +341,7 @@ async def test_migration_v3_to_v4_adds_author_blocks(tmp_path):
 
 @pytest.mark.asyncio
 async def test_pending_posts_survive_reopen_and_delivery_is_atomic(tmp_path):
-    from core.parser import Post
+    from lofter import Post
 
     path = str(tmp_path / "pending.db")
     db = LofterDB(path)

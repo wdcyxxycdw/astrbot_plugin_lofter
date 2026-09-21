@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from core.parser import Post
+from lofter import Post
 from core.tag_count import (
     CountExpressionError,
     CountResult,

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from .dwr_parser import parse_dwr_response
+from lofter import Post, parse_dwr_response
+
 from .filter import FilterRule, apply_filter, parse_tag_expr
 from .formatter import format_post
-from .parser import Post
 from .scheduler import fetch_blog_posts, fetch_tag_posts
 
 

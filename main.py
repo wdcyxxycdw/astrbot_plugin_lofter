@@ -7,16 +7,14 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.star import StarTools
+from lofter import LofterClient, parse_dwr_response, parse_post_page
 
 from .core.author_block import AuthorBlockStorage, filter_blocked_posts, is_author_blocked
-from .core.client import LofterClient
 from .core.count_commands import LofterCountCommandsMixin
 from .core.db import LofterDB
 from .core.llm_tools import LofterLLMToolsMixin
-from .core.dwr_parser import parse_dwr_response
 from .core.filter import parse_tag_expr
 from .core.formatter import format_post
-from .core.parser import parse_post_page
 from .core.scheduler import SubscriptionScheduler, fetch_tag_posts
 from .core.storage import SubscriptionStorage
 from .core.utils import _split_text, extract_message_body_text
