@@ -6,7 +6,6 @@ from lofter import Post, parse_blog_posts, parse_dwr_response, parse_post_page
 
 from .filter import FilterRule, apply_filter, parse_tag_expr
 from .formatter import format_post
-from .scheduler import fetch_tag_posts
 from .utils import _split_text
 
 POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")

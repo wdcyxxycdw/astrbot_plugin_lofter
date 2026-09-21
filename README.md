@@ -182,6 +182,16 @@ LLM 工具不会暴露 Cookie 更新和运行环境诊断命令；Lofter 链接�
 
 ## 开发与测试
 
+本地运行与 CI 相同的 Ruff 静态检查：
+
+```sh
+uv run --locked ruff check .
+```
+
+每次 push/PR 都会运行独立的 `lint` job，检查 `E4`、`E7`、`E9` 和 `F` 规则，覆盖插件源码、单元测试与 `e2e/`；不自动修改或格式化代码。
+
+运行测试：
+
 ```sh
 uv run --locked pytest -q
 uv run --directory e2e --locked pytest -q

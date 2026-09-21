@@ -1,4 +1,3 @@
-import pytest
 from lofter import Post
 from core.formatter import format_post
 

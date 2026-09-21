@@ -1,11 +1,26 @@
 import importlib.util
-import logging
 import sys
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+
+from astrbot.api import logger
+
+from .author_block import filter_blocked_posts
+from .count_commands import ADMIN_ONLY_MESSAGE, _format_count_list, _format_count_result
+from .filter import FilterRule, apply_filter, parse_tag_expr
+from .llm_tool_formatters import format_added_tag_result as _format_added_tag_result
+from .llm_tool_formatters import format_index_remove_result as _format_index_remove_result
+from .llm_tool_formatters import format_post_for_tool as _format_post_for_tool
+from .llm_tool_formatters import format_preview_result as _format_preview_result
+from .llm_tool_formatters import format_remove_result as _format_remove_result
+from .llm_tool_formatters import format_subscription_line as _format_subscription_line
+from .llm_tool_formatters import missing_remove_target as _missing_remove_target
+from .llm_tool_formatters import unknown_action as _unknown_action
+from .tag_count import CountExpressionError, CountResult, build_count_csv, build_count_csv_path, count_posts, is_admin_event
+from lofter import parse_dwr_response
 
 
 def _is_package_module(module: ModuleType) -> bool:
@@ -41,28 +56,6 @@ except ModuleNotFoundError:
             return decorator
 
     filter = _FallbackFilter()
-
-from .author_block import filter_blocked_posts
-from .count_commands import ADMIN_ONLY_MESSAGE, _format_count_list, _format_count_result
-from lofter import parse_dwr_response
-from .filter import FilterRule, apply_filter, parse_tag_expr
-from .llm_tool_formatters import format_added_tag_result as _format_added_tag_result
-from .llm_tool_formatters import format_index_remove_result as _format_index_remove_result
-from .llm_tool_formatters import format_post_for_tool as _format_post_for_tool
-from .llm_tool_formatters import format_preview_result as _format_preview_result
-from .llm_tool_formatters import format_remove_result as _format_remove_result
-from .llm_tool_formatters import format_subscription_line as _format_subscription_line
-from .llm_tool_formatters import missing_remove_target as _missing_remove_target
-from .llm_tool_formatters import unknown_action as _unknown_action
-from .tag_count import CountExpressionError, CountResult, build_count_csv, build_count_csv_path, count_posts, is_admin_event
-
-try:
-    from astrbot.api import logger
-except ModuleNotFoundError:
-    if not _astrbot_package_missing():
-        raise
-    logger = logging.getLogger(__name__)
-
 
 SUBSCRIPTION_ACTIONS = (
     "list",

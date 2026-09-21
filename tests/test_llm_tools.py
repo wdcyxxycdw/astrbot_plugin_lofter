@@ -3,6 +3,7 @@ import sys
 import types
 
 import pytest
+from lofter import Post
 
 from core.author_block import AuthorBlock, normalize_author_query
 from core.llm_tools import LofterLLMToolsMixin
@@ -57,6 +58,7 @@ def test_llm_tools_does_not_swallow_astrbot_import_chain_errors():
     original_modules = {name: sys.modules.get(name) for name in ("astrbot", "astrbot.api", "astrbot.api.event")}
     astrbot_mod = types.ModuleType("astrbot")
     api_mod = types.ModuleType("astrbot.api")
+    api_mod.logger = llm_tools.logger
     event_mod = types.ModuleType("astrbot.api.event")
 
     def fail_imported_attr(name):
@@ -229,9 +231,6 @@ async def test_llm_author_block_block_list_unblock():
     assert "[用户名] SomeUser" in listed
     assert unblocked == "已解除屏蔽作者「https://SomeUser.lofter.com」"
     assert await runner.lofter_author_block(event, "list") == "当前没有屏蔽作者"
-
-
-from lofter import Post
 
 
 class FakeClient:
