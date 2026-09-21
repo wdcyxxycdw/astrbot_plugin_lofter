@@ -1,5 +1,3 @@
-import pytest
-
 from core.filter import (
     FilterRule,
     apply_filter,

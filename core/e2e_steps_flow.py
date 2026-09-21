@@ -102,7 +102,7 @@ class FlowStepsMixin:
             details.append("warmup tag 完成")
 
             count = await self._db.seen_count(s, "tag")
-            assert count > 0, f"warmup 后 seen_count=0"
+            assert count > 0, "warmup 后 seen_count=0"
             details.append(f"seen_count(session, 'tag') = {count}")
 
             all_subs = await self._storage.list_by_session(s)
@@ -206,7 +206,7 @@ class FlowStepsMixin:
             assert task is not None, "_task 为 None"
             assert not task.done(), "_task 已结束"
             assert interval > 0, f"_interval={interval} 非正数"
-            details.append(f"_task 存在且运行中")
+            details.append("_task 存在且运行中")
             details.append(f"_interval={interval}s ({interval // 60} 分钟)")
             return self._pass(name, self._timed_end(t0), details)
         except Exception as e:

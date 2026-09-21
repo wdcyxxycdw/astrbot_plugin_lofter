@@ -3,6 +3,7 @@ import sys
 import types
 
 import pytest
+from lofter import Post
 
 from core.author_block import AuthorBlock, normalize_author_query
 from core.llm_tools import LofterLLMToolsMixin
@@ -229,9 +230,6 @@ async def test_llm_author_block_block_list_unblock():
     assert "[用户名] SomeUser" in listed
     assert unblocked == "已解除屏蔽作者「https://SomeUser.lofter.com」"
     assert await runner.lofter_author_block(event, "list") == "当前没有屏蔽作者"
-
-
-from lofter import Post
 
 
 class FakeClient:

@@ -1,4 +1,3 @@
-import pytest
 from core.utils import _split_text
 
 
