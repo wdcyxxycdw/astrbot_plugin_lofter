@@ -19,6 +19,11 @@
         "type": "int",
         "default": 3
     },
+    "text_file_threshold": {
+        "description": "文字贴超过这个字数时，整理成 .txt 文件发送而不是合并转发；文件名取文章标题",
+        "type": "int",
+        "default": 1000
+    },
     "video_max_mb": {
         "description": "解析视频贴时允许下载的最大体积（MB），超过则只发文字不发文件",
         "type": "int",

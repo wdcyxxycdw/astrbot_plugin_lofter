@@ -1,23 +1,20 @@
 """视频贴：把 LOFTER 的视频下载到本地，再作为文件发出去。"""
 
 import contextlib
-import re
 import time
 from pathlib import Path
 
 import aiohttp
 
+from .files import safe_filename
+
 VIDEO_DIR_NAME = "videos"
 KEEP_SECONDS = 3600
 CHUNK_SIZE = 1 << 16
 
-_UNSAFE_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
-
 
 def video_filename(title: str, post_id: str) -> str:
-    """用文章标题当文件名。去掉文件系统不接受的字符，标题为空时退回帖子 ID。"""
-    name = _UNSAFE_CHARS.sub("", title).strip().rstrip(".")
-    return f"{name[:80] or post_id}.mp4"
+    return safe_filename(title, post_id, ".mp4")
 
 
 def prune_old_videos(directory: Path, *, keep_seconds: int = KEEP_SECONDS) -> None:

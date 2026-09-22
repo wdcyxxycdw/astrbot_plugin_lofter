@@ -1,6 +1,19 @@
-"""构造 AstrBot 的文件消息段。不同 AstrBot 版本的 File 构造方式不一致，逐个试。"""
+"""发送文件：文件名清洗，以及构造 AstrBot 的文件消息段。
 
+不同 AstrBot 版本的 File 构造方式不一致，逐个试。
+"""
+
+import re
 from pathlib import Path
+
+_UNSAFE_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+MAX_NAME_LENGTH = 80
+
+
+def safe_filename(title: str, fallback: str, suffix: str) -> str:
+    """用文章标题当文件名。去掉文件系统不接受的字符，标题为空时退回帖子 ID。"""
+    name = _UNSAFE_CHARS.sub("", title).strip().rstrip(".")
+    return f"{name[:MAX_NAME_LENGTH] or fallback}{suffix}"
 
 
 def build_file_component(path: Path):
