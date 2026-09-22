@@ -45,12 +45,12 @@ class OneBotPeer:
                 "echo": request["echo"],
             }))
 
-    async def message(self, text, user_id=10001, group_id=20001):
+    async def message(self, text, user_id=10001, group_id=20001, segments=None):
         event = {
             "time": int(time.time()), "self_id": 30001, "post_type": "message",
             "message_type": "group" if group_id else "private", "sub_type": "normal",
             "message_id": time.time_ns(), "user_id": user_id, "raw_message": text,
-            "message": [{"type": "text", "data": {"text": text}}],
+            "message": segments or [{"type": "text", "data": {"text": text}}],
             "sender": {"user_id": user_id, "nickname": "E2E", "role": "member"},
             "font": 0,
         }
