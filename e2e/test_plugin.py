@@ -207,6 +207,23 @@ async def test_link_auto_parse_marks_failure_reaction_when_post_is_unavailable(r
     assert emoji_reactions(requests) == [(128064, True), (128064, False), (123, True)]
 
 
+async def test_reaction_is_cleared_when_the_block_list_query_fails(runtime, monkeypatch):
+    """贴上 👀 之后的任何一步出错都得收尾，否则表情会永远留在用户消息上。"""
+    entry = post(0x5EAD, "表情兜底")
+    entry["post"]["content"] = "<p>正文</p>"
+    runtime.post_pages[permalink(0x5EAD)] = [entry]
+
+    async def unavailable(_session_id):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(runtime.plugin._author_blocks, "list_by_session", unavailable)
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x5EAD)}")
+
+    assert emoji_reactions(requests) == [(128064, True), (128064, False), (123, True)]
+    assert not [request for request in requests if request["action"].startswith("send_")]
+
+
 async def test_subscription_scans_past_first_page(runtime):
     tag = "补抓测试"
     runtime.pages[(tag, 0)] = [post(901, tag)]

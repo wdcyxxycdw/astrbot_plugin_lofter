@@ -142,12 +142,12 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             await set_reaction(event, self._emoji_parsing)
         try:
             post = await self._client.fetch_post(url)
+            blocks = await self._author_blocks.list_by_session(event.unified_msg_origin)
         except Exception as e:
-            logger.error("获取 Lofter 帖子失败: %s", e)
+            logger.error("解析 Lofter 帖子失败 %s: %s", url, e)
             await self._end_reaction(event, self._emoji_failed)
             return
 
-        blocks = await self._author_blocks.list_by_session(event.unified_msg_origin)
         if is_author_blocked(post, blocks):
             await self._end_reaction(event, None)
             return
