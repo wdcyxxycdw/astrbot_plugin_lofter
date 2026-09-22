@@ -1,7 +1,5 @@
 """文字贴：字数统计，以及把长文整理成 .txt 文件。"""
 
-import contextlib
-import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -11,7 +9,6 @@ from .formatter import DIVIDER
 
 TEXT_DIR_NAME = "articles"
 DEFAULT_FILE_THRESHOLD = 1000
-KEEP_SECONDS = 3600
 TITLE_BYTES = 200
 
 
@@ -33,22 +30,6 @@ def text_filename(post_id: str, title: str, when: datetime | None = None) -> str
 def text_display_name(title: str, post_id: str) -> str:
     """接收方看到的文件名，仍旧取文章标题。"""
     return safe_filename(title, post_id, ".txt")
-
-
-def prune_old_texts(directory: Path, *, keep_seconds: int = KEEP_SECONDS) -> None:
-    """清掉上一轮遗留的全文文件。发送是异步的，删不掉正在占用的就跳过。"""
-    if not directory.is_dir():
-        return
-    deadline = time.time() - keep_seconds
-    for pattern in ("*.txt", "*.part"):
-        _prune(directory, pattern, deadline)
-
-
-def _prune(directory: Path, pattern: str, deadline: float) -> None:
-    for path in directory.glob(pattern):
-        with contextlib.suppress(OSError):
-            if path.stat().st_mtime < deadline:
-                path.unlink()
 
 
 def build_text_file(post, count: int) -> str:

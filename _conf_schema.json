@@ -29,6 +29,11 @@
         "type": "int",
         "default": 100
     },
+    "temp_file_ttl_hours": {
+        "description": "生成的全文 .txt 和视频文件保留多久（小时），到期后由后台定期清理；最小 1 小时",
+        "type": "int",
+        "default": 1
+    },
     "parse_reaction": {
         "description": "自动解析链接时，给触发的消息贴表情表示进度（仅 QQ/OneBot 平台生效）",
         "type": "bool",

@@ -471,6 +471,41 @@ async def test_video_post_without_a_playable_address_says_so(runtime):
     assert "视频地址获取失败" in json.dumps(requests, ensure_ascii=False)
 
 
+async def test_the_cleaner_removes_the_files_the_plugin_actually_writes(runtime):
+    """解析一次长文，把生成的文件调旧，定期清理必须能清掉它。
+
+    文件命名规则改了而清理的匹配规则没跟上，文件就会一直堆着，单测各测各的看不出来。
+    """
+    import importlib
+    import os
+    import time
+
+    sweep = importlib.import_module(runtime.plugin.__module__.rsplit(".", 1)[0] + ".core.cleanup").sweep
+
+    body = "要被清掉的正文。" * 400
+    entry = post(0x7601, "清理")
+    entry["post"]["type"] = 1
+    entry["post"]["title"] = "待清理长文"
+    entry["post"]["content"] = f"<p>{body}</p>"
+    runtime.post_pages[permalink(0x7601)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7601)}")
+
+    segments = [segment for request in requests for segment in request["params"].get("message", [])]
+    file_segment, = [segment for segment in segments if segment["type"] == "file"]
+    on_disk = Path(unquote(urlparse(file_segment["data"]["file"]).path or file_segment["data"]["file"]))
+    assert on_disk.exists()
+
+    old = time.time() - 7200
+    os.utime(on_disk, (old, old))
+    sweep(on_disk.parent.parent, keep_seconds=3600)
+
+    assert not on_disk.exists()
+
+
+async def test_the_cleaner_runs_for_as_long_as_the_plugin_does(runtime):
+    """清理挂在插件生命周期上：解析与否都在跑，插件退出时跟着停。"""
+    assert not runtime.plugin._cleaner._task.done()
 async def test_video_post_ends_the_reaction_by_outcome(runtime):
     """视频分支单独 return，收尾表情得自己贴：漏了 👀 就永远留着，贴错了下载失败也显示成功。"""
     runtime.post_pages[permalink(0x7307)] = [video_entry(runtime, 0x7307)]
