@@ -36,6 +36,18 @@ python -m pip install -r requirements.txt
 | `max_images` | 解析帖子时最多展示的图片数量 | 3 |
 | `search_limit` | 搜索结果最多返回的条数（最大 100，超过 20 条自动翻页） | 3 |
 | `video_max_mb` | 解析视频贴时允许下载的最大体积（MB） | 100 |
+| `parse_reaction` | 自动解析链接时给消息贴表情表示进度（仅 QQ/OneBot 平台） | 开 |
+| `parse_reaction_emoji` | 「正在解析」的表情 ID | 128064（👀） |
+| `parse_reaction_done_emoji` | 「解析完成」的表情 ID | 124（OK） |
+| `parse_reaction_failed_emoji` | 「解析失败」的表情 ID | 123（NO） |
+
+### 解析进度表情
+
+识别到 Lofter 链接后，插件会给触发的那条消息贴一个 👀，抓取结束时换成 OK（成功）或 NO（失败）；作者被 `/lofter block` 屏蔽时只撤掉 👀 不贴结果。
+
+走的是 NapCat 的 `set_msg_emoji_like`，因此只在 QQ/OneBot 平台生效，其他平台自动跳过，不影响解析。
+
+QQ 只接受白名单内的表情 ID，而 NapCat 没有公开这份名单。如果某个 ID 贴不上，日志里会有 `Lofter: 贴表情失败 emoji_id=...` 及 NapCat 返回的原因，换一个 ID 即可——经典表情（0～324）比 Unicode emoji 码点更稳妥。
 
 ### Cookie（遗留配置）
 
