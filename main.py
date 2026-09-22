@@ -185,11 +185,12 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         video = await self._fetch_video(url)
         yield event.chain_result([Comp.Plain(format_post(post, header=VIDEO_HEADER))])
         if video is None:
+            yield event.plain_result("视频地址获取失败，请点击上方链接查看")
             return
 
         directory = Path(self._db._path).parent / VIDEO_DIR_NAME
         prune_old_videos(directory)
-        target = directory / video_filename(post.title, post.post_id)
+        target = directory / video_filename(post.post_id)
         try:
             await download_video(video.url, target, max_bytes=self._video_max_bytes)
         except Exception as e:
