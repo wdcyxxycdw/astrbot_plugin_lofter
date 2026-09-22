@@ -7,13 +7,22 @@ import re
 from pathlib import Path
 
 _UNSAFE_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
-MAX_NAME_LENGTH = 80
+MAX_NAME_BYTES = 200
+
+
+def clean_title(title: str, max_bytes: int = MAX_NAME_BYTES) -> str:
+    """把标题清洗成能当文件名的样子，清不出东西就返回空串。
+
+    按 UTF-8 字节截断而不是字符数：文件系统限制的是字节，一个汉字 3 字节、
+    一个 emoji 4 字节，按字符算会做出超长的名字，落地时 ENAMETOOLONG。
+    """
+    name = _UNSAFE_CHARS.sub("", title)
+    return name.encode("utf-8")[:max_bytes].decode("utf-8", "ignore").strip().rstrip(".")
 
 
 def safe_filename(title: str, fallback: str, suffix: str) -> str:
-    """用文章标题当文件名。去掉文件系统不接受的字符，标题为空时退回帖子 ID。"""
-    name = _UNSAFE_CHARS.sub("", title).strip().rstrip(".")
-    return f"{name[:MAX_NAME_LENGTH] or fallback}{suffix}"
+    """接收方看到的文件名：用文章标题，标题不可用时退回帖子 ID。"""
+    return f"{clean_title(title) or fallback}{suffix}"
 
 
 def build_file_component(path: Path, display_name: str = ""):

@@ -356,7 +356,8 @@ async def test_long_text_post_is_sent_as_a_txt_file_named_after_the_title(runtim
     assert file_segment["data"]["name"] == "我的长篇作品.txt"
     # 磁盘上按帖子 ID 存，标题只是收件人看到的名字——否则两篇同名文章会互相覆盖
     on_disk = Path(unquote(urlparse(file_segment["data"]["file"]).path or file_segment["data"]["file"]))
-    assert on_disk.name == f"{permalink(0x7401)}.txt"
+    assert on_disk.name.startswith(f"{permalink(0x7401)}_我的长篇作品_")
+    assert on_disk.name.endswith(".txt")
 
 
 async def test_long_text_falls_back_to_forward_nodes_when_files_are_unsupported(runtime, monkeypatch):
@@ -388,7 +389,7 @@ async def test_the_sent_txt_file_contains_the_whole_article(runtime):
 
     await runtime.message(f"https://author.lofter.com/post/{permalink(0x7402)}")
 
-    written = Path(runtime.plugin._db._path).parent / "articles" / f"{permalink(0x7402)}.txt"
+    written, = (Path(runtime.plugin._db._path).parent / "articles").glob(f"{permalink(0x7402)}_*.txt")
     text = written.read_text(encoding="utf-8")
     assert body in text
     assert "原文：https://author.lofter.com/post/" in text

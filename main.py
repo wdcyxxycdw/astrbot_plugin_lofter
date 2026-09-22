@@ -14,6 +14,7 @@ from lofter.models import POST_TYPE_VIDEO
 from .core.author_block import AuthorBlockStorage, filter_blocked_posts, is_author_blocked
 from .core.count_commands import LofterCountCommandsMixin
 from .core.db import LofterDB
+from .core.files import build_file_component
 from .core.llm_tools import LofterLLMToolsMixin
 from .core.filter import parse_tag_expr
 from .core.formatter import format_post, is_photo_post

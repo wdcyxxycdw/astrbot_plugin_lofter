@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pytest
 from lofter import Post, PostDetail
 
@@ -36,8 +38,23 @@ def test_word_count_is_zero_for_empty_posts():
     assert post_word_count(make_detail(content="")) == 0
 
 
-def test_text_filename_is_the_post_id():
-    assert text_filename("abc_123") == "abc_123.txt"
+WHEN = datetime(2026, 9, 22, 16, 45, 0)
+
+
+def test_text_filename_carries_the_post_id_title_and_time():
+    assert text_filename("abc_123", "我的文章", WHEN) == "abc_123_我的文章_20260922-164500.txt"
+
+
+def test_text_filename_omits_an_unusable_title():
+    assert text_filename("abc_123", "///", WHEN) == "abc_123_20260922-164500.txt"
+
+
+def test_text_filename_truncates_the_title_by_bytes(tmp_path):
+    """文件系统限制的是字节数。80 个 emoji 是 320 字节，按字符截断会做出落不了地的名字。"""
+    name = text_filename("abc_123", "🎬" * 200, WHEN)
+
+    assert len(name.encode("utf-8")) < 255
+    (tmp_path / name).write_text("ok", encoding="utf-8")
 
 
 def test_display_name_uses_the_article_title():
@@ -54,7 +71,7 @@ def test_display_name_falls_back_to_post_id():
 
 def test_two_posts_sharing_a_title_are_stored_separately():
     """标题撞名很常见（《无题》《第一章》），撞了就会把别人的正文发出去。"""
-    assert text_filename("abc_123") != text_filename("abc_124")
+    assert text_filename("abc_123", "第一章", WHEN) != text_filename("abc_124", "第一章", WHEN)
     assert text_display_name("第一章", "abc_123") == text_display_name("第一章", "abc_124")
 
 
@@ -91,7 +108,8 @@ def test_write_text_file_creates_the_directory_and_returns_the_path(tmp_path, ti
     path = write_text_file(tmp_path / "articles", detail.post, 4)
 
     assert path.parent.name == "articles"
-    assert path.name == text_filename("abc_123")
+    assert path.name.startswith("abc_123_")
+    assert path.name.endswith(".txt")
     assert "正文内容" in path.read_text(encoding="utf-8")
 
 
@@ -125,11 +143,10 @@ def test_prune_old_texts_tolerates_missing_directory(tmp_path):
     prune_old_texts(tmp_path / "nope")
 
 
-def test_write_text_file_overwrites_a_previous_run(tmp_path):
-    detail = make_detail(content="第一版")
-    first = write_text_file(tmp_path, detail.post, 3)
+def test_each_write_carries_its_own_content(tmp_path):
+    """文件名带时间戳，重复解析同一篇不再互相覆盖；同一秒内重解析仍会覆盖，内容一致无妨。"""
+    first = write_text_file(tmp_path, make_detail(content="第一版").post, 3)
     second = write_text_file(tmp_path, make_detail(content="第二版").post, 3)
 
-    assert first == second
     assert "第二版" in second.read_text(encoding="utf-8")
-    assert "第一版" not in second.read_text(encoding="utf-8")
+    assert "第一版" in first.read_text(encoding="utf-8") or first == second
