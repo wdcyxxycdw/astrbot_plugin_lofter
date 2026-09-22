@@ -185,7 +185,48 @@ async def test_forward_nodes_split_the_body_when_the_file_threshold_is_raised(ru
 
 async def test_login_page_never_sends_an_empty_post(runtime):
     _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0xB0B)}")
-    assert not requests
+    assert not [request for request in requests if request["action"].startswith("send_")]
+
+
+def emoji_reactions(requests):
+    return [
+        (request["params"]["emoji_id"], request["params"]["set"])
+        for request in requests
+        if request["action"] == "set_msg_emoji_like"
+    ]
+
+
+async def test_link_auto_parse_marks_progress_with_emoji_reaction(runtime):
+    entry = post(0x5EAC, "表情测试")
+    entry["post"]["content"] = "<p>正文</p>"
+    runtime.post_pages[permalink(0x5EAC)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x5EAC)}")
+
+    assert emoji_reactions(requests) == [(128064, True), (128064, False), (124, True)]
+
+
+async def test_link_auto_parse_marks_failure_reaction_when_post_is_unavailable(runtime):
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0xB0B)}")
+
+    assert emoji_reactions(requests) == [(128064, True), (128064, False), (123, True)]
+
+
+async def test_reaction_is_cleared_when_the_block_list_query_fails(runtime, monkeypatch):
+    """贴上 👀 之后的任何一步出错都得收尾，否则表情会永远留在用户消息上。"""
+    entry = post(0x5EAD, "表情兜底")
+    entry["post"]["content"] = "<p>正文</p>"
+    runtime.post_pages[permalink(0x5EAD)] = [entry]
+
+    async def unavailable(_session_id):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(runtime.plugin._author_blocks, "list_by_session", unavailable)
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x5EAD)}")
+
+    assert emoji_reactions(requests) == [(128064, True), (128064, False), (123, True)]
+    assert not [request for request in requests if request["action"].startswith("send_")]
 
 
 async def test_subscription_scans_past_first_page(runtime):
@@ -428,3 +469,17 @@ async def test_video_post_without_a_playable_address_says_so(runtime):
     _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7306)}")
 
     assert "视频地址获取失败" in json.dumps(requests, ensure_ascii=False)
+
+
+async def test_video_post_ends_the_reaction_by_outcome(runtime):
+    """视频分支单独 return，收尾表情得自己贴：漏了 👀 就永远留着，贴错了下载失败也显示成功。"""
+    runtime.post_pages[permalink(0x7307)] = [video_entry(runtime, 0x7307)]
+    _, sent = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7307)}")
+
+    broken = post(0x7308, "视频测试")
+    broken["post"]["type"] = 4
+    runtime.post_pages[permalink(0x7308)] = [broken]
+    _, failed = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7308)}")
+
+    assert emoji_reactions(sent) == [(128064, True), (128064, False), (124, True)]
+    assert emoji_reactions(failed) == [(128064, True), (128064, False), (123, True)]

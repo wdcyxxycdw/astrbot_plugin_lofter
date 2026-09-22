@@ -96,6 +96,8 @@ class Runtime:
         config["platform_settings"]["reply_with_mention"] = False
         config["platform_settings"]["reply_with_quote"] = False
         config["platform_settings"]["segmented_reply"]["enable"] = False
+        # 整套测试都发给同一个会话，默认限流（60 秒 30 条）会让靠后的用例 stall 二十多秒后超时。
+        config["platform_settings"]["rate_limit"]["count"] = 0
         self.queue = asyncio.Queue()
         platforms = PlatformManager(config, self.queue)
         self.adapter = AiocqhttpAdapter({

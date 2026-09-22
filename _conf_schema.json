@@ -28,5 +28,25 @@
         "description": "解析视频贴时允许下载的最大体积（MB），超过则只发文字不发文件",
         "type": "int",
         "default": 100
+    },
+    "parse_reaction": {
+        "description": "自动解析链接时，给触发的消息贴表情表示进度（仅 QQ/OneBot 平台生效）",
+        "type": "bool",
+        "default": true
+    },
+    "parse_reaction_emoji": {
+        "description": "「正在解析」的表情 ID，默认 128064（👀）。QQ 只接受白名单内的 ID，贴不上时日志会记录 NapCat 的报错，换一个即可",
+        "type": "int",
+        "default": 128064
+    },
+    "parse_reaction_done_emoji": {
+        "description": "「解析完成」的表情 ID，默认 124（OK）",
+        "type": "int",
+        "default": 124
+    },
+    "parse_reaction_failed_emoji": {
+        "description": "「解析失败」的表情 ID，默认 123（NO）",
+        "type": "int",
+        "default": 123
     }
 }
