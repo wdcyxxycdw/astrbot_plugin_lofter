@@ -19,7 +19,8 @@ from core.tag_count import (
     parse_count_command_arg,
     parse_count_expression,
 )
-from core.count_commands import LofterCountCommandsMixin, _file_constructor_candidates, _try_direct_file
+from core.count_commands import LofterCountCommandsMixin
+from core.files import _file_constructor_candidates, _try_direct_file
 
 
 def _post(tags: list[str]) -> Post:

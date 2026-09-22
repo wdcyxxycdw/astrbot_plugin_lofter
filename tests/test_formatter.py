@@ -1,5 +1,6 @@
-from lofter import Post
-from core.formatter import format_post
+from lofter import Post, PostDetail
+from lofter.models import POST_TYPE_PHOTO, POST_TYPE_TEXT
+from core.formatter import format_post, is_photo_post
 
 DIVIDER = "──────────────"
 
@@ -75,3 +76,25 @@ def test_divider_and_url_always_present():
     post = make_post(author="", tags=[], summary="")
     result = format_post(post)
     assert f"{DIVIDER}\nhttps://example.lofter.com/post/1" in result
+
+
+def make_detail(post_type, images=()):
+    return PostDetail(post=make_post(images=list(images)), post_type=post_type)
+
+
+def test_is_photo_post_trusts_photo_type_even_without_images():
+    assert is_photo_post(make_detail(POST_TYPE_PHOTO)) is True
+
+
+def test_is_photo_post_trusts_text_type_even_when_images_exist():
+    assert is_photo_post(make_detail(POST_TYPE_TEXT, images=["https://img/1.png"])) is False
+
+
+def test_is_photo_post_falls_back_to_images_for_unknown_types():
+    assert is_photo_post(make_detail(3, images=["https://img/1.png"])) is True
+    assert is_photo_post(make_detail(3)) is False
+
+
+def test_is_photo_post_treats_missing_type_as_unknown():
+    assert is_photo_post(make_detail(0, images=["https://img/1.png"])) is True
+    assert is_photo_post(make_detail(0)) is False
