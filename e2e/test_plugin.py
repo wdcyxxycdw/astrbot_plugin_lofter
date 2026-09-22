@@ -307,7 +307,7 @@ def video_entry(runtime, index):
     return entry
 
 
-async def test_video_post_downloads_the_video_and_sends_it_as_a_file(runtime):
+async def test_video_post_downloads_the_video_and_sends_it_as_a_video(runtime):
     runtime.post_pages[permalink(0x7304)] = [video_entry(runtime, 0x7304)]
     before = runtime.video_requests
 
@@ -315,13 +315,13 @@ async def test_video_post_downloads_the_video_and_sends_it_as_a_file(runtime):
 
     assert runtime.video_requests == before + 1
     segments = [segment for request in requests for segment in request["params"].get("message", [])]
-    file_segment, = [segment for segment in segments if segment["type"] == "file"]
-    assert "我的视频作品.mp4" in json.dumps(file_segment, ensure_ascii=False)
+    video_segment, = [segment for segment in segments if segment["type"] == "video"]
+    assert "我的视频作品.mp4" in unquote(video_segment["data"]["file"])
     text = json.dumps(requests, ensure_ascii=False)
     assert "🎬 视频作品" in text
 
 
-async def test_video_post_over_the_size_limit_reports_instead_of_sending_a_file(runtime):
+async def test_video_post_over_the_size_limit_reports_instead_of_sending_a_video(runtime):
     runtime.post_pages[permalink(0x7305)] = [video_entry(runtime, 0x7305)]
     original = runtime.plugin._video_max_bytes
     runtime.plugin._video_max_bytes = 16
@@ -331,5 +331,5 @@ async def test_video_post_over_the_size_limit_reports_instead_of_sending_a_file(
         runtime.plugin._video_max_bytes = original
 
     segments = [segment for request in requests for segment in request["params"].get("message", [])]
-    assert not [segment for segment in segments if segment["type"] == "file"]
+    assert not [segment for segment in segments if segment["type"] == "video"]
     assert "视频下载失败" in json.dumps(requests, ensure_ascii=False)
