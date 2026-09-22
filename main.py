@@ -15,6 +15,7 @@ from .core.db import LofterDB
 from .core.llm_tools import LofterLLMToolsMixin
 from .core.filter import parse_tag_expr
 from .core.formatter import format_post
+from .core.reaction import EMOJI_DONE, EMOJI_FAILED, EMOJI_PARSING, replace_reaction, set_reaction
 from .core.scheduler import SubscriptionScheduler, fetch_tag_posts
 from .core.storage import SubscriptionStorage
 from .core.utils import _split_text, extract_message_body_text
@@ -35,6 +36,10 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         self._max_images: int = int(config.get("max_images", 3))
         self._search_limit: int = int(config.get("search_limit", 3))
         self._interval: int = int(config.get("poll_interval", 30))
+        self._reaction_enabled: bool = bool(config.get("parse_reaction", True))
+        self._emoji_parsing: int = int(config.get("parse_reaction_emoji", EMOJI_PARSING))
+        self._emoji_done: int = int(config.get("parse_reaction_done_emoji", EMOJI_DONE))
+        self._emoji_failed: int = int(config.get("parse_reaction_failed_emoji", EMOJI_FAILED))
         db_path = os.path.join(StarTools.get_data_dir(), "lofter.db")
         self._db = LofterDB(db_path)
         self._client = LofterClient("")
@@ -120,6 +125,11 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
     # 自动解析消息中的 Lofter 链接
     # ──────────────────────────────────────────
 
+    async def _end_reaction(self, event: AstrMessageEvent, emoji_id: int | None):
+        """解析结束，把「处理中」换成结果表情；emoji_id 为 None 时只撤不贴。"""
+        if self._reaction_enabled:
+            await replace_reaction(event, self._emoji_parsing, emoji_id)
+
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
     async def auto_parse(self, event: AstrMessageEvent):
         msg = extract_message_body_text(event.message_obj, event.message_str)
@@ -127,17 +137,24 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         if not match:
             return
         url = "https://" + match.group(0)
+        if self._reaction_enabled:
+            await set_reaction(event, self._emoji_parsing)
         try:
             post = await self._client.fetch_post(url)
         except Exception as e:
             logger.error("获取 Lofter 帖子失败: %s", e)
+            await self._end_reaction(event, self._emoji_failed)
             return
 
         blocks = await self._author_blocks.list_by_session(event.unified_msg_origin)
         if is_author_blocked(post, blocks):
+            await self._end_reaction(event, None)
             return
         if not post.summary and not post.images and not post.content:
+            await self._end_reaction(event, self._emoji_failed)
             return
+
+        await self._end_reaction(event, self._emoji_done)
 
         if post.images:
             chain = [Comp.Plain(format_post(post))]
