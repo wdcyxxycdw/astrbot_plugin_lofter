@@ -28,5 +28,10 @@
         "description": "解析视频贴时允许下载的最大体积（MB），超过则只发文字不发文件",
         "type": "int",
         "default": 100
+    },
+    "temp_file_ttl_hours": {
+        "description": "生成的全文 .txt 和视频文件保留多久（小时），到期后由后台定期清理；最小 1 小时",
+        "type": "int",
+        "default": 1
     }
 }

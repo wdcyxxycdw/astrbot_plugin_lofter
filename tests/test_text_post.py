@@ -6,7 +6,6 @@ from lofter import Post, PostDetail
 from core.text_post import (
     build_text_file,
     post_word_count,
-    prune_old_texts,
     text_display_name,
     text_filename,
     write_text_file,
@@ -117,30 +116,6 @@ def test_write_text_file_leaves_no_temporary_files(tmp_path):
     write_text_file(tmp_path, make_detail(content="正文").post, 2)
 
     assert list(tmp_path.glob("*.part")) == []
-
-
-def test_prune_old_texts_removes_stale_files_and_keeps_fresh_ones(tmp_path):
-    import os
-    import time
-
-    stale = tmp_path / "old.txt"
-    leftover = tmp_path / "old.txt.deadbeef.part"
-    fresh = tmp_path / "new.txt"
-    for path in (stale, leftover, fresh):
-        path.write_text("x", encoding="utf-8")
-    old_time = time.time() - 7200
-    os.utime(stale, (old_time, old_time))
-    os.utime(leftover, (old_time, old_time))
-
-    prune_old_texts(tmp_path, keep_seconds=3600)
-
-    assert not stale.exists()
-    assert not leftover.exists()
-    assert fresh.exists()
-
-
-def test_prune_old_texts_tolerates_missing_directory(tmp_path):
-    prune_old_texts(tmp_path / "nope")
 
 
 def test_each_write_carries_its_own_content(tmp_path):

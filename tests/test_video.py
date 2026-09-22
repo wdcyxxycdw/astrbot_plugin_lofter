@@ -1,11 +1,10 @@
 import asyncio
 import contextlib
-import time
 
 import pytest
 from aiohttp import web
 
-from core.video import CHUNK_SIZE, download_video, prune_old_videos, video_filename
+from core.video import CHUNK_SIZE, download_video, video_filename
 
 MB = 1 << 20
 
@@ -17,28 +16,6 @@ def test_video_filename_is_the_post_id():
 def test_different_posts_never_share_a_filename():
     """标题会撞（《无题》《第一章》），帖子 ID 不会——撞名会让一方发出另一方的视频。"""
     assert video_filename("abc_123") != video_filename("abc_124")
-
-
-def test_prune_old_videos_removes_stale_files_and_keeps_fresh_ones(tmp_path):
-    stale = tmp_path / "old.mp4"
-    fresh = tmp_path / "new.mp4"
-    other = tmp_path / "keep.txt"
-    for path in (stale, fresh, other):
-        path.write_bytes(b"x")
-    old_time = time.time() - 7200
-    import os
-
-    os.utime(stale, (old_time, old_time))
-
-    prune_old_videos(tmp_path, keep_seconds=3600)
-
-    assert not stale.exists()
-    assert fresh.exists()
-    assert other.exists()
-
-
-def test_prune_old_videos_tolerates_missing_directory(tmp_path):
-    prune_old_videos(tmp_path / "nope")
 
 
 @pytest.fixture
@@ -165,16 +142,3 @@ async def test_target_file_only_appears_once_the_download_finishes(video_server,
 
     assert not visible_midway
     assert target.read_bytes() == body
-
-
-def test_prune_old_videos_also_removes_stale_temporary_files(tmp_path):
-    import os
-
-    stale = tmp_path / "out.mp4.deadbeef.part"
-    stale.write_bytes(b"half")
-    old_time = time.time() - 7200
-    os.utime(stale, (old_time, old_time))
-
-    prune_old_videos(tmp_path, keep_seconds=3600)
-
-    assert not stale.exists()

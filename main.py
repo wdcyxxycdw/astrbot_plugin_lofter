@@ -12,6 +12,7 @@ from lofter import LofterClient
 from lofter.models import POST_TYPE_VIDEO
 
 from .core.author_block import AuthorBlockStorage, filter_blocked_posts, is_author_blocked
+from .core.cleanup import DEFAULT_TTL_HOURS, TempFileCleaner
 from .core.count_commands import LofterCountCommandsMixin
 from .core.db import LofterDB
 from .core.files import build_file_component
@@ -24,12 +25,11 @@ from .core.text_post import (
     DEFAULT_FILE_THRESHOLD,
     TEXT_DIR_NAME,
     post_word_count,
-    prune_old_texts,
     text_display_name,
     write_text_file,
 )
 from .core.utils import _split_text, extract_message_body_text
-from .core.video import VIDEO_DIR_NAME, download_video, prune_old_videos, video_filename
+from .core.video import VIDEO_DIR_NAME, download_video, video_filename
 
 POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
 VIDEO_HEADER = "🎬 视频作品"
@@ -79,6 +79,10 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             block_storage=self._author_blocks,
             interval_minutes=self._interval,
         )
+        self._cleaner = TempFileCleaner(
+            Path(db_path).parent,
+            ttl_hours=int(config.get("temp_file_ttl_hours", DEFAULT_TTL_HOURS)),
+        )
 
     async def initialize(self):
         await self._db.initialize()
@@ -91,9 +95,11 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             await self._db.set_config("lofter_cookie", cookie)
         self._client.update_cookie(cookie)
         self._scheduler.start()
+        self._cleaner.start()
 
     async def terminate(self):
         await self._scheduler.stop()
+        await self._cleaner.stop()
         await self._client.close()
         await self._db.close()
 
@@ -196,7 +202,6 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             return
 
         directory = Path(self._db._path).parent / TEXT_DIR_NAME
-        prune_old_texts(directory)
         try:
             path = write_text_file(directory, post, count)
         except Exception as e:
@@ -227,7 +232,6 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             return
 
         directory = Path(self._db._path).parent / VIDEO_DIR_NAME
-        prune_old_videos(directory)
         target = directory / video_filename(post.post_id)
         try:
             await download_video(video.url, target, max_bytes=self._video_max_bytes)

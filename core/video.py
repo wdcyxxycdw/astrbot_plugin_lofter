@@ -1,36 +1,17 @@
 """视频贴：把 LOFTER 的视频下载到本地，再作为视频消息段发出去。"""
 
-import contextlib
-import time
 import uuid
 from pathlib import Path
 
 import aiohttp
 
 VIDEO_DIR_NAME = "videos"
-KEEP_SECONDS = 3600
 CHUNK_SIZE = 1 << 16
 
 
 def video_filename(post_id: str) -> str:
     """视频消息段不带文件名，磁盘上用帖子 ID 就够，顺带保证不同帖子不会撞名。"""
     return f"{post_id}.mp4"
-
-
-def prune_old_videos(directory: Path, *, keep_seconds: int = KEEP_SECONDS) -> None:
-    """清掉上一轮遗留的视频和半截临时文件。删不掉正在占用的文件就跳过。"""
-    if not directory.is_dir():
-        return
-    deadline = time.time() - keep_seconds
-    for pattern in ("*.mp4", "*.part"):
-        _prune(directory, pattern, deadline)
-
-
-def _prune(directory: Path, pattern: str, deadline: float) -> None:
-    for path in directory.glob(pattern):
-        with contextlib.suppress(OSError):
-            if path.stat().st_mtime < deadline:
-                path.unlink()
 
 
 async def download_video(url: str, target: Path, *, max_bytes: int, timeout: int = 300) -> None:
