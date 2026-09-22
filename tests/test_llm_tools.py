@@ -234,10 +234,13 @@ async def test_llm_author_block_block_list_unblock():
 
 
 class FakeClient:
-    async def search_tag(self, keyword, limit=20):
+    async def fetch_tag_posts(self, keyword, *, limit=20):
         assert keyword == "原神"
         assert limit == 2
-        return "fake-dwr"
+        return [
+            Post("1", "可见标题", "摘要", ["img1", "img2", "img3"], "作者A", "visible", "https://a.lofter.com/post/1", ["原神"], "2026-05-15"),
+            Post("2", "屏蔽标题", "摘要", [], "作者B", "blocked", "https://b.lofter.com/post/2", ["原神"], "2026-05-15"),
+        ]
 
 
 class FakeContentAuthorBlocks:
@@ -266,17 +269,7 @@ async def test_llm_content_requires_search_query():
 
 
 @pytest.mark.asyncio
-async def test_llm_content_search_filters_blocked_authors(monkeypatch):
-    async def fake_parse_dwr_response(raw):
-        assert raw == "fake-dwr"
-        return [
-            Post("1", "可见标题", "摘要", ["img1", "img2", "img3"], "作者A", "visible", "https://a.lofter.com/post/1", ["原神"], "2026-05-15"),
-            Post("2", "屏蔽标题", "摘要", [], "作者B", "blocked", "https://b.lofter.com/post/2", ["原神"], "2026-05-15"),
-        ]
-
-    import core.llm_tools as llm_tools
-
-    monkeypatch.setattr(llm_tools, "parse_dwr_response", fake_parse_dwr_response)
+async def test_llm_content_search_filters_blocked_authors():
     runner = ContentRunner()
     event = LLMToolEvent()
 

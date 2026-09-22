@@ -23,7 +23,7 @@ AstrBot 插件，用于解析 Lofter 链接、订阅 Lofter 标签/博主、搜�
 python -m pip install -r requirements.txt
 ```
 
-插件仍负责 Cookie 配置、SQLite、标签统计、订阅调度和消息发送；HTTP、DWR/HTML 解析及 `Post` 数据模型统一使用 `lftr`，不再在插件内维护副本。Cookie 仍由本插件读取原配置并传给客户端，无需新增配置或迁移数据库。抓取实现的独立仓库见 [wdcyxxycdw/lofter](https://github.com/wdcyxxycdw/lofter)。
+插件仍负责 SQLite、标签统计、订阅调度和消息发送；HTTP、LOFTER app JSON 接口解析及 `Post` 数据模型统一使用 `lftr`，不再在插件内维护副本。抓取走 LOFTER app 的 JSON 接口，公开内容无需登录，Cookie 已降为可选项。抓取实现的独立仓库见 [wdcyxxycdw/lofter](https://github.com/wdcyxxycdw/lofter)。
 
 ## 配置
 
@@ -31,17 +31,18 @@ python -m pip install -r requirements.txt
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| `lofter_cookie` | Lofter 登录 Cookie（从浏览器开发者工具复制） | 空 |
+| `lofter_cookie` | **（遗留，可留空）** Lofter 登录 Cookie，见下文说明 | 空 |
 | `poll_interval` | 订阅轮询间隔（分钟） | 30 |
 | `max_images` | 解析帖子时最多展示的图片数量 | 3 |
 | `search_limit` | 搜索结果最多返回的条数（最大 100，超过 20 条自动翻页） | 3 |
 
-### 获取 Cookie
+### Cookie（遗留配置）
 
-1. 浏览器登录 [lofter.com](https://www.lofter.com)
-2. 打开开发者工具（F12）→ Network 标签
-3. 刷新页面，点击任意请求，复制请求头中的 `Cookie` 字段值
-4. 粘贴到插件配置的 `lofter_cookie` 中，或运行时使用 `/lofter cookie <值>` 命令更新
+**正常使用不需要配置 Cookie。** 自 v2.1.0 起抓取改用 LOFTER app 的 JSON 接口，标签搜索、博主作品、单帖详情都能匿名读取公开内容。旧版基于网页 DWR/HTML 的抓取需要登录态，Cookie 是为那条链路准备的。
+
+配置项和 `/lofter cookie` 命令保留下来，仅用于兜底：如果将来某些内容确实要登录才能读，填上的 Cookie 仍会随请求发出。留空是推荐做法。
+
+如确需填写：浏览器登录 [lofter.com](https://www.lofter.com) → F12 → Network → 刷新页面 → 复制任意请求头里的 `Cookie` 值，粘贴到 `lofter_cookie`，或运行时用 `/lofter cookie <值>` 更新。
 
 ## 使用
 
@@ -86,7 +87,7 @@ https://...
 | `/lofter unsub-tag <标签名>` | 取消订阅指定标签 |
 | `/lofter unexclude-tag <标签名>` | 取消指定标签的排除规则 |
 | `/lofter unsub-blog <用户名>` | 取消订阅博主 |
-| `/lofter cookie <值>` | 机器人管理员更新全局 Lofter Cookie，立即生效 |
+| `/lofter cookie <值>` | 机器人管理员更新全局 Lofter Cookie（遗留，通常不需要） |
 | `/lofter block-author <昵称或用户名>` | 屏蔽当前会话中的指定作者 |
 | `/lofter unblock-author <昵称或用户名>` | 解除作者屏蔽 |
 | `/lofter block-list` | 查看当前会话屏蔽作者列表 |
@@ -156,7 +157,7 @@ LLM 工具不会暴露 Cookie 更新和运行环境诊断命令；Lofter 链接�
 
 每个 OR 分支都必须有正向标签约束。`A|-B` 会被拒绝，因为仅扫描 A 无法枚举所有“不带 B”的作品。
 
-多个正向标签默认最多 5 个扫描任务，每个标签内串行翻页；HTTP 请求共用连接池并至少间隔 0.3 秒。DWR 分页同时传递 offset 和上一页最早的毫秒发布时间。结果显示已发现的作品数、候选作品数和各标签扫描页数，范围是当前账号通过 DWR 可检索的内容，不承诺平台全量总数。
+多个正向标签默认最多 5 个扫描任务，每个标签内串行翻页；HTTP 请求共用连接池并至少间隔 0.3 秒。分页按服务端返回的条数推进 offset。结果显示已发现的作品数、候选作品数和各标签扫描页数，范围是标签接口可检索的内容，不承诺平台全量总数。
 
 - **扫描结束**：所有标签均扫描到合法空列表。
 - **部分完成**：已有有效数据，但遇到重复页、请求失败或响应异常，当前数量不完整。
@@ -174,7 +175,7 @@ LLM 工具不会暴露 Cookie 更新和运行环境诊断命令；Lofter 链接�
 
 - **持久化待发送队列**：`pending_posts` 保存完整帖子；单轮最多推送 5 条，超出的内容即使从标签首页消失或插件重启，也能继续发送
 - **逐条发送记账**：只有适配器发送成功才在同一事务中写入 `seen_posts`、`sent_posts` 并删除待发送记录。中途失败不会把未发送帖子记为已发送，也不会让前面成功的整批重发
-- **标签补抓**：预热后持续翻页直到已知内容或空页，保存抓取中断时的位置，下轮继续。依赖 DWR 分页正常工作，重复页会记录错误
+- **标签补抓**：预热后持续翻页直到已知内容或空页，保存抓取中断时的位置，下轮继续。依赖标签接口分页正常工作，重复页会记录错误
 - **跨订阅去重**：通过 `sent_posts` 表记录会话维度已推送的帖子 ID，同一帖子匹配多个订阅标签时只推送一次
 - **数据库访问串行化**：所有 SQLite 操作通过插件专用单线程执行器运行，避免多会话轮询和命令并发时共享连接被多线程同时访问
 - **冷启动保护**：首次订阅及每次新增订阅时自动预热，不会刷屏推送历史帖子

@@ -8,6 +8,18 @@ from pathlib import Path
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+API_URLS = ("TAG_URL", "BLOG_URL", "DETAIL_URL")
+
+
+def envelope(response: dict) -> dict:
+    return {"meta": {"status": 200, "msg": ""}, "response": response}
+
+
+def form_fields(text: str) -> dict:
+    from urllib.parse import unquote
+
+    return {k: unquote(v) for k, v in (pair.split("=", 1) for pair in text.split("&") if "=" in pair)}
+
 
 class OneBotPeer:
     def __init__(self, websocket):
@@ -54,8 +66,9 @@ class Runtime:
         self.stack = contextlib.AsyncExitStack()
         self.plugin = None
         self.pages = {}
-        self.dwr_requests = []
-        self.html_pages = {}
+        self.blog_pages = {}
+        self.post_pages = {}
+        self.api_requests = []
         self.image_requests = 0
 
     async def start(self):
@@ -108,32 +121,47 @@ class Runtime:
         self.pipeline = PipelineScheduler(PipelineContext(config, plugins, "default"))
         await self.pipeline.initialize()
         app = web.Application()
-        app.router.add_post("/dwr", self.dwr)
+        app.router.add_post("/tag", self.tag)
+        app.router.add_post("/blog", self.blog)
+        app.router.add_post("/detail", self.detail)
         app.router.add_get("/image.png", self.image)
         self.http = await self.stack.enter_async_context(TestServer(app))
         import lofter.client as client_module
         self.client_module = client_module
-        self.original_dwr_url = self.client_module.DWR_SEARCH_URL
-        self.client_module.DWR_SEARCH_URL = str(self.http.make_url("/dwr"))
-        from http_fixture import post_server
-        self.plugin._client._session = await post_server(self.stack, self.root, self.post_page)
+        self.original_api_urls = {name: getattr(client_module, name) for name in API_URLS}
+        client_module.TAG_URL = str(self.http.make_url("/tag"))
+        client_module.BLOG_URL = str(self.http.make_url("/blog"))
+        client_module.DETAIL_URL = str(self.http.make_url("/detail"))
         websocket = await self.stack.enter_async_context(self.adapter.bot.server_app.test_client().websocket(
             "/ws", headers={"X-Self-ID": "30001", "X-Client-Role": "Universal"},
         ))
         self.peer = OneBotPeer(websocket)
         self.receiver = asyncio.create_task(self.peer.receive())
 
-    async def dwr(self, request):
-        from urllib.parse import unquote
-        fields = dict(line.split("=", 1) for line in (await request.text()).splitlines() if "=" in line)
-        self.dwr_requests.append(fields)
-        tag = unquote(fields["c0-param0"].removeprefix("string:"))
-        offset = int(fields["c0-param7"].removeprefix("number:"))
-        body = self.pages.get((tag, offset), "dwr.engine._remoteHandleCallback('0','0',[]);")
-        return web.Response(text=body, content_type="text/javascript")
+    async def _read(self, request) -> dict:
+        fields = form_fields(await request.text())
+        self.api_requests.append(fields)
+        return fields
 
-    async def post_page(self, request):
-        return web.Response(text=self.html_pages.get(request.match_info["post_id"], "<html>请登录</html>"), content_type="text/html")
+    def _reply(self, page, key: str, offset: int = 0):
+        if isinstance(page, str):
+            return web.Response(text=page, content_type="text/html")
+        return web.json_response(envelope({key: page, "offset": offset + len(page)}))
+
+    async def tag(self, request):
+        fields = await self._read(request)
+        offset = int(fields["offset"])
+        return self._reply(self.pages.get((fields["tag"], offset), []), "items", offset)
+
+    async def blog(self, request):
+        fields = await self._read(request)
+        username = fields["blogdomain"].removesuffix(".lofter.com")
+        return self._reply(self.blog_pages.get(username, []), "posts")
+
+    async def detail(self, request):
+        fields = await self._read(request)
+        permalink = f"{int(fields['blogId']):x}_{int(fields['postid']):x}"
+        return self._reply(self.post_pages.get(permalink, []), "posts")
 
     async def image(self, request):
         self.image_requests += 1
@@ -150,8 +178,8 @@ class Runtime:
     async def close(self):
         if self.plugin:
             await self.plugin.terminate()
-        if hasattr(self, "original_dwr_url"):
-            self.client_module.DWR_SEARCH_URL = self.original_dwr_url
+        for name, url in getattr(self, "original_api_urls", {}).items():
+            setattr(self.client_module, name, url)
         if hasattr(self, "receiver"):
             self.receiver.cancel()
             with contextlib.suppress(asyncio.CancelledError):

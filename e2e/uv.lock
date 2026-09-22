@@ -1428,7 +1428,7 @@ wheels = [
 
 [[package]]
 name = "lftr"
-version = "0.1.0"
+version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -1436,9 +1436,9 @@ dependencies = [
     { name = "dukpy" },
     { name = "lxml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fa/0e/5579d51b0c06057e617cf9bce27d21ab144c9c96d35b03376e5b2b45b864/lftr-0.1.0.tar.gz", hash = "sha256:64918d0dfc1c55e01fabfac76170cbd4bd9f07180d746fafd0672a0af3d92094", size = 27986, upload-time = "2026-09-21T15:19:31.776Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/df/6d/17cd8c9f5927adcadc1a4e81a18396b10e99bc180fbe5bbafbc6f1df4637/lftr-0.2.0.tar.gz", hash = "sha256:d36a88cf996798e044af1570a7fde8f747208d58e606a263138c9319fae60692", size = 34354, upload-time = "2026-09-22T06:53:40.544Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/89/2c/ddff23699202db93bfea5943220b9eae1a7c0662e4bc9c12f81e1742254f/lftr-0.1.0-py3-none-any.whl", hash = "sha256:bf82792fd8476c09d1ebf7dcd0311924db285d73a712490cb3af0819d0332417", size = 27010, upload-time = "2026-09-21T15:19:30.756Z" },
+    { url = "https://files.pythonhosted.org/packages/18/1a/cc06a4e10fa1e620b5730d92519bc1f80b18a08b1221ad459405b5e1cce3/lftr-0.2.0-py3-none-any.whl", hash = "sha256:af337d14edbfc47fe3ad6103932ad42baf6adc86e7d90e53037f17f8feb0c17d", size = 33345, upload-time = "2026-09-22T06:53:39.656Z" },
 ]
 
 [[package]]
@@ -1449,7 +1449,6 @@ dependencies = [
     { name = "aiohttp" },
     { name = "astrbot" },
     { name = "brotli" },
-    { name = "cryptography" },
     { name = "lftr" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1461,8 +1460,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.8.0" },
     { name = "astrbot", specifier = "==4.27.5" },
     { name = "brotli", specifier = ">=1" },
-    { name = "cryptography", specifier = ">=42" },
-    { name = "lftr", specifier = "==0.1.0" },
+    { name = "lftr", specifier = ">=0.2.0" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=1" },
     { name = "pytest-dotenv", specifier = ">=0.5" },

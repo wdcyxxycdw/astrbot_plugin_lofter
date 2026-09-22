@@ -214,16 +214,17 @@ class LofterDB:
 
         return [Post(**json.loads(row[0])) for row in await self._run(_read)]
 
-    async def tag_scan_cursor(self, session_id: str, tag: str) -> tuple[int, int]:
+    async def tag_scan_cursor(self, session_id: str, tag: str) -> int:
         def _read():
             return self._conn.execute(
-                "SELECT offset,before_time FROM tag_scan_cursors WHERE session_id=? AND target=?",
+                "SELECT offset FROM tag_scan_cursors WHERE session_id=? AND target=?",
                 (session_id, tag),
             ).fetchone()
 
-        return await self._run(_read) or (0, 0)
+        row = await self._run(_read)
+        return row[0] if row else 0
 
-    async def save_tag_page(self, session_id: str, tag: str, posts: list[Post], offset: int, before: int):
+    async def save_tag_page(self, session_id: str, tag: str, posts: list[Post], offset: int):
         rows = [(session_id, "tag", "", post.post_id, json.dumps(asdict(post), ensure_ascii=False)) for post in posts]
 
         def _save():
@@ -232,9 +233,9 @@ class LofterDB:
                     "INSERT OR IGNORE INTO pending_posts(session_id,type,source,post_id,payload) VALUES(?,?,?,?,?)", rows,
                 )
                 self._conn.execute(
-                    "INSERT INTO tag_scan_cursors VALUES(?,?,?,?) ON CONFLICT(session_id,target) "
-                    "DO UPDATE SET offset=excluded.offset,before_time=excluded.before_time",
-                    (session_id, tag, offset, before),
+                    "INSERT INTO tag_scan_cursors VALUES(?,?,?) ON CONFLICT(session_id,target) "
+                    "DO UPDATE SET offset=excluded.offset",
+                    (session_id, tag, offset),
                 )
 
         await self._run(_save)

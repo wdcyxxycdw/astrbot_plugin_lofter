@@ -7,7 +7,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.star import StarTools
-from lofter import LofterClient, parse_dwr_response, parse_post_page
+from lofter import LofterClient
 
 from .core.author_block import AuthorBlockStorage, filter_blocked_posts, is_author_blocked
 from .core.count_commands import LofterCountCommandsMixin
@@ -128,12 +128,11 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             return
         url = "https://" + match.group(0)
         try:
-            html = await self._client.get(url)
+            post = await self._client.fetch_post(url)
         except Exception as e:
             logger.error("获取 Lofter 帖子失败: %s", e)
             return
 
-        post = await parse_post_page(html, url)
         blocks = await self._author_blocks.list_by_session(event.unified_msg_origin)
         if is_author_blocked(post, blocks):
             return
@@ -183,16 +182,9 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         try:
             limit = min(self._search_limit, 100)
             if limit <= 20:
-                pages = [await self._client.search_tag(keyword, limit=limit)]
+                posts = await self._client.fetch_tag_posts(keyword, limit=limit)
             else:
-                pages = await self._client.search_tag_paged(keyword, total=limit)
-            seen_ids: set[str] = set()
-            posts = []
-            for raw in pages:
-                for p in await parse_dwr_response(raw):
-                    if p.post_id not in seen_ids:
-                        seen_ids.add(p.post_id)
-                        posts.append(p)
+                posts = await self._client.fetch_tag_posts_paged(keyword, total=limit)
         except Exception as e:
             yield event.plain_result(f"搜索失败：{e}")
             return
@@ -227,14 +219,17 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @lofter.command("cookie")
     async def set_cookie(self, event: AstrMessageEvent):
-        """更新 Lofter Cookie。用法：/lofter cookie <cookie值>"""
+        """更新 Lofter Cookie（遗留功能，抓取已不依赖登录）。用法：/lofter cookie <cookie值>"""
         value = self._cmd_arg(event.message_str)
         if not value:
-            yield event.plain_result("请提供 Cookie 值，例如：/lofter cookie your_cookie_here")
+            yield event.plain_result(
+                "请提供 Cookie 值，例如：/lofter cookie your_cookie_here\n"
+                "提示：抓取已改用 app 接口，公开内容无需登录，通常不必设置 Cookie"
+            )
             return
         await self._db.set_config("lofter_cookie", value)
         self._client.update_cookie(value)
-        yield event.plain_result("Cookie 已更新")
+        yield event.plain_result("Cookie 已更新（抓取已不依赖登录，此项为遗留配置）")
 
     @lofter.command("block-author")
     async def block_author(self, event: AstrMessageEvent):

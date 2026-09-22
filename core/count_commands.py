@@ -127,7 +127,7 @@ def _format_count_result(result: CountResult) -> str:
         f"候选作品：{result.candidates}",
         f"扫描页数：{format_scanned_pages(result.scanned_pages) or '无'}",
         f"条件：{result.expression}",
-        "范围：当前账号通过 DWR 可检索的作品，不代表平台全量总数",
+        "范围：当前账号通过标签接口可检索的作品，不代表平台全量总数",
     ]
     lines.extend(f"提示：{warning}" for warning in result.warnings)
     return "\n".join(lines)

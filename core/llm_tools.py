@@ -20,7 +20,6 @@ from .llm_tool_formatters import format_subscription_line as _format_subscriptio
 from .llm_tool_formatters import missing_remove_target as _missing_remove_target
 from .llm_tool_formatters import unknown_action as _unknown_action
 from .tag_count import CountExpressionError, CountResult, build_count_csv, build_count_csv_path, count_posts, is_admin_event
-from lofter import parse_dwr_response
 
 
 def _is_package_module(module: ModuleType) -> bool:
@@ -238,10 +237,9 @@ class LofterLLMToolsMixin:
 
     async def _search_content_posts(self, keyword: str, limit: int) -> list[Any]:
         search_limit = self._resolve_tool_limit(limit)
-        raw_pages = [await self._client.search_tag(keyword, limit=search_limit)]
         if search_limit > 20:
-            raw_pages = await self._client.search_tag_paged(keyword, total=search_limit)
-        return await _parse_unique_posts(raw_pages)
+            return await self._client.fetch_tag_posts_paged(keyword, total=search_limit)
+        return await self._client.fetch_tag_posts(keyword, limit=search_limit)
 
     async def _llm_subscription_list(self, session_id: str) -> str:
         subs = await self._storage.list_by_session(session_id)
@@ -395,13 +393,3 @@ class LofterLLMToolsMixin:
         return path
 
 
-async def _parse_unique_posts(raw_pages: list[str]) -> list[Any]:
-    seen_ids: set[str] = set()
-    result: list[Any] = []
-    for raw in raw_pages:
-        for post in await parse_dwr_response(raw):
-            if post.post_id in seen_ids:
-                continue
-            seen_ids.add(post.post_id)
-            result.append(post)
-    return result

@@ -274,7 +274,7 @@ async def test_migration_v2_to_v3_adds_count_conditions(tmp_path):
     await db.initialize()
     await db.upsert_count_condition("条件", "原神")
     assert await db.list_count_conditions() == [("条件", "原神")]
-    assert await db.get_config("schema_version") == "5"
+    assert await db.get_config("schema_version") == "6"
     await db.close()
 
 
@@ -335,7 +335,7 @@ async def test_migration_v3_to_v4_adds_author_blocks(tmp_path):
     migrated = LofterDB(db_path)
     await migrated.initialize()
     assert await migrated.add_author_block("sess1", "username", "someuser", "someuser") is True
-    assert await migrated.get_config("schema_version") == "5"
+    assert await migrated.get_config("schema_version") == "6"
     await migrated.close()
 
 
@@ -347,14 +347,14 @@ async def test_pending_posts_survive_reopen_and_delivery_is_atomic(tmp_path):
     db = LofterDB(path)
     await db.initialize()
     post = Post("a_1", "标题", "摘要", images=["https://image/a.png"], tags=["A"], content="全文")
-    await db.save_tag_page("s", "A", [post], 20, 1720000000123)
+    await db.save_tag_page("s", "A", [post], 20)
     await db.enqueue_posts("s", "tag", "", [post])
     await db.close()
     db = LofterDB(path)
     await db.initialize()
     try:
         assert await db.pending_posts("s", "tag", "") == [post]
-        assert await db.tag_scan_cursor("s", "A") == (20, 1720000000123)
+        assert await db.tag_scan_cursor("s", "A") == 20
         await db._run(lambda: db._conn.execute("""
             CREATE TRIGGER refuse_sent BEFORE INSERT ON sent_posts
             BEGIN SELECT RAISE(ABORT, 'disk failure'); END;
@@ -370,3 +370,38 @@ async def test_pending_posts_survive_reopen_and_delivery_is_atomic(tmp_path):
         assert await db.pending_posts("s", "tag", "") == []
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_migration_v5_to_v6_drops_before_time_column(tmp_path):
+    db_path = str(tmp_path / "v5.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript("""
+        CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO config(key,value) VALUES('schema_version','5');
+        CREATE TABLE tag_scan_cursors (
+            session_id TEXT NOT NULL,
+            target TEXT NOT NULL,
+            offset INTEGER NOT NULL,
+            before_time INTEGER NOT NULL,
+            PRIMARY KEY (session_id, target)
+        );
+        INSERT INTO tag_scan_cursors VALUES('sess1','原神',20,1720000000123);
+    """)
+    conn.commit()
+    conn.close()
+
+    migrated = LofterDB(db_path)
+    await migrated.initialize()
+    try:
+        columns = await migrated._run(
+            lambda: [row[1] for row in migrated._conn.execute("PRAGMA table_info(tag_scan_cursors)")]
+        )
+        assert columns == ["session_id", "target", "offset"]
+        assert await migrated.get_config("schema_version") == "6"
+        assert await migrated.tag_scan_cursor("sess1", "原神") == 0
+        await migrated.save_tag_page("sess1", "原神", [], 12)
+        assert await migrated.tag_scan_cursor("sess1", "原神") == 12
+    finally:
+        await migrated.close()

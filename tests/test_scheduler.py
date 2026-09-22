@@ -3,7 +3,7 @@ import pytest_asyncio
 from unittest.mock import AsyncMock, patch
 
 from core.db import LofterDB
-from lofter import Post
+from lofter import LofterClient, Post
 from core.scheduler import (
     SubscriptionScheduler,
     _check_tag_session,
@@ -17,11 +17,11 @@ from core.author_block import AuthorBlockStorage
 from core.filter import FilterRule
 from core.storage import Subscription, SubscriptionStorage
 
-RICH_HTML = """\
-<!DOCTYPE html><html><head>
-<title>帖子标题-作者名</title>
-<meta name="Description" content="这是摘要"/>
-</head><body></body></html>"""
+def _client_returning(*results) -> LofterClient:
+    client = LofterClient()
+    client.fetch_post = AsyncMock(side_effect=list(results))
+    return client
+
 
 BARE_POST = Post(
     post_id="abc123",
@@ -91,8 +91,7 @@ async def test_one_subscription_failure_does_not_block_later_subscriptions(db, f
 
 @pytest.mark.asyncio
 async def test_enrich_success():
-    client = AsyncMock()
-    client.get.return_value = RICH_HTML
+    client = _client_returning(Post(post_id="服务端ID", title="帖子标题", summary="这是摘要", author="作者名"))
 
     result = await _enrich_blog_posts([BARE_POST], client)
 
@@ -105,8 +104,7 @@ async def test_enrich_success():
 
 @pytest.mark.asyncio
 async def test_enrich_fallback_on_error():
-    client = AsyncMock()
-    client.get.side_effect = Exception("network error")
+    client = _client_returning(Exception("network error"))
 
     result = await _enrich_blog_posts([BARE_POST], client)
 
@@ -205,16 +203,16 @@ async def test_enrich_serial_order():
         Post(post_id="p1", title="", summary="", url="https://u.lofter.com/post/p1"),
         Post(post_id="p2", title="", summary="", url="https://u.lofter.com/post/p2"),
     ]
-    client = AsyncMock()
-    client.get.side_effect = [
-        "<html><head><title>标题1-作者</title></head></html>",
-        "<html><head><title>标题2-作者</title></head></html>",
-    ]
+    client = _client_returning(
+        Post(post_id="服务端1", title="标题1", summary="", author="作者"),
+        Post(post_id="服务端2", title="标题2", summary="", author="作者"),
+    )
 
     result = await _enrich_blog_posts(posts, client)
 
     assert result[0].title == "标题1"
     assert result[1].title == "标题2"
+    assert [call.args[0] for call in client.fetch_post.await_args_list] == [p.url for p in posts]
 
 
 # ── 聚合标签轮询 ──────────────────────────────────────────────────────────────

@@ -6,25 +6,32 @@ import csv
 from io import StringIO
 
 
-def post(post_id, tag, timestamp=1720000000000):
+BLOG_HEX = "1d038690"
+
+
+def permalink(index):
+    return f"{BLOG_HEX}_{index:x}"
+
+
+def post(index, tag, timestamp=1720000000000):
     return {"post": {
-        "blogPageUrl": f"https://author.lofter.com/post/a_{post_id}",
-        "title": f"作品{post_id}", "tagList": [tag],
+        "blogPageUrl": f"https://author.lofter.com/post/{permalink(index)}",
+        "permalink": permalink(index),
+        "blogInfo": {"blogNickName": "测试作者", "blogName": "author"},
+        "title": f"作品{index}", "tagList": [tag],
         "content": "<p>完整正文</p>", "publishTime": timestamp,
     }}
 
 
-def dwr_posts(posts):
-    return "dwr.engine._remoteHandleCallback('0','0'," + json.dumps(posts) + ");"
-
-
 async def test_plugin_uses_installed_fetch_package(runtime):
-    from lofter import LofterClient, Post, parse_dwr_response
+    from lofter import LofterClient, Post
 
     assert type(runtime.plugin._client) is LofterClient
     assert runtime.client_module.__name__ == "lofter.client"
-    parsed, = await parse_dwr_response(dwr_posts([post("package", "依赖验证")]))
+    runtime.pages[("依赖验证", 0)] = [post(1, "依赖验证")]
+    parsed, = await runtime.plugin._client.fetch_tag_posts("依赖验证")
     assert type(parsed) is Post
+    assert parsed.post_id == permalink(1)
 
 
 @pytest.mark.parametrize("module_name", ["count_commands", "llm_tools"])
@@ -38,7 +45,7 @@ async def test_plugin_uses_astrbot_logger(runtime, module_name):
     assert module.logger is logger
 
 
-async def test_dwr_diagnostic_uses_public_package_parser(runtime):
+async def test_permalink_diagnostic_uses_public_package_helper(runtime):
     import importlib
 
     module = importlib.import_module(runtime.plugin.__module__.rsplit(".", 1)[0] + ".core.e2e_test")
@@ -46,17 +53,18 @@ async def test_dwr_diagnostic_uses_public_package_parser(runtime):
     runner = module.E2ETestRunner(
         plugin._db, plugin._client, plugin._storage, plugin._scheduler, plugin._send_push,
     )
-    result = await runner._step_02_dwr_engine()
+    result = await runner._step_02_permalink_decode()
     assert result.status == "pass", result.error
-    assert "样本 DWR 解析结果: e2e" in result.details
+    assert "样本 permalink 解码结果: blogId=486770320, postId=14215864220" in result.details
 
 
 async def test_search_runs_through_plugin_loader_pipeline_and_onebot(runtime):
-    runtime.pages[("开发测试", 0)] = dwr_posts([{"post": {
-        "blogPageUrl": "https://author.lofter.com/post/a_1", "title": "真实链路测试",
-        "blogInfo": {"blogNickName": "测试作者"}, "tagList": ["开发测试"],
+    runtime.pages[("开发测试", 0)] = [{"post": {
+        "blogPageUrl": f"https://author.lofter.com/post/{permalink(1)}",
+        "permalink": permalink(1), "title": "真实链路测试",
+        "blogInfo": {"blogNickName": "测试作者", "blogName": "author"}, "tagList": ["开发测试"],
         "digest": "<p>正文内容</p>", "publishTime": 1720000000000,
-    }}])
+    }}]
     event, requests = await runtime.message("/lofter search 开发测试")
     assert event.unified_msg_origin == "lofter-e2e:GroupMessage:20001"
     assert any(request["action"] == "send_group_msg" for request in requests)
@@ -64,7 +72,7 @@ async def test_search_runs_through_plugin_loader_pipeline_and_onebot(runtime):
     assert "真实链路测试" in payload
     assert "测试作者" in payload
     assert "正文内容" in payload
-    assert runtime.dwr_requests[-1]["c0-param0"] == "string:%E5%BC%80%E5%8F%91%E6%B5%8B%E8%AF%95"
+    assert runtime.api_requests[-1]["tag"] == "开发测试"
 
 
 @pytest.mark.parametrize(
@@ -87,16 +95,15 @@ async def test_hyphenated_subscription_commands_are_registered(runtime, command,
 
 async def test_count_command_scans_pages_and_sends_result(runtime):
     tag = "分页测试"
-    runtime.pages[(tag, 0)] = dwr_posts([post("one", tag, 1720000000123)])
-    runtime.pages[(tag, 20)] = dwr_posts([post("two", tag, 1710000000456)])
-    start = len(runtime.dwr_requests)
+    runtime.pages[(tag, 0)] = [post(1, tag, 1720000000123)]
+    runtime.pages[(tag, 1)] = [post(2, tag, 1710000000456)]
+    start = len(runtime.api_requests)
     _, requests = await runtime.message(f"/lofter count 分页 = {tag}")
     text = json.dumps(requests, ensure_ascii=False)
     assert "已发现 2 个作品" in text
     assert "扫描结束" in text
-    calls = runtime.dwr_requests[start:]
-    assert [call["c0-param7"] for call in calls] == ["number:0", "number:20", "number:40"]
-    assert [call["c0-param8"] for call in calls] == ["number:0", "number:1720000000123", "number:1710000000456"]
+    calls = runtime.api_requests[start:]
+    assert [call["offset"] for call in calls] == ["0", "1", "2"]
 
 
 async def test_count_errors_and_repeat_pages_are_not_success(runtime):
@@ -105,9 +112,9 @@ async def test_count_errors_and_repeat_pages_are_not_success(runtime):
     text = json.dumps(requests, ensure_ascii=False)
     assert "统计失败" in text
     assert "已发现 0" not in text
-    repeat = dwr_posts([post("repeat", "重复测试")])
+    repeat = [post(1, "重复测试")]
     runtime.pages[("重复测试", 0)] = repeat
-    runtime.pages[("重复测试", 20)] = repeat
+    runtime.pages[("重复测试", 1)] = repeat
     _, requests = await runtime.message("/lofter count 重复 = 重复测试")
     text = json.dumps(requests, ensure_ascii=False)
     assert "部分完成" in text
@@ -125,19 +132,19 @@ async def test_failed_send_retries_without_repeating_delivered_posts(runtime):
     from aiocqhttp.exceptions import ActionFailed
 
     tag = "推送重试"
-    runtime.pages[(tag, 0)] = dwr_posts([post("seed", tag)])
+    runtime.pages[(tag, 0)] = [post(900, tag)]
     event, _ = await runtime.message(f"/lofter sub-tag {tag}", group_id=21001)
     session_id = event.unified_msg_origin
-    runtime.pages[(tag, 0)] = dwr_posts([post(str(i), tag) for i in range(8)])
+    runtime.pages[(tag, 0)] = [post(i, tag) for i in range(8)]
     runtime.peer.fail_send_number = runtime.peer.send_count + 2
     with pytest.raises(ActionFailed):
         await runtime.plugin._scheduler._poll_all(session_id=session_id)
     db = runtime.plugin._db
-    ids = [f"a_{i}" for i in range(8)]
+    ids = [permalink(i) for i in range(8)]
     unsent = await db.filter_unsent(session_id, ids)
     assert len(unsent) == 7
     assert len(await db.pending_posts(session_id, "tag", "")) == 7
-    runtime.pages[(tag, 0)] = dwr_posts([])
+    runtime.pages[(tag, 0)] = []
     start = runtime.peer.send_count
     await runtime.plugin._scheduler._poll_all(session_id=session_id)
     await runtime.plugin._scheduler._poll_all(session_id=session_id)
@@ -147,9 +154,9 @@ async def test_failed_send_retries_without_repeating_delivered_posts(runtime):
 
 
 async def test_image_search_downloads_image_and_serializes_onebot_message(runtime):
-    entry = post("image", "图片测试")
+    entry = post(2, "图片测试")
     entry["post"]["photoLinks"] = json.dumps([{"orign": str(runtime.http.make_url("/image.png"))}])
-    runtime.pages[("图片测试", 0)] = dwr_posts([entry])
+    runtime.pages[("图片测试", 0)] = [entry]
     before = runtime.image_requests
     _, requests = await runtime.message("/lofter search 图片测试")
     messages = [segment for request in requests for segment in request["params"].get("message", [])]
@@ -160,8 +167,10 @@ async def test_image_search_downloads_image_and_serializes_onebot_message(runtim
 
 async def test_link_auto_parse_sends_long_text_as_group_forward_nodes(runtime):
     text = "开发测试正文" * 600
-    runtime.html_pages["a_text"] = f'<html><title>长文-作者</title><p id="p_1">{text}</p></html>'
-    _, requests = await runtime.message("https://author.lofter.com/post/a_text")
+    entry = post(0x7E77, "长文测试")
+    entry["post"]["content"] = f"<p>{text}</p>"
+    runtime.post_pages[permalink(0x7E77)] = [entry]
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7E77)}")
     forward, = [request for request in requests if request["action"] == "send_group_forward_msg"]
     nodes = forward["params"]["messages"]
     paragraphs = [segment["data"]["text"] for node in nodes[1:-1] for segment in node["data"]["content"]]
@@ -170,46 +179,46 @@ async def test_link_auto_parse_sends_long_text_as_group_forward_nodes(runtime):
 
 
 async def test_login_page_never_sends_an_empty_post(runtime):
-    _, requests = await runtime.message("https://author.lofter.com/post/a_login")
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0xB0B)}")
     assert not requests
 
 
 async def test_subscription_scans_past_first_page(runtime):
     tag = "补抓测试"
-    runtime.pages[(tag, 0)] = dwr_posts([post("boundary", tag)])
+    runtime.pages[(tag, 0)] = [post(901, tag)]
     event, _ = await runtime.message(f"/lofter sub-tag {tag}", group_id=21002)
-    runtime.pages[(tag, 0)] = dwr_posts([post(f"backfill{i}", tag) for i in range(20)])
-    runtime.pages[(tag, 20)] = dwr_posts([post("backfill20", tag), post("boundary", tag)])
+    runtime.pages[(tag, 0)] = [post(i, tag) for i in range(20)]
+    runtime.pages[(tag, 20)] = [post(20, tag), post(901, tag)]
     await runtime.plugin._scheduler._poll_all(session_id=event.unified_msg_origin)
     pending = await runtime.plugin._db.pending_posts(event.unified_msg_origin, "tag", "")
     assert len(pending) == 16
-    assert "a_backfill20" in {item.post_id for item in pending}
+    assert permalink(20) in {item.post_id for item in pending}
 
 
 async def test_interrupted_subscription_scan_resumes_after_already_sent_first_page(runtime):
     tag = "断点测试"
-    runtime.pages[(tag, 0)] = dwr_posts([post("resume_boundary", tag)])
+    runtime.pages[(tag, 0)] = [post(902, tag)]
     event, _ = await runtime.message(f"/lofter sub-tag {tag}", group_id=21003)
     session_id = event.unified_msg_origin
-    runtime.pages[(tag, 0)] = dwr_posts([post(f"resume{i}", tag) for i in range(20)])
+    runtime.pages[(tag, 0)] = [post(i, tag) for i in range(20)]
     runtime.pages[(tag, 20)] = "<html>临时失败</html>"
     await runtime.plugin._scheduler._poll_all(session_id=session_id)
-    assert (await runtime.plugin._db.tag_scan_cursor(session_id, tag))[0] == 20
-    runtime.pages[(tag, 20)] = dwr_posts([post("resume20", tag), post("resume_boundary", tag)])
-    start = len(runtime.dwr_requests)
+    assert await runtime.plugin._db.tag_scan_cursor(session_id, tag) == 20
+    runtime.pages[(tag, 20)] = [post(20, tag), post(902, tag)]
+    start = len(runtime.api_requests)
     await runtime.plugin._scheduler._poll_all(session_id=session_id)
-    assert runtime.dwr_requests[start]["c0-param7"] == "number:20"
+    assert runtime.api_requests[start]["offset"] == "20"
     pending = await runtime.plugin._db.pending_posts(session_id, "tag", "")
     assert len(pending) == 11
-    assert "a_resume20" in {item.post_id for item in pending}
-    assert await runtime.plugin._db.tag_scan_cursor(session_id, tag) == (0, 0)
+    assert permalink(20) in {item.post_id for item in pending}
+    assert await runtime.plugin._db.tag_scan_cursor(session_id, tag) == 0
 
 
 async def test_count_all_sends_a_readable_csv_with_incomplete_status(runtime):
     await runtime.plugin._db.upsert_count_condition("CSV重复", "CSV测试")
-    page = dwr_posts([post("csv", "CSV测试")])
+    page = [post(3, "CSV测试")]
     runtime.pages[("CSV测试", 0)] = page
-    runtime.pages[("CSV测试", 20)] = page
+    runtime.pages[("CSV测试", 1)] = page
     _, requests = await runtime.message("/lofter count-all")
     segments = [segment for request in requests for segment in request["params"].get("message", [])]
     file, = [segment for segment in segments if segment["type"] == "file"]
@@ -221,17 +230,17 @@ async def test_count_all_sends_a_readable_csv_with_incomplete_status(runtime):
     assert "重复页" in row["错误信息"]
 
 
-async def test_search_more_than_twenty_uses_timestamp_cursor(runtime):
+async def test_search_more_than_twenty_follows_server_offset(runtime):
     tag = "搜索翻页"
-    runtime.pages[(tag, 0)] = dwr_posts([post(f"search{i}", tag) for i in range(20)])
-    runtime.pages[(tag, 20)] = dwr_posts([post("search20", tag, 1710000000000)])
+    runtime.pages[(tag, 0)] = [post(i, tag) for i in range(20)]
+    runtime.pages[(tag, 20)] = [post(20, tag, 1710000000000)]
     previous = runtime.plugin._search_limit
-    start = len(runtime.dwr_requests)
+    start = len(runtime.api_requests)
     runtime.plugin._search_limit = 21
     try:
         _, requests = await runtime.message(f"/lofter search {tag}")
     finally:
         runtime.plugin._search_limit = previous
-    assert "作品search20" in json.dumps(requests, ensure_ascii=False)
+    assert "作品20" in json.dumps(requests, ensure_ascii=False)
     assert len(requests) == 22
-    assert runtime.dwr_requests[start + 1]["c0-param8"] == "number:1720000000000"
+    assert [call["offset"] for call in runtime.api_requests[start:start + 2]] == ["0", "20"]

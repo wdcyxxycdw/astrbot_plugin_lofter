@@ -26,6 +26,23 @@ def _post(tags: list[str]) -> Post:
     return Post(post_id="p", title="", summary="", tags=tags)
 
 
+def _paged_client(pages: dict[tuple[str, int], list[Post]]) -> AsyncMock:
+    client = AsyncMock()
+
+    async def fetch_tag_posts(tag, *, offset, **cursor):
+        return pages.get((tag, offset), [])
+
+    client.fetch_tag_posts.side_effect = fetch_tag_posts
+    return client
+
+
+def _offsets_by_tag(client: AsyncMock) -> dict[str, list[int]]:
+    result: dict[str, list[int]] = {}
+    for call in client.fetch_tag_posts.call_args_list:
+        result.setdefault(call.args[0], []).append(call.kwargs["offset"])
+    return result
+
+
 class DummyEvent:
     def __init__(self, admin):
         self.is_admin = admin
@@ -219,67 +236,44 @@ def test_parse_count_command_arg_rejects_missing_equals():
 
 @pytest.mark.asyncio
 async def test_count_posts_dedupes_candidates_and_matches_expression():
-    client = AsyncMock()
-    client.search_tag.side_effect = ["raw-a-1", "", "raw-b-1", ""]
+    pages = {
+        ("A", 0): [
+            Post(post_id="1", title="", summary="", tags=["A", "B"]),
+            Post(post_id="2", title="", summary="", tags=["A"]),
+        ],
+        ("B", 0): [
+            Post(post_id="1", title="", summary="", tags=["A", "B"]),
+            Post(post_id="3", title="", summary="", tags=["B"]),
+        ],
+    }
+    client = _paged_client(pages)
 
-    async def parser(raw):
-        if raw == "raw-a-1":
-            return [
-                Post(post_id="1", title="", summary="", tags=["A", "B"]),
-                Post(post_id="2", title="", summary="", tags=["A"]),
-            ]
-        if raw == "raw-b-1":
-            return [
-                Post(post_id="1", title="", summary="", tags=["A", "B"]),
-                Post(post_id="3", title="", summary="", tags=["B"]),
-            ]
-        return []
-
-    result = await count_posts("A B", client, parse_posts=parser, page_size=20)
+    result = await count_posts("A B", client)
 
     assert result.count == 1
     assert result.candidates == 3
-    assert client.search_tag.call_args_list[0].kwargs == {"offset": 0, "limit": 20}
+    assert client.fetch_tag_posts.call_args_list[0].kwargs == {"offset": 0}
 
 
 @pytest.mark.asyncio
 async def test_count_posts_continues_tag_pages_when_page_is_only_global_duplicates():
-    client = AsyncMock()
+    pages = {
+        ("A", 0): [
+            Post(post_id="p1", title="", summary="", tags=["A"]),
+            Post(post_id="p2", title="", summary="", tags=["A"]),
+        ],
+        ("B", 0): [
+            Post(post_id="p1", title="", summary="", tags=["B"]),
+            Post(post_id="p2", title="", summary="", tags=["B"]),
+        ],
+        ("B", 2): [Post(post_id="p3", title="", summary="", tags=["B"])],
+    }
+    client = _paged_client(pages)
 
-    async def search_tag(tag, *, offset, limit):
-        pages = {
-            ("A", 0): "raw-a-1",
-            ("A", 2): "",
-            ("B", 0): "raw-b-1",
-            ("B", 2): "raw-b-2",
-            ("B", 4): "",
-        }
-        return pages[(tag, offset)]
-
-    client.search_tag.side_effect = search_tag
-
-    async def parser(raw):
-        if raw == "raw-a-1":
-            return [
-                Post(post_id="p1", title="", summary="", tags=["A"]),
-                Post(post_id="p2", title="", summary="", tags=["A"]),
-            ]
-        if raw == "raw-b-1":
-            return [
-                Post(post_id="p1", title="", summary="", tags=["B"]),
-                Post(post_id="p2", title="", summary="", tags=["B"]),
-            ]
-        if raw == "raw-b-2":
-            return [Post(post_id="p3", title="", summary="", tags=["B"])]
-        return []
-
-    result = await count_posts("A|B", client, parse_posts=parser, page_size=2)
+    result = await count_posts("A|B", client)
 
     assert result.count == 3
-    offsets_by_tag = {"A": [], "B": []}
-    for item in client.search_tag.call_args_list:
-        offsets_by_tag[item.args[0]].append(item.kwargs["offset"])
-    assert offsets_by_tag == {"A": [0, 2], "B": [0, 2, 4]}
+    assert _offsets_by_tag(client) == {"A": [0, 2], "B": [0, 2, 3]}
 
 
 @pytest.mark.asyncio
@@ -288,20 +282,17 @@ async def test_count_posts_scans_multiple_positive_tags_concurrently():
     active_tags: set[str] = set()
     overlaps: list[set[str]] = []
 
-    async def search_tag(tag, *, offset, limit):
+    async def fetch_tag_posts(tag, *, offset, **cursor):
         active_tags.add(tag)
         if len(active_tags) > 1:
             overlaps.append(set(active_tags))
         await asyncio.sleep(0.01)
         active_tags.remove(tag)
-        return ""
-
-    client.search_tag.side_effect = search_tag
-
-    async def parser(raw):
         return []
 
-    result = await count_posts("A|B", client, page_size=20, parse_posts=parser)
+    client.fetch_tag_posts.side_effect = fetch_tag_posts
+
+    result = await count_posts("A|B", client)
 
     assert result.count == 0
     assert {"A", "B"} in overlaps
@@ -318,52 +309,39 @@ async def test_count_posts_rejects_expression_without_positive_tag():
 async def test_count_posts_records_warning_when_one_tag_scan_fails():
     client = AsyncMock()
 
-    async def search_tag(tag, *, offset, limit):
-        return f"raw-{tag}-{offset}"
+    async def fetch_tag_posts(tag, *, offset, **cursor):
+        if tag == "B":
+            raise RuntimeError("LOFTER 返回非 JSON 响应。响应片段：{ status: 4009 }")
+        return [Post(post_id="p1", title="", summary="", tags=["A"])] if offset == 0 else []
 
-    client.search_tag.side_effect = search_tag
+    client.fetch_tag_posts.side_effect = fetch_tag_posts
 
-    async def parser(raw):
-        if raw == "raw-A-0":
-            return [Post(post_id="p1", title="", summary="", tags=["A"])]
-        if raw == "raw-A-20":
-            return []
-        raise RuntimeError("LOFTER 返回非 DWR 响应：响应片段：{ status: 4009 }")
-
-    result = await count_posts("A|B", client, parse_posts=parser)
+    result = await count_posts("A|B", client)
 
     assert result.count == 1
     assert result.status == "部分完成"
     assert result.candidates == 1
     assert result.scanned_pages == {"A": 1, "B": 0}
-    assert result.warnings == ["标签「B」扫描失败：LOFTER 返回非 DWR 响应：响应片段：{ status: 4009 }"]
+    assert result.warnings == ["标签「B」扫描失败：LOFTER 返回非 JSON 响应。响应片段：{ status: 4009 }"]
 
 
 @pytest.mark.asyncio
 async def test_count_posts_propagates_unexpected_scan_errors():
     client = AsyncMock()
-    client.search_tag.return_value = "raw-a-1"
+    client.fetch_tag_posts.side_effect = ValueError("client bug")
 
-    async def parser(raw):
-        raise ValueError("parser bug")
-
-    with pytest.raises(ValueError, match="parser bug"):
-        await count_posts("A", client, parse_posts=parser)
+    with pytest.raises(ValueError, match="client bug"):
+        await count_posts("A", client)
 
 
 @pytest.mark.asyncio
 async def test_count_posts_reports_scanned_pages():
-    client = AsyncMock()
-    client.search_tag.side_effect = ["raw-a-1", "raw-a-2", ""]
+    client = _paged_client({
+        ("A", 0): [Post(post_id="p1", title="", summary="", tags=["A"])],
+        ("A", 1): [Post(post_id="p2", title="", summary="", tags=["A"])],
+    })
 
-    async def parser(raw):
-        if raw == "raw-a-1":
-            return [Post(post_id="p1", title="", summary="", tags=["A"])]
-        if raw == "raw-a-2":
-            return [Post(post_id="p2", title="", summary="", tags=["A"])]
-        return []
-
-    result = await count_posts("A", client, parse_posts=parser, page_size=1)
+    result = await count_posts("A", client)
 
     assert result.scanned_pages == {"A": 2}
     assert result.warnings == []
@@ -371,17 +349,12 @@ async def test_count_posts_reports_scanned_pages():
 
 @pytest.mark.asyncio
 async def test_count_posts_warns_when_positive_offset_page_repeats_tag_posts():
-    client = AsyncMock()
-    client.search_tag.side_effect = ["raw-a-1", "raw-a-duplicate"]
+    client = _paged_client({
+        ("A", 0): [Post(post_id="p1", title="", summary="", tags=["A"])],
+        ("A", 1): [Post(post_id="p1", title="", summary="", tags=["A"])],
+    })
 
-    async def parser(raw):
-        if raw == "raw-a-1":
-            return [Post(post_id="p1", title="", summary="", tags=["A"])]
-        if raw == "raw-a-duplicate":
-            return [Post(post_id="p1", title="", summary="", tags=["A"])]
-        return []
-
-    result = await count_posts("A", client, parse_posts=parser, page_size=1)
+    result = await count_posts("A", client)
 
     assert result.scanned_pages == {"A": 2}
     assert result.status == "部分完成"
@@ -391,7 +364,7 @@ async def test_count_posts_warns_when_positive_offset_page_repeats_tag_posts():
 @pytest.mark.asyncio
 async def test_all_failed_scans_are_not_reported_as_zero_matches():
     client = AsyncMock()
-    client.search_tag.side_effect = RuntimeError("Cookie 失效")
+    client.fetch_tag_posts.side_effect = RuntimeError("Cookie 失效")
     result = await count_posts("A|B", client)
     assert result.status == "失败"
     assert "Cookie 失效" in result.error
@@ -403,37 +376,31 @@ async def test_count_rejects_unbounded_negative_branches(expression):
     client = AsyncMock()
     with pytest.raises(CountExpressionError, match="每个 OR 分支"):
         await count_posts(expression, client)
-    client.search_tag.assert_not_called()
+    client.fetch_tag_posts.assert_not_called()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("expression", ["A -B", "A|-(-B)", "A (B|-C)", "-(A|-B)"])
 async def test_count_accepts_bounded_branches(expression):
     client = AsyncMock()
-    client.search_tag.return_value = "dwr.engine._remoteHandleCallback('0','0',[]);"
+    client.fetch_tag_posts.return_value = []
     result = await count_posts(expression, client)
     assert result.status == "扫描结束"
     assert result.count == 0
 
 
 @pytest.mark.asyncio
-async def test_count_passes_oldest_raw_timestamp_to_next_page():
-    client = AsyncMock()
-    client.search_tag.side_effect = ["first", "second", "empty"]
+async def test_count_advances_offset_by_returned_page_size():
+    """服务端每页条数不固定，offset 必须按实际返回条数推进，否则会跳过作品。"""
+    client = _paged_client({
+        ("A", 0): [Post(str(i), "", "", tags=["A"]) for i in range(3)],
+        ("A", 3): [Post("d", "", "", tags=["A"])],
+    })
 
-    async def parser(raw):
-        if raw == "first":
-            return [Post("a", "", "", tags=["A"], publish_time_ms=1720000000123)]
-        if raw == "second":
-            return [Post("b", "", "", tags=["A"], publish_time_ms=1710000000456)]
-        return []
-
-    result = await count_posts("A", client, parse_posts=parser)
-    assert result.count == 2
+    result = await count_posts("A", client)
+    assert result.count == 4
     assert result.status == "扫描结束"
-    calls = client.search_tag.call_args_list
-    assert calls[1].kwargs == {"offset": 20, "limit": 20, "before": 1720000000123}
-    assert calls[2].kwargs == {"offset": 40, "limit": 20, "before": 1710000000456}
+    assert _offsets_by_tag(client) == {"A": [0, 3, 4]}
 
 
 def test_build_count_csv():
