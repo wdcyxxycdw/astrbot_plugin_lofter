@@ -13,6 +13,13 @@ def permalink(index):
     return f"{BLOG_HEX}_{index:x}"
 
 
+def fresh_ms(ahead_seconds=3600):
+    """订阅之后发布。订阅的 created_at 取的是真实当前时间，固定的历史时间戳会被过滤掉。"""
+    import time
+
+    return int(time.time() * 1000) + ahead_seconds * 1000
+
+
 def post(index, tag, timestamp=1720000000000):
     return {"post": {
         "blogPageUrl": f"https://author.lofter.com/post/{permalink(index)}",
@@ -132,10 +139,10 @@ async def test_failed_send_retries_without_repeating_delivered_posts(runtime):
     from aiocqhttp.exceptions import ActionFailed
 
     tag = "推送重试"
-    runtime.pages[(tag, 0)] = [post(900, tag)]
+    runtime.pages[(tag, 0)] = [post(900, tag, fresh_ms())]
     event, _ = await runtime.message(f"/lofter sub-tag {tag}", group_id=21001)
     session_id = event.unified_msg_origin
-    runtime.pages[(tag, 0)] = [post(i, tag) for i in range(8)]
+    runtime.pages[(tag, 0)] = [post(i, tag, fresh_ms()) for i in range(8)]
     runtime.peer.fail_send_number = runtime.peer.send_count + 2
     with pytest.raises(ActionFailed):
         await runtime.plugin._scheduler._poll_all(session_id=session_id)
@@ -263,26 +270,46 @@ async def test_share_card_without_a_lofter_link_is_ignored(runtime):
 
 async def test_subscription_scans_past_first_page(runtime):
     tag = "补抓测试"
-    runtime.pages[(tag, 0)] = [post(901, tag)]
+    runtime.pages[(tag, 0)] = [post(901, tag, fresh_ms())]
     event, _ = await runtime.message(f"/lofter sub-tag {tag}", group_id=21002)
-    runtime.pages[(tag, 0)] = [post(i, tag) for i in range(20)]
-    runtime.pages[(tag, 20)] = [post(20, tag), post(901, tag)]
+    runtime.pages[(tag, 0)] = [post(i, tag, fresh_ms()) for i in range(20)]
+    runtime.pages[(tag, 20)] = [post(20, tag, fresh_ms()), post(901, tag, fresh_ms())]
     await runtime.plugin._scheduler._poll_all(session_id=event.unified_msg_origin)
     pending = await runtime.plugin._db.pending_posts(event.unified_msg_origin, "tag", "")
     assert len(pending) == 16
     assert permalink(20) in {item.post_id for item in pending}
 
 
+async def test_subscribing_a_tag_does_not_queue_its_back_catalogue(runtime):
+    """线上事故的复现：新订阅一个大标签，轮询把整段历史排进了待发送队列。
+
+    当时 test 标签翻到 offset 919，排进 858 条 2005-2023 年的旧帖，按每轮 5 条要往群里推十几小时。
+    """
+    tag = "历史回填"
+    old = 1_600_000_000_000
+    runtime.pages[(tag, 0)] = [post(950, tag, old)]
+    event, _ = await runtime.message(f"/lofter sub-tag {tag}", group_id=21004)
+    session_id = event.unified_msg_origin
+    runtime.pages[(tag, 0)] = [post(i, tag, old) for i in range(951, 971)]
+    runtime.pages[(tag, 20)] = [post(i, tag, old) for i in range(971, 991)]
+
+    start = runtime.peer.send_count
+    await runtime.plugin._scheduler._poll_all(session_id=session_id)
+
+    assert await runtime.plugin._db.pending_posts(session_id, "tag", "") == []
+    assert runtime.peer.send_count == start
+
+
 async def test_interrupted_subscription_scan_resumes_after_already_sent_first_page(runtime):
     tag = "断点测试"
-    runtime.pages[(tag, 0)] = [post(902, tag)]
+    runtime.pages[(tag, 0)] = [post(902, tag, fresh_ms())]
     event, _ = await runtime.message(f"/lofter sub-tag {tag}", group_id=21003)
     session_id = event.unified_msg_origin
-    runtime.pages[(tag, 0)] = [post(i, tag) for i in range(20)]
+    runtime.pages[(tag, 0)] = [post(i, tag, fresh_ms()) for i in range(20)]
     runtime.pages[(tag, 20)] = "<html>临时失败</html>"
     await runtime.plugin._scheduler._poll_all(session_id=session_id)
     assert await runtime.plugin._db.tag_scan_cursor(session_id, tag) == 20
-    runtime.pages[(tag, 20)] = [post(20, tag), post(902, tag)]
+    runtime.pages[(tag, 20)] = [post(20, tag, fresh_ms()), post(902, tag, fresh_ms())]
     start = len(runtime.api_requests)
     await runtime.plugin._scheduler._poll_all(session_id=session_id)
     assert runtime.api_requests[start]["offset"] == "20"

@@ -57,7 +57,7 @@ def _forward_nodes(post, url: str, word_count: int = 0) -> list:
     "astrbot_plugin_lofter",
     "user",
     "解析 Lofter 链接，订阅 Lofter 标签/博主，搜索 Lofter 内容，支持标签表达式统计",
-    "v2.0.21",
+    "v2.1.0",
 )
 class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
     def __init__(self, context: Context, config: AstrBotConfig):

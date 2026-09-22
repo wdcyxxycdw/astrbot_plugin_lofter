@@ -6,6 +6,7 @@ from core.db import LofterDB
 from lofter import LofterClient, Post
 from core.scheduler import (
     SubscriptionScheduler,
+    fetch_tag_posts,
     _check_tag_session,
     _check_blog_sub,
     _enrich_blog_posts,
@@ -39,8 +40,21 @@ async def db(tmp_path):
     await d.close()
 
 
-def _make_sub(target: str, role: str = "subscribe", sub_type: str = "tag", session_id: str = "sess1") -> Subscription:
-    return Subscription(id=1, session_id=session_id, type=sub_type, role=role, target=target)
+SUBSCRIBED_AT = 1_700_000_000
+NEW_MS = (SUBSCRIBED_AT + 3600) * 1000
+OLD_MS = (SUBSCRIBED_AT - 3600) * 1000
+
+
+def _make_sub(
+    target: str,
+    role: str = "subscribe",
+    sub_type: str = "tag",
+    session_id: str = "sess1",
+    created_at: int = SUBSCRIBED_AT,
+) -> Subscription:
+    return Subscription(
+        id=1, session_id=session_id, type=sub_type, role=role, target=target, created_at=created_at,
+    )
 
 
 def test_scheduler_requires_explicit_block_storage(db):
@@ -217,9 +231,16 @@ async def test_enrich_serial_order():
 
 # ── 聚合标签轮询 ──────────────────────────────────────────────────────────────
 
-def _make_posts(ids: list[str], tags: list[str] | None = None) -> list[Post]:
+def _make_posts(ids: list[str], tags: list[str] | None = None, published_ms: int = NEW_MS) -> list[Post]:
     return [
-        Post(post_id=pid, title=f"帖子{pid}", summary="", url=f"https://u.lofter.com/post/{pid}", tags=tags or [])
+        Post(
+            post_id=pid,
+            title=f"帖子{pid}",
+            summary="",
+            url=f"https://u.lofter.com/post/{pid}",
+            tags=tags or [],
+            publish_time_ms=published_ms,
+        )
         for pid in ids
     ]
 
@@ -311,7 +332,9 @@ async def test_new_post_pushed_after_warmup(db):
     """warmup 后新帖应该被推送"""
     subs = [_make_sub("原神", "subscribe")]
     old_posts = _make_posts(["p1", "p2"])
-    new_post = Post(post_id="p3", title="新帖", summary="", url="https://u.lofter.com/post/p3")
+    new_post = Post(
+        post_id="p3", title="新帖", summary="", url="https://u.lofter.com/post/p3", publish_time_ms=NEW_MS,
+    )
 
     async def mock_fetch_old(search_tags, client, **kwargs):
         return old_posts
@@ -344,8 +367,14 @@ async def test_tag_session_blocks_author_but_marks_seen(db):
     blocks = AuthorBlockStorage(db)
     subs = [_make_sub("原神", "subscribe")]
     posts = [
-        Post(post_id="p1", title="可见", summary="", author="可见作者", url="https://a.lofter.com/post/p1"),
-        Post(post_id="p2", title="屏蔽", summary="", author="屏蔽作者", url="https://b.lofter.com/post/p2"),
+        Post(
+            post_id="p1", title="可见", summary="", author="可见作者",
+            url="https://a.lofter.com/post/p1", publish_time_ms=NEW_MS,
+        ),
+        Post(
+            post_id="p2", title="屏蔽", summary="", author="屏蔽作者",
+            url="https://b.lofter.com/post/p2", publish_time_ms=NEW_MS,
+        ),
     ]
     sent: list[str] = []
 
@@ -400,6 +429,7 @@ async def test_blog_session_blocks_username_before_push(db):
             summary="",
             author_username="blockeduser",
             url="https://blockeduser.lofter.com/post/p1",
+            publish_time_ms=NEW_MS,
         )
     ]
     sent: list[str] = []
@@ -491,3 +521,124 @@ async def test_blog_session_fills_push_slots_when_enriched_post_is_blocked(db):
     assert len(sent) == 7
     assert await db.filter_unseen_session("sess1", "blog", post_ids) == []
     assert await db.filter_unsent("sess1", post_ids) == ["p2"]
+
+
+# ── 只推订阅之后发布的内容 ────────────────────────────────────────────────────
+
+
+def _paging_client(pages: dict[int, list[Post]], requested: list[int]) -> LofterClient:
+    client = LofterClient()
+
+    async def fetch(tag, *, offset=0, **kwargs):
+        requested.append(offset)
+        return pages.get(offset, [])
+
+    client.fetch_tag_posts = fetch
+    return client
+
+
+@pytest.mark.asyncio
+async def test_tag_paging_stops_at_the_first_page_older_than_the_subscription(db):
+    """新订阅一个大标签不能被一路翻到底。
+
+    线上就是这么炸的：test 标签翻到 offset 919，把 858 条 2005-2023 年的旧帖排进了待发送队列，
+    按每轮 5 条要往群里推十几个小时。
+    """
+    pages = {
+        0: _make_posts(["n1", "n2"], published_ms=NEW_MS),
+        2: _make_posts(["o1", "o2"], published_ms=OLD_MS),
+        4: _make_posts(["o3", "o4"], published_ms=OLD_MS),
+    }
+    requested: list[int] = []
+    client = _paging_client(pages, requested)
+    await db.mark_seen_session("sess1", "tag", ["warmup"])
+
+    posts = await fetch_tag_posts(
+        ["原神"], client, db=db, session_id="sess1", cutoffs={"原神": SUBSCRIBED_AT * 1000},
+    )
+
+    assert [p.post_id for p in posts] == ["n1", "n2"]
+    assert requested == [0, 2]
+    assert [p.post_id for p in await db.pending_posts("sess1", "tag", "")] == ["n1", "n2"]
+
+
+@pytest.mark.asyncio
+async def test_posts_published_before_the_subscription_are_not_pushed(db):
+    """订阅之前就存在的帖子不是「新内容」，哪怕这个会话从没见过它们。"""
+    subs = [_make_sub("原神", "subscribe")]
+    posts = _make_posts(["old1", "old2"], tags=["原神"], published_ms=OLD_MS)
+    sent: list[str] = []
+
+    async def send_func(session_id, text, images):
+        sent.append(text)
+
+    await db.mark_seen_session("sess1", "tag", ["warmup"])
+
+    with patch("core.scheduler.fetch_tag_posts", return_value=posts):
+        await _check_tag_session("sess1", subs, AsyncMock(), db, send_func, AuthorBlockStorage(db))
+
+    assert sent == []
+    assert await db.pending_posts("sess1", "tag", "") == []
+
+
+@pytest.mark.asyncio
+async def test_a_post_without_a_publish_time_is_treated_as_old(db):
+    """时间缺失时宁可漏推：当成新帖就等于放任整段历史刷进群里。"""
+    subs = [_make_sub("原神", "subscribe")]
+    posts = _make_posts(["p1"], tags=["原神"], published_ms=0)
+    sent: list[str] = []
+
+    async def send_func(session_id, text, images):
+        sent.append(text)
+
+    await db.mark_seen_session("sess1", "tag", ["warmup"])
+
+    with patch("core.scheduler.fetch_tag_posts", return_value=posts):
+        await _check_tag_session("sess1", subs, AsyncMock(), db, send_func, AuthorBlockStorage(db))
+
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_post_matching_two_tags_uses_the_earlier_subscription(db):
+    """帖子同时命中新旧两个订阅时按早的那个算，那次订阅本来就该收到它。
+
+    按晚的那个算会把「早订阅的标签本该收到的新内容」一起吞掉。
+    """
+    subs = [
+        _make_sub("原神", created_at=SUBSCRIBED_AT),
+        _make_sub("崩铁", created_at=SUBSCRIBED_AT + 7200),
+    ]
+    between = _make_posts(["between"], tags=["原神", "崩铁"], published_ms=NEW_MS)
+    before_both = _make_posts(["before"], tags=["原神", "崩铁"], published_ms=OLD_MS)
+    sent: list[str] = []
+
+    async def send_func(session_id, text, images):
+        sent.append(text)
+
+    await db.mark_seen_session("sess1", "tag", ["warmup"])
+
+    with patch("core.scheduler.fetch_tag_posts", return_value=between + before_both):
+        await _check_tag_session("sess1", subs, AsyncMock(), db, send_func, AuthorBlockStorage(db))
+
+    assert len(sent) == 1
+    assert "帖子between" in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_blog_posts_published_before_the_subscription_are_not_pushed(db):
+    """博主订阅同理：只推订阅之后发的新文章，不补推博主的历史作品。"""
+    sub = _make_sub("author", sub_type="blog")
+    posts = _make_posts(["old1"], published_ms=OLD_MS)
+    sent: list[str] = []
+
+    async def send_func(session_id, text, images):
+        sent.append(text)
+
+    await db.mark_seen_session("sess1", "blog", ["warmup"])
+
+    with patch("core.scheduler.fetch_blog_posts", return_value=posts):
+        await _check_blog_sub(sub, AsyncMock(), db, send_func, AuthorBlockStorage(db))
+
+    assert sent == []
+    assert await db.pending_posts("sess1", "blog", "author") == []
