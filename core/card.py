@@ -16,7 +16,7 @@ def card_links(message_obj) -> str:
 def _item_url(item) -> str:
     data = getattr(item, "data", None)
     if isinstance(data, str):
-        data = _loads(data)
+        data = _loads_dict(data)
     if not isinstance(data, dict):
         return ""
     return _detail_url(data)
@@ -26,7 +26,7 @@ def _detail_url(data: dict) -> str:
     """有的适配器把卡片 JSON 原样留在 data 里，先剥一层再取 meta。"""
     nested = data.get("data")
     if isinstance(nested, str):
-        data = _loads(nested) or data
+        data = _loads_dict(nested) or data
     meta = data.get("meta")
     if not isinstance(meta, dict):
         return ""
@@ -36,8 +36,14 @@ def _detail_url(data: dict) -> str:
     return str(detail.get("jumpUrl") or detail.get("qqdocurl") or "")
 
 
-def _loads(raw: str):
+def _loads_dict(raw: str) -> dict | None:
+    """卡片内容是外部可控输入，解析不出 dict 就当没有。
+
+    这里松一点就会把整条消息的处理链带崩：handler 抛异常时 AstrBot 会 stop_event，
+    后续插件全都收不到这条消息。
+    """
     try:
-        return json.loads(raw)
-    except ValueError:
+        parsed = json.loads(raw)
+    except (ValueError, RecursionError):
         return None
+    return parsed if isinstance(parsed, dict) else None

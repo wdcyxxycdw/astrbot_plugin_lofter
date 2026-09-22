@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from core.card import card_links
 
 LINK = "https://amingdeaierlankafei.lofter.com/post/1fcc68a3_34f550485?incantation=rzaeUZIxgKdy"
@@ -69,6 +71,22 @@ def test_card_without_a_recognised_meta_is_skipped():
 
 def test_malformed_card_json_does_not_raise():
     assert card_links(FakeMessage([FakeJson("{不是 JSON")])) == ""
+
+
+@pytest.mark.parametrize("nested", ["[1, 2]", "123", '"x"', "null", "true"])
+def test_nested_data_that_is_not_an_object_is_ignored(nested):
+    """卡片里塞一个能解析但不是对象的 data，不能把整条消息的处理链带崩。"""
+    assert card_links(FakeMessage([FakeJson({"data": nested})])) == ""
+
+
+def test_nested_data_that_is_not_an_object_falls_back_to_the_outer_card():
+    card = dict(APP_SHARE, data="[1, 2]")
+
+    assert card_links(FakeMessage([FakeJson(card)])) == LINK
+
+
+def test_deeply_nested_card_json_does_not_raise():
+    assert card_links(FakeMessage([FakeJson("[" * 200_000)])) == ""
 
 
 def test_several_cards_are_listed_one_per_line():
