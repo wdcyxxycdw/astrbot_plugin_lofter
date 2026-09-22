@@ -251,6 +251,11 @@ async def test_search_more_than_twenty_follows_server_offset(runtime):
     assert [call["offset"] for call in runtime.api_requests[start:start + 2]] == ["0", "20"]
 
 
+def send_actions(requests):
+    """只看真正发出去的消息，忽略贴表情之类的辅助动作。"""
+    return [request["action"] for request in requests if request["action"].startswith("send_")]
+
+
 async def test_text_post_with_images_still_renders_as_text_when_type_says_so(runtime):
     entry = post(0x7301, "类型判别")
     entry["post"]["type"] = 1
@@ -260,7 +265,7 @@ async def test_text_post_with_images_still_renders_as_text_when_type_says_so(run
 
     _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7301)}")
 
-    assert [request["action"] for request in requests] == ["send_group_forward_msg"]
+    assert send_actions(requests) == ["send_group_forward_msg"]
 
 
 async def test_image_post_without_images_still_renders_as_photo_when_type_says_so(runtime):
@@ -271,7 +276,7 @@ async def test_image_post_without_images_still_renders_as_photo_when_type_says_s
 
     _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7302)}")
 
-    assert [request["action"] for request in requests] == ["send_group_msg"]
+    assert send_actions(requests) == ["send_group_msg"]
 
 
 async def test_image_post_attaches_the_images(runtime):
