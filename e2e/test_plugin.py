@@ -244,3 +244,87 @@ async def test_search_more_than_twenty_follows_server_offset(runtime):
     assert "作品20" in json.dumps(requests, ensure_ascii=False)
     assert len(requests) == 22
     assert [call["offset"] for call in runtime.api_requests[start:start + 2]] == ["0", "20"]
+
+
+async def test_text_post_with_images_still_renders_as_text_when_type_says_so(runtime):
+    entry = post(0x7301, "类型判别")
+    entry["post"]["type"] = 1
+    entry["post"]["content"] = "<p>这是文字贴的正文</p>"
+    entry["post"]["photoLinks"] = json.dumps([{"orign": str(runtime.http.make_url("/image.png"))}])
+    runtime.post_pages[permalink(0x7301)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7301)}")
+
+    assert [request["action"] for request in requests] == ["send_group_forward_msg"]
+
+
+async def test_image_post_without_images_still_renders_as_photo_when_type_says_so(runtime):
+    entry = post(0x7302, "类型判别")
+    entry["post"]["type"] = 2
+    entry["post"]["content"] = "<p>图片贴的描述</p>"
+    runtime.post_pages[permalink(0x7302)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7302)}")
+
+    assert [request["action"] for request in requests] == ["send_group_msg"]
+
+
+async def test_image_post_attaches_the_images(runtime):
+    entry = post(0x7306, "类型判别")
+    entry["post"]["type"] = 2
+    entry["post"]["photoLinks"] = json.dumps([{"orign": str(runtime.http.make_url("/image.png"))}])
+    runtime.post_pages[permalink(0x7306)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7306)}")
+
+    segments = [segment for request in requests for segment in request["params"].get("message", [])]
+    assert any(segment["type"] == "image" for segment in segments)
+
+
+async def test_unknown_post_type_falls_back_to_looking_at_images(runtime):
+    entry = post(0x7303, "类型判别")
+    entry["post"]["type"] = 3
+    entry["post"]["content"] = "<p>未知类型但带图</p>"
+    entry["post"]["photoLinks"] = json.dumps([{"orign": str(runtime.http.make_url("/image.png"))}])
+    runtime.post_pages[permalink(0x7303)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7303)}")
+
+    segments = [segment for request in requests for segment in request["params"].get("message", [])]
+    assert any(segment["type"] == "image" for segment in segments)
+
+
+def video_entry(runtime, index):
+    entry = post(index, "视频测试")
+    entry["post"]["type"] = 4
+    entry["post"]["title"] = "我的视频作品"
+    entry["post"]["embed"] = json.dumps({"originUrl": str(runtime.http.make_url("/video.mp4")), "duration": 12})
+    return entry
+
+
+async def test_video_post_downloads_the_video_and_sends_it_as_a_file(runtime):
+    runtime.post_pages[permalink(0x7304)] = [video_entry(runtime, 0x7304)]
+    before = runtime.video_requests
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7304)}")
+
+    assert runtime.video_requests == before + 1
+    segments = [segment for request in requests for segment in request["params"].get("message", [])]
+    file_segment, = [segment for segment in segments if segment["type"] == "file"]
+    assert "我的视频作品.mp4" in json.dumps(file_segment, ensure_ascii=False)
+    text = json.dumps(requests, ensure_ascii=False)
+    assert "🎬 视频作品" in text
+
+
+async def test_video_post_over_the_size_limit_reports_instead_of_sending_a_file(runtime):
+    runtime.post_pages[permalink(0x7305)] = [video_entry(runtime, 0x7305)]
+    original = runtime.plugin._video_max_bytes
+    runtime.plugin._video_max_bytes = 16
+    try:
+        _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7305)}")
+    finally:
+        runtime.plugin._video_max_bytes = original
+
+    segments = [segment for request in requests for segment in request["params"].get("message", [])]
+    assert not [segment for segment in segments if segment["type"] == "file"]
+    assert "视频下载失败" in json.dumps(requests, ensure_ascii=False)

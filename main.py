@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from pathlib import Path
 
 import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
@@ -8,18 +9,36 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.star import StarTools
 from lofter import LofterClient
+from lofter.models import POST_TYPE_VIDEO
 
 from .core.author_block import AuthorBlockStorage, filter_blocked_posts, is_author_blocked
 from .core.count_commands import LofterCountCommandsMixin
 from .core.db import LofterDB
+from .core.files import build_file_component
 from .core.llm_tools import LofterLLMToolsMixin
 from .core.filter import parse_tag_expr
-from .core.formatter import format_post
+from .core.formatter import format_post, is_photo_post
 from .core.scheduler import SubscriptionScheduler, fetch_tag_posts
 from .core.storage import SubscriptionStorage
 from .core.utils import _split_text, extract_message_body_text
+from .core.video import VIDEO_DIR_NAME, download_video, prune_old_videos, video_filename
 
 POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
+VIDEO_HEADER = "🎬 视频作品"
+
+
+def _forward_nodes(post, url: str) -> list:
+    author_name = post.author or "Lofter"
+    header_lines = [f"▸ {post.title or '(无标题)'}"]
+    if post.author:
+        header_lines.append(f"作者：{post.author}")
+    if post.tags:
+        header_lines.append(f"#{' #'.join(post.tags)}")
+    nodes = [Comp.Node(content=[Comp.Plain("\n".join(header_lines))], name=author_name, uin="0")]
+    for chunk in _split_text(post.content):
+        nodes.append(Comp.Node(content=[Comp.Plain(chunk)], name=author_name, uin="0"))
+    nodes.append(Comp.Node(content=[Comp.Plain(url)], name=author_name, uin="0"))
+    return nodes
 
 
 @register(
@@ -35,6 +54,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         self._max_images: int = int(config.get("max_images", 3))
         self._search_limit: int = int(config.get("search_limit", 3))
         self._interval: int = int(config.get("poll_interval", 30))
+        self._video_max_bytes: int = int(config.get("video_max_mb", 100)) * (1 << 20)
         db_path = os.path.join(StarTools.get_data_dir(), "lofter.db")
         self._db = LofterDB(db_path)
         self._client = LofterClient("")
@@ -128,42 +148,69 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             return
         url = "https://" + match.group(0)
         try:
-            post = await self._client.fetch_post(url)
+            detail = await self._client.fetch_post_detailed(url)
         except Exception as e:
             logger.error("获取 Lofter 帖子失败: %s", e)
             return
 
+        post = detail.post
         blocks = await self._author_blocks.list_by_session(event.unified_msg_origin)
         if is_author_blocked(post, blocks):
             return
+
+        if detail.post_type == POST_TYPE_VIDEO:
+            async for result in self._render_video_post(event, post, url):
+                yield result
+            return
         if not post.summary and not post.images and not post.content:
             return
-
-        if post.images:
-            chain = [Comp.Plain(format_post(post))]
-            chain += [Comp.Image.fromURL(u) for u in post.images[:self._max_images]]
-            yield event.chain_result(chain)
+        if is_photo_post(detail):
+            yield self._render_photo_post(event, post)
         elif post.content:
-            is_private = "FriendMessage" in event.unified_msg_origin
-            if is_private:
-                preview = post.content[:500] + ("…\n（全文请点击链接）" if len(post.content) > 500 else "")
-                yield event.chain_result([Comp.Plain(format_post(post, body=preview))])
-            else:
-                author_name = post.author or "Lofter"
-                header_lines = [f"▸ {post.title or '(无标题)'}"]
-                if post.author:
-                    header_lines.append(f"作者：{post.author}")
-                if post.tags:
-                    header_lines.append(f"#{' #'.join(post.tags)}")
-                node_header = "\n".join(header_lines)
-                chunks = _split_text(post.content)
-                nodes = [Comp.Node(content=[Comp.Plain(node_header)], name=author_name, uin="0")]
-                for chunk in chunks:
-                    nodes.append(Comp.Node(content=[Comp.Plain(chunk)], name=author_name, uin="0"))
-                nodes.append(Comp.Node(content=[Comp.Plain(url)], name=author_name, uin="0"))
-                yield event.chain_result([Comp.Nodes(nodes=nodes)])
+            yield self._render_text_post(event, post, url)
         else:
             yield event.chain_result([Comp.Plain(format_post(post))])
+
+    def _render_photo_post(self, event: AstrMessageEvent, post):
+        chain = [Comp.Plain(format_post(post))]
+        chain += [Comp.Image.fromURL(u) for u in post.images[:self._max_images]]
+        return event.chain_result(chain)
+
+    def _render_text_post(self, event: AstrMessageEvent, post, url: str):
+        if "FriendMessage" in event.unified_msg_origin:
+            preview = post.content[:500] + ("…\n（全文请点击链接）" if len(post.content) > 500 else "")
+            return event.chain_result([Comp.Plain(format_post(post, body=preview))])
+        return event.chain_result([Comp.Nodes(nodes=_forward_nodes(post, url))])
+
+    async def _render_video_post(self, event: AstrMessageEvent, post, url: str):
+        video = await self._fetch_video(url)
+        yield event.chain_result([Comp.Plain(format_post(post, header=VIDEO_HEADER))])
+        if video is None:
+            return
+
+        directory = Path(self._db._path).parent / VIDEO_DIR_NAME
+        prune_old_videos(directory)
+        target = directory / video_filename(post.title, post.post_id)
+        try:
+            await download_video(video.url, target, max_bytes=self._video_max_bytes)
+        except Exception as e:
+            logger.warning("Lofter: 下载视频失败 %s: %s", video.url, e)
+            yield event.plain_result(f"视频下载失败：{e}")
+            return
+
+        component = build_file_component(target)
+        if component is None:
+            logger.warning("Lofter: 当前适配器不支持文件发送，视频留在 %s", target)
+            return
+        yield event.chain_result([component])
+
+    async def _fetch_video(self, url: str):
+        try:
+            video = await self._client.fetch_post_video(url)
+        except Exception as e:
+            logger.warning("Lofter: 获取视频地址失败 %s: %s", url, e)
+            return None
+        return video if video and video.url else None
 
     # ──────────────────────────────────────────
     # /lofter 命令组

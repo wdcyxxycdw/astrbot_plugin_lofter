@@ -18,5 +18,10 @@
         "description": "搜索结果最多返回的条数（最大 100，超过 20 条自动翻页）",
         "type": "int",
         "default": 3
+    },
+    "video_max_mb": {
+        "description": "解析视频贴时允许下载的最大体积（MB），超过则只发文字不发文件",
+        "type": "int",
+        "default": 100
     }
 }
