@@ -98,3 +98,28 @@ def test_is_photo_post_falls_back_to_images_for_unknown_types():
 def test_is_photo_post_treats_missing_type_as_unknown():
     assert is_photo_post(make_detail(0, images=["https://img/1.png"])) is True
     assert is_photo_post(make_detail(0)) is False
+
+
+def test_word_count_appears_next_to_the_author():
+    text = format_post(make_post(author="作者甲"), word_count=1234)
+
+    assert "作者：作者甲  1234 字" in text
+
+
+def test_word_count_is_omitted_when_zero():
+    text = format_post(make_post(author="作者甲"), word_count=0)
+
+    assert "字" not in text.split("\n")[1]
+
+
+def test_word_count_stands_alone_when_there_is_no_author():
+    text = format_post(make_post(author=""), word_count=99)
+
+    assert "99 字" in text
+
+
+def test_author_time_and_word_count_share_one_line():
+    post = make_post(author="作者甲", publish_time="2026-01-02 03:04")
+    text = format_post(post, include_time=True, word_count=50)
+
+    assert "作者：作者甲  2026-01-02 03:04  50 字" in text

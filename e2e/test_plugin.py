@@ -165,12 +165,17 @@ async def test_image_search_downloads_image_and_serializes_onebot_message(runtim
     assert runtime.image_requests == before + 1
 
 
-async def test_link_auto_parse_sends_long_text_as_group_forward_nodes(runtime):
+async def test_forward_nodes_split_the_body_when_the_file_threshold_is_raised(runtime):
     text = "开发测试正文" * 600
     entry = post(0x7E77, "长文测试")
     entry["post"]["content"] = f"<p>{text}</p>"
     runtime.post_pages[permalink(0x7E77)] = [entry]
-    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7E77)}")
+    original = runtime.plugin._text_file_threshold
+    runtime.plugin._text_file_threshold = 100000
+    try:
+        _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7E77)}")
+    finally:
+        runtime.plugin._text_file_threshold = original
     forward, = [request for request in requests if request["action"] == "send_group_forward_msg"]
     nodes = forward["params"]["messages"]
     paragraphs = [segment["data"]["text"] for node in nodes[1:-1] for segment in node["data"]["content"]]
@@ -376,6 +381,85 @@ async def test_video_post_over_the_size_limit_reports_instead_of_sending_a_video
     assert "视频下载失败" in json.dumps(requests, ensure_ascii=False)
 
 
+async def test_long_text_post_is_sent_as_a_txt_file_named_after_the_title(runtime):
+    body = "很长的正文内容。" * 400
+    entry = post(0x7401, "长文文件")
+    entry["post"]["type"] = 1
+    entry["post"]["title"] = "我的长篇作品"
+    entry["post"]["content"] = f"<p>{body}</p>"
+    runtime.post_pages[permalink(0x7401)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7401)}")
+
+    assert not [request for request in requests if request["action"] == "send_group_forward_msg"]
+    segments = [segment for request in requests for segment in request["params"].get("message", [])]
+    file_segment, = [segment for segment in segments if segment["type"] == "file"]
+    assert file_segment["data"]["name"] == "我的长篇作品.txt"
+    # 磁盘上按帖子 ID 存，标题只是收件人看到的名字——否则两篇同名文章会互相覆盖
+    on_disk = Path(unquote(urlparse(file_segment["data"]["file"]).path or file_segment["data"]["file"]))
+    assert on_disk.name.startswith(f"{permalink(0x7401)}_我的长篇作品_")
+    assert on_disk.name.endswith(".txt")
+
+
+async def test_long_text_falls_back_to_forward_nodes_when_files_are_unsupported(runtime, monkeypatch):
+    """适配器发不了文件时不能只丢个头部就没了，用户会以为全文永远不来。"""
+    import astrbot.api.message_components as Comp
+
+    body = "降级正文内容。" * 400
+    entry = post(0x7404, "长文文件")
+    entry["post"]["type"] = 1
+    entry["post"]["content"] = f"<p>{body}</p>"
+    runtime.post_pages[permalink(0x7404)] = [entry]
+    monkeypatch.delattr(Comp, "File")
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7404)}")
+
+    forward, = [request for request in requests if request["action"] == "send_group_forward_msg"]
+    nodes = forward["params"]["messages"]
+    paragraphs = [segment["data"]["text"] for node in nodes[1:-1] for segment in node["data"]["content"]]
+    assert "".join(paragraphs) == body
+
+
+async def test_the_sent_txt_file_contains_the_whole_article(runtime):
+    body = "完整正文段落。" * 400
+    entry = post(0x7402, "长文文件")
+    entry["post"]["type"] = 1
+    entry["post"]["title"] = "全文校验"
+    entry["post"]["content"] = f"<p>{body}</p>"
+    runtime.post_pages[permalink(0x7402)] = [entry]
+
+    await runtime.message(f"https://author.lofter.com/post/{permalink(0x7402)}")
+
+    written, = (Path(runtime.plugin._db._path).parent / "articles").glob(f"{permalink(0x7402)}_*.txt")
+    text = written.read_text(encoding="utf-8")
+    assert body in text
+    assert "原文：https://author.lofter.com/post/" in text
+
+
+async def test_long_text_post_reports_the_word_count_lofter_returned(runtime):
+    entry = post(0x7403, "长文文件")
+    entry["post"]["type"] = 1
+    entry["post"]["title"] = "字数来源"
+    entry["post"]["content"] = "<p>短正文</p>"
+    entry["post"]["wordCount"] = 8888
+    runtime.post_pages[permalink(0x7403)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7403)}")
+
+    assert "8888 字" in json.dumps(requests, ensure_ascii=False)
+
+
+async def test_short_text_post_still_uses_forward_nodes_and_shows_the_count(runtime):
+    entry = post(0x7404, "短文")
+    entry["post"]["type"] = 1
+    entry["post"]["content"] = "<p>短短的一段正文</p>"
+    runtime.post_pages[permalink(0x7404)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7404)}")
+
+    forward, = [request for request in requests if request["action"] == "send_group_forward_msg"]
+    header = forward["params"]["messages"][0]["data"]["content"][0]["data"]["text"]
+    assert "7 字" in header
 async def test_video_post_without_a_playable_address_says_so(runtime):
     """取不到视频地址时不能只丢一句标题就没了，用户会以为机器人卡住。"""
     entry = post(0x7306, "视频测试")
