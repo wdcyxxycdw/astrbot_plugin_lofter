@@ -15,9 +15,11 @@ async def set_reaction(event, emoji_id: int, *, on: bool = True) -> bool:
     """贴上或撤下一个表情，成功返回 True。任何失败都只记日志，不影响解析流程。"""
     call_action = getattr(getattr(event, "bot", None), "call_action", None)
     if not callable(call_action):
+        logger.debug("Lofter: 当前平台没有 OneBot 接口，跳过贴表情")
         return False
     message_id = getattr(getattr(event, "message_obj", None), "message_id", "")
     if not message_id:
+        logger.debug("Lofter: 消息缺少 message_id，无法贴表情")
         return False
     try:
         await call_action(
@@ -26,6 +28,7 @@ async def set_reaction(event, emoji_id: int, *, on: bool = True) -> bool:
             emoji_id=emoji_id,
             set=on,
         )
+        logger.debug("Lofter: 贴表情 emoji_id=%s set=%s 已发出", emoji_id, on)
         return True
     except Exception as e:
         logger.warning("Lofter: 贴表情失败 emoji_id=%s set=%s: %s", emoji_id, on, e)

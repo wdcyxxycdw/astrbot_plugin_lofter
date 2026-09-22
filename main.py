@@ -137,6 +137,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         if not match:
             return
         url = "https://" + match.group(0)
+        logger.debug("Lofter: 开始解析 %s", url)
         if self._reaction_enabled:
             await set_reaction(event, self._emoji_parsing)
         try:
