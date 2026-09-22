@@ -204,6 +204,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         video = await self._fetch_video(url)
         yield event.chain_result([Comp.Plain(format_post(post, header=VIDEO_HEADER))])
         if video is None:
+            await self._end_reaction(event, self._emoji_failed)
             yield event.plain_result("视频地址获取失败，请点击上方链接查看")
             return
 
@@ -214,9 +215,11 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             await download_video(video.url, target, max_bytes=self._video_max_bytes)
         except Exception as e:
             logger.warning("Lofter: 下载视频失败 %s: %s", video.url, e)
+            await self._end_reaction(event, self._emoji_failed)
             yield event.plain_result(f"视频下载失败：{e}")
             return
 
+        await self._end_reaction(event, self._emoji_done)
         yield event.chain_result([Comp.Video.fromFileSystem(target)])
 
     async def _fetch_video(self, url: str):
