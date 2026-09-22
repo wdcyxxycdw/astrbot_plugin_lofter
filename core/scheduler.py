@@ -15,12 +15,34 @@ SendFunc = Callable[[str, str, list], Awaitable[None]]
 MAX_PUSH_POSTS = 5
 
 
-async def fetch_tag_posts(search_tags: list[str], client: LofterClient, *, db: LofterDB | None = None, session_id: str = "") -> list[Post]:
+def tag_cutoffs(subs: list[Subscription]) -> dict[str, int]:
+    """每个订阅标签的起算时间（毫秒）：订阅之前发布的内容不推送。"""
+    return {s.target.lower(): s.created_at * 1000 for s in subs if s.role == "subscribe"}
+
+
+def published_after_subscribe(post: Post, cutoffs: dict[str, int]) -> bool:
+    """帖子命中多个订阅标签时按最早那次订阅算，那次订阅本来就该收到它。
+
+    publish_time_ms 缺失时是 0，会被当成旧帖跳过：宁可漏推，也不要把整段历史刷进群里。
+    """
+    hits = [cutoffs[t.lower()] for t in post.tags if t.lower() in cutoffs]
+    return post.publish_time_ms > (min(hits) if hits else min(cutoffs.values()))
+
+
+async def fetch_tag_posts(
+    search_tags: list[str],
+    client: LofterClient,
+    *,
+    db: LofterDB | None = None,
+    session_id: str = "",
+    cutoffs: dict[str, int] | None = None,
+) -> list[Post]:
     seen_ids: set[str] = set()
     result: list[Post] = []
     for tag in search_tags:
+        cutoff_ms = (cutoffs or {}).get(tag.lower(), 0)
         try:
-            posts = await _fetch_tag_pages(tag, client, db, session_id)
+            posts = await _fetch_tag_pages(tag, client, db, session_id, cutoff_ms)
         except Exception:
             if db is None:
                 raise
@@ -33,7 +55,9 @@ async def fetch_tag_posts(search_tags: list[str], client: LofterClient, *, db: L
     return result
 
 
-async def _fetch_tag_pages(tag: str, client: LofterClient, db: LofterDB | None, session_id: str) -> list[Post]:
+async def _fetch_tag_pages(
+    tag: str, client: LofterClient, db: LofterDB | None, session_id: str, cutoff_ms: int,
+) -> list[Post]:
     offset = await db.tag_scan_cursor(session_id, tag) if db else 0
     result = []
     page_ids: set[str] = set()
@@ -46,15 +70,19 @@ async def _fetch_tag_pages(tag: str, client: LofterClient, db: LofterDB | None, 
         if not ids - page_ids:
             raise RuntimeError(f"标签「{tag}」返回重复页，已保留翻页位置")
         page_ids.update(ids)
-        result.extend(posts)
+        fresh = [post for post in posts if post.publish_time_ms > cutoff_ms]
+        result.extend(fresh)
         if not warm:
             break
-        unseen = set(await db.filter_unseen_session(session_id, "tag", list(ids)))
+        # 只拿当页的新帖去判断要不要继续翻。订阅之前的旧帖这个会话当然没见过，拿它们算
+        # 「还有未读」就永远翻不到头——新订阅一个大标签会被一路翻到底，把整段历史排进队列。
+        fresh_ids = [post.post_id for post in fresh]
+        unseen = set(await db.filter_unseen_session(session_id, "tag", fresh_ids))
         pending = {post.post_id for post in await db.pending_posts(session_id, "tag", "")}
         if not unseen - pending:
             break
         offset += len(posts)
-        await db.save_tag_page(session_id, tag, [post for post in posts if post.post_id in unseen], offset)
+        await db.save_tag_page(session_id, tag, [post for post in fresh if post.post_id in unseen], offset)
     if db:
         await db.clear_tag_scan_cursor(session_id, tag)
     return result
@@ -105,9 +133,10 @@ async def _check_tag_session(
     rule = _build_tag_rule(subs)
     if not rule.search_tags:
         return
+    cutoffs = tag_cutoffs(subs)
 
     try:
-        posts = await fetch_tag_posts(rule.search_tags, client, db=db, session_id=session_id)
+        posts = await fetch_tag_posts(rule.search_tags, client, db=db, session_id=session_id, cutoffs=cutoffs)
     except Exception as e:
         logger.error("轮询标签 session=%s 失败: %s", session_id, e)
         posts = []
@@ -115,7 +144,7 @@ async def _check_tag_session(
     pending = await db.pending_posts(session_id, "tag", "")
     posts = list({post.post_id: post for post in pending + posts}.values())
     original_ids = {post.post_id for post in posts}
-    posts = apply_filter(posts, rule)
+    posts = [p for p in apply_filter(posts, rule) if published_after_subscribe(p, cutoffs)]
     excluded_ids = list(original_ids - {post.post_id for post in posts})
     await db.discard_pending(session_id, "tag", excluded_ids)
     if not posts:
@@ -173,6 +202,10 @@ async def _check_blog_sub(
 
     pending = await db.pending_posts(sub.session_id, "blog", sub.target)
     posts = list({post.post_id: post for post in pending + posts}.values())
+    cutoff_ms = sub.created_at * 1000
+    stale_ids = [p.post_id for p in posts if p.publish_time_ms <= cutoff_ms]
+    await db.discard_pending(sub.session_id, "blog", stale_ids)
+    posts = [p for p in posts if p.publish_time_ms > cutoff_ms]
 
     if not posts:
         return
