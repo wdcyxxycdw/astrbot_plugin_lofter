@@ -12,6 +12,7 @@ from lofter import LofterClient
 from lofter.models import POST_TYPE_VIDEO
 
 from .core.author_block import AuthorBlockStorage, filter_blocked_posts, is_author_blocked
+from .core.card import card_links
 from .core.cleanup import DEFAULT_TTL_HOURS, TempFileCleaner
 from .core.count_commands import LofterCountCommandsMixin
 from .core.db import LofterDB
@@ -170,7 +171,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
     async def auto_parse(self, event: AstrMessageEvent):
         msg = extract_message_body_text(event.message_obj, event.message_str)
-        match = POST_PATTERN.search(msg)
+        match = POST_PATTERN.search(msg) or POST_PATTERN.search(card_links(event.message_obj))
         if not match:
             return
         url = "https://" + match.group(0)

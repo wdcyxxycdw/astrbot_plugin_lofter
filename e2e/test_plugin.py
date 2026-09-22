@@ -229,6 +229,38 @@ async def test_reaction_is_cleared_when_the_block_list_query_fails(runtime, monk
     assert not [request for request in requests if request["action"].startswith("send_")]
 
 
+def share_card(url):
+    """LOFTER app 分享出来的卡片，结构照抄线上抓到的 json 段。"""
+    card = {
+        "app": "com.tencent.tuwen.lua",
+        "bizsrc": "qqconnect.sdkshare",
+        "meta": {"news": {
+            "desc": "爱尔兰咖啡屋 / 白夜", "jumpUrl": url, "tag": "LOFTER", "title": "白夜",
+        }},
+        "prompt": "[分享]白夜",
+        "view": "news",
+    }
+    return [{"type": "json", "data": {"data": json.dumps(card, ensure_ascii=False)}}]
+
+
+async def test_app_share_card_is_parsed_like_a_plain_link(runtime):
+    runtime.post_pages[permalink(0x7C0D)] = [post(0x7C0D, "卡片测试")]
+    url = f"https://author.lofter.com/post/{permalink(0x7C0D)}?incantation=rzaeUZIxgKdy"
+
+    _, requests = await runtime.message("", segments=share_card(url))
+
+    text = json.dumps(requests, ensure_ascii=False)
+    assert requests
+    assert f"作品{0x7C0D}" in text
+    assert "完整正文" in text
+
+
+async def test_share_card_without_a_lofter_link_is_ignored(runtime):
+    _, requests = await runtime.message("", segments=share_card("https://example.com/whatever"))
+
+    assert not requests
+
+
 async def test_subscription_scans_past_first_page(runtime):
     tag = "补抓测试"
     runtime.pages[(tag, 0)] = [post(901, tag)]
