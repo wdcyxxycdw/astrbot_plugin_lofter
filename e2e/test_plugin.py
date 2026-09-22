@@ -165,12 +165,17 @@ async def test_image_search_downloads_image_and_serializes_onebot_message(runtim
     assert runtime.image_requests == before + 1
 
 
-async def test_link_auto_parse_sends_long_text_as_group_forward_nodes(runtime):
+async def test_forward_nodes_split_the_body_when_the_file_threshold_is_raised(runtime):
     text = "开发测试正文" * 600
     entry = post(0x7E77, "长文测试")
     entry["post"]["content"] = f"<p>{text}</p>"
     runtime.post_pages[permalink(0x7E77)] = [entry]
-    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7E77)}")
+    original = runtime.plugin._text_file_threshold
+    runtime.plugin._text_file_threshold = 100000
+    try:
+        _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7E77)}")
+    finally:
+        runtime.plugin._text_file_threshold = original
     forward, = [request for request in requests if request["action"] == "send_group_forward_msg"]
     nodes = forward["params"]["messages"]
     paragraphs = [segment["data"]["text"] for node in nodes[1:-1] for segment in node["data"]["content"]]
@@ -180,7 +185,48 @@ async def test_link_auto_parse_sends_long_text_as_group_forward_nodes(runtime):
 
 async def test_login_page_never_sends_an_empty_post(runtime):
     _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0xB0B)}")
-    assert not requests
+    assert not [request for request in requests if request["action"].startswith("send_")]
+
+
+def emoji_reactions(requests):
+    return [
+        (request["params"]["emoji_id"], request["params"]["set"])
+        for request in requests
+        if request["action"] == "set_msg_emoji_like"
+    ]
+
+
+async def test_link_auto_parse_marks_progress_with_emoji_reaction(runtime):
+    entry = post(0x5EAC, "表情测试")
+    entry["post"]["content"] = "<p>正文</p>"
+    runtime.post_pages[permalink(0x5EAC)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x5EAC)}")
+
+    assert emoji_reactions(requests) == [(128064, True), (128064, False), (124, True)]
+
+
+async def test_link_auto_parse_marks_failure_reaction_when_post_is_unavailable(runtime):
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0xB0B)}")
+
+    assert emoji_reactions(requests) == [(128064, True), (128064, False), (123, True)]
+
+
+async def test_reaction_is_cleared_when_the_block_list_query_fails(runtime, monkeypatch):
+    """贴上 👀 之后的任何一步出错都得收尾，否则表情会永远留在用户消息上。"""
+    entry = post(0x5EAD, "表情兜底")
+    entry["post"]["content"] = "<p>正文</p>"
+    runtime.post_pages[permalink(0x5EAD)] = [entry]
+
+    async def unavailable(_session_id):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(runtime.plugin._author_blocks, "list_by_session", unavailable)
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x5EAD)}")
+
+    assert emoji_reactions(requests) == [(128064, True), (128064, False), (123, True)]
+    assert not [request for request in requests if request["action"].startswith("send_")]
 
 
 def share_card(url):
@@ -276,3 +322,231 @@ async def test_search_more_than_twenty_follows_server_offset(runtime):
     assert "作品20" in json.dumps(requests, ensure_ascii=False)
     assert len(requests) == 22
     assert [call["offset"] for call in runtime.api_requests[start:start + 2]] == ["0", "20"]
+
+
+def send_actions(requests):
+    """只看真正发出去的消息，忽略贴表情之类的辅助动作。"""
+    return [request["action"] for request in requests if request["action"].startswith("send_")]
+
+
+async def test_text_post_with_images_still_renders_as_text_when_type_says_so(runtime):
+    entry = post(0x7301, "类型判别")
+    entry["post"]["type"] = 1
+    entry["post"]["content"] = "<p>这是文字贴的正文</p>"
+    entry["post"]["photoLinks"] = json.dumps([{"orign": str(runtime.http.make_url("/image.png"))}])
+    runtime.post_pages[permalink(0x7301)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7301)}")
+
+    assert send_actions(requests) == ["send_group_forward_msg"]
+
+
+async def test_image_post_without_images_still_renders_as_photo_when_type_says_so(runtime):
+    entry = post(0x7302, "类型判别")
+    entry["post"]["type"] = 2
+    entry["post"]["content"] = "<p>图片贴的描述</p>"
+    runtime.post_pages[permalink(0x7302)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7302)}")
+
+    assert send_actions(requests) == ["send_group_msg"]
+
+
+async def test_image_post_attaches_the_images(runtime):
+    entry = post(0x7306, "类型判别")
+    entry["post"]["type"] = 2
+    entry["post"]["photoLinks"] = json.dumps([{"orign": str(runtime.http.make_url("/image.png"))}])
+    runtime.post_pages[permalink(0x7306)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7306)}")
+
+    segments = [segment for request in requests for segment in request["params"].get("message", [])]
+    assert any(segment["type"] == "image" for segment in segments)
+
+
+async def test_unknown_post_type_falls_back_to_looking_at_images(runtime):
+    entry = post(0x7303, "类型判别")
+    entry["post"]["type"] = 3
+    entry["post"]["content"] = "<p>未知类型但带图</p>"
+    entry["post"]["photoLinks"] = json.dumps([{"orign": str(runtime.http.make_url("/image.png"))}])
+    runtime.post_pages[permalink(0x7303)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7303)}")
+
+    segments = [segment for request in requests for segment in request["params"].get("message", [])]
+    assert any(segment["type"] == "image" for segment in segments)
+
+
+def video_entry(runtime, index):
+    entry = post(index, "视频测试")
+    entry["post"]["type"] = 4
+    entry["post"]["title"] = "我的视频作品"
+    entry["post"]["embed"] = json.dumps({"originUrl": str(runtime.http.make_url("/video.mp4")), "duration": 12})
+    return entry
+
+
+async def test_video_post_downloads_the_video_and_sends_it_as_a_video(runtime):
+    runtime.post_pages[permalink(0x7304)] = [video_entry(runtime, 0x7304)]
+    before = runtime.video_requests
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7304)}")
+
+    assert runtime.video_requests == before + 1
+    segments = [segment for request in requests for segment in request["params"].get("message", [])]
+    video_segment, = [segment for segment in segments if segment["type"] == "video"]
+    assert Path(unquote(urlparse(video_segment["data"]["file"]).path)).name == f"{permalink(0x7304)}.mp4"
+    text = json.dumps(requests, ensure_ascii=False)
+    assert "🎬 视频作品" in text
+
+
+async def test_video_post_over_the_size_limit_reports_instead_of_sending_a_video(runtime):
+    runtime.post_pages[permalink(0x7305)] = [video_entry(runtime, 0x7305)]
+    original = runtime.plugin._video_max_bytes
+    runtime.plugin._video_max_bytes = 16
+    try:
+        _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7305)}")
+    finally:
+        runtime.plugin._video_max_bytes = original
+
+    segments = [segment for request in requests for segment in request["params"].get("message", [])]
+    assert not [segment for segment in segments if segment["type"] == "video"]
+    assert "视频下载失败" in json.dumps(requests, ensure_ascii=False)
+
+
+async def test_long_text_post_is_sent_as_a_txt_file_named_after_the_title(runtime):
+    body = "很长的正文内容。" * 400
+    entry = post(0x7401, "长文文件")
+    entry["post"]["type"] = 1
+    entry["post"]["title"] = "我的长篇作品"
+    entry["post"]["content"] = f"<p>{body}</p>"
+    runtime.post_pages[permalink(0x7401)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7401)}")
+
+    assert not [request for request in requests if request["action"] == "send_group_forward_msg"]
+    segments = [segment for request in requests for segment in request["params"].get("message", [])]
+    file_segment, = [segment for segment in segments if segment["type"] == "file"]
+    assert file_segment["data"]["name"] == "我的长篇作品.txt"
+    # 磁盘上按帖子 ID 存，标题只是收件人看到的名字——否则两篇同名文章会互相覆盖
+    on_disk = Path(unquote(urlparse(file_segment["data"]["file"]).path or file_segment["data"]["file"]))
+    assert on_disk.name.startswith(f"{permalink(0x7401)}_我的长篇作品_")
+    assert on_disk.name.endswith(".txt")
+
+
+async def test_long_text_falls_back_to_forward_nodes_when_files_are_unsupported(runtime, monkeypatch):
+    """适配器发不了文件时不能只丢个头部就没了，用户会以为全文永远不来。"""
+    import astrbot.api.message_components as Comp
+
+    body = "降级正文内容。" * 400
+    entry = post(0x7404, "长文文件")
+    entry["post"]["type"] = 1
+    entry["post"]["content"] = f"<p>{body}</p>"
+    runtime.post_pages[permalink(0x7404)] = [entry]
+    monkeypatch.delattr(Comp, "File")
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7404)}")
+
+    forward, = [request for request in requests if request["action"] == "send_group_forward_msg"]
+    nodes = forward["params"]["messages"]
+    paragraphs = [segment["data"]["text"] for node in nodes[1:-1] for segment in node["data"]["content"]]
+    assert "".join(paragraphs) == body
+
+
+async def test_the_sent_txt_file_contains_the_whole_article(runtime):
+    body = "完整正文段落。" * 400
+    entry = post(0x7402, "长文文件")
+    entry["post"]["type"] = 1
+    entry["post"]["title"] = "全文校验"
+    entry["post"]["content"] = f"<p>{body}</p>"
+    runtime.post_pages[permalink(0x7402)] = [entry]
+
+    await runtime.message(f"https://author.lofter.com/post/{permalink(0x7402)}")
+
+    written, = (Path(runtime.plugin._db._path).parent / "articles").glob(f"{permalink(0x7402)}_*.txt")
+    text = written.read_text(encoding="utf-8")
+    assert body in text
+    assert "原文：https://author.lofter.com/post/" in text
+
+
+async def test_long_text_post_reports_the_word_count_lofter_returned(runtime):
+    entry = post(0x7403, "长文文件")
+    entry["post"]["type"] = 1
+    entry["post"]["title"] = "字数来源"
+    entry["post"]["content"] = "<p>短正文</p>"
+    entry["post"]["wordCount"] = 8888
+    runtime.post_pages[permalink(0x7403)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7403)}")
+
+    assert "8888 字" in json.dumps(requests, ensure_ascii=False)
+
+
+async def test_short_text_post_still_uses_forward_nodes_and_shows_the_count(runtime):
+    entry = post(0x7404, "短文")
+    entry["post"]["type"] = 1
+    entry["post"]["content"] = "<p>短短的一段正文</p>"
+    runtime.post_pages[permalink(0x7404)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7404)}")
+
+    forward, = [request for request in requests if request["action"] == "send_group_forward_msg"]
+    header = forward["params"]["messages"][0]["data"]["content"][0]["data"]["text"]
+    assert "7 字" in header
+async def test_video_post_without_a_playable_address_says_so(runtime):
+    """取不到视频地址时不能只丢一句标题就没了，用户会以为机器人卡住。"""
+    entry = post(0x7306, "视频测试")
+    entry["post"]["type"] = 4
+    runtime.post_pages[permalink(0x7306)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7306)}")
+
+    assert "视频地址获取失败" in json.dumps(requests, ensure_ascii=False)
+
+
+async def test_the_cleaner_removes_the_files_the_plugin_actually_writes(runtime):
+    """解析一次长文，把生成的文件调旧，定期清理必须能清掉它。
+
+    文件命名规则改了而清理的匹配规则没跟上，文件就会一直堆着，单测各测各的看不出来。
+    """
+    import importlib
+    import os
+    import time
+
+    sweep = importlib.import_module(runtime.plugin.__module__.rsplit(".", 1)[0] + ".core.cleanup").sweep
+
+    body = "要被清掉的正文。" * 400
+    entry = post(0x7601, "清理")
+    entry["post"]["type"] = 1
+    entry["post"]["title"] = "待清理长文"
+    entry["post"]["content"] = f"<p>{body}</p>"
+    runtime.post_pages[permalink(0x7601)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7601)}")
+
+    segments = [segment for request in requests for segment in request["params"].get("message", [])]
+    file_segment, = [segment for segment in segments if segment["type"] == "file"]
+    on_disk = Path(unquote(urlparse(file_segment["data"]["file"]).path or file_segment["data"]["file"]))
+    assert on_disk.exists()
+
+    old = time.time() - 7200
+    os.utime(on_disk, (old, old))
+    sweep(on_disk.parent.parent, keep_seconds=3600)
+
+    assert not on_disk.exists()
+
+
+async def test_the_cleaner_runs_for_as_long_as_the_plugin_does(runtime):
+    """清理挂在插件生命周期上：解析与否都在跑，插件退出时跟着停。"""
+    assert not runtime.plugin._cleaner._task.done()
+async def test_video_post_ends_the_reaction_by_outcome(runtime):
+    """视频分支单独 return，收尾表情得自己贴：漏了 👀 就永远留着，贴错了下载失败也显示成功。"""
+    runtime.post_pages[permalink(0x7307)] = [video_entry(runtime, 0x7307)]
+    _, sent = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7307)}")
+
+    broken = post(0x7308, "视频测试")
+    broken["post"]["type"] = 4
+    runtime.post_pages[permalink(0x7308)] = [broken]
+    _, failed = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7308)}")
+
+    assert emoji_reactions(sent) == [(128064, True), (128064, False), (124, True)]
+    assert emoji_reactions(failed) == [(128064, True), (128064, False), (123, True)]

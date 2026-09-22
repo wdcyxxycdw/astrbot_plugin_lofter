@@ -6,6 +6,7 @@ from pathlib import Path
 
 from astrbot.api import logger
 
+from .files import build_file_component
 from .tag_count import (
     CountExpressionError,
     CountResult,
@@ -112,7 +113,7 @@ class LofterCountCommandsMixin:
         return path
 
     def _send_count_csv(self, event, path: Path):
-        file_component = _build_file_component(path)
+        file_component = build_file_component(path)
         if file_component is None:
             return event.plain_result(f"CSV 已生成，但当前适配器可能不支持文件发送：{path}")
         return event.chain_result([file_component])
@@ -141,43 +142,3 @@ def _format_count_list(rows: list[tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def _build_file_component(path: Path):
-    try:
-        import astrbot.api.message_components as Comp
-    except Exception:
-        return None
-    file_cls = getattr(Comp, "File", None)
-    if file_cls is None:
-        return None
-    return _try_file_factories(file_cls, path)
-
-
-def _try_file_factories(file_cls, path: Path):
-    for name in ("fromPath", "fromFileSystem", "fromLocalPath"):
-        component = _try_file_factory(getattr(file_cls, name, None), path)
-        if component is not None:
-            return component
-    return _try_direct_file(file_cls, path)
-
-
-def _try_file_factory(factory, path: Path):
-    if not callable(factory):
-        return None
-    try:
-        return factory(str(path))
-    except Exception:
-        return None
-
-
-def _try_direct_file(file_cls, path: Path):
-    for args, kwargs in _file_constructor_candidates(path):
-        try:
-            return file_cls(*args, **kwargs)
-        except Exception:
-            continue
-    return None
-
-
-def _file_constructor_candidates(path: Path):
-    text = str(path)
-    return [((path.name,), {"file": text}), ((text,), {}), ((), {"path": text}), ((), {"file": text})]

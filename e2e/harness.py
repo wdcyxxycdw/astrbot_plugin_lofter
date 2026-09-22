@@ -70,6 +70,8 @@ class Runtime:
         self.post_pages = {}
         self.api_requests = []
         self.image_requests = 0
+        self.video_body = b"\x00fake-mp4" * 64
+        self.video_requests = 0
 
     async def start(self):
         from astrbot.core import astrbot_config, db_helper, sp
@@ -94,6 +96,8 @@ class Runtime:
         config["platform_settings"]["reply_with_mention"] = False
         config["platform_settings"]["reply_with_quote"] = False
         config["platform_settings"]["segmented_reply"]["enable"] = False
+        # 整套测试都发给同一个会话，默认限流（60 秒 30 条）会让靠后的用例 stall 二十多秒后超时。
+        config["platform_settings"]["rate_limit"]["count"] = 0
         self.queue = asyncio.Queue()
         platforms = PlatformManager(config, self.queue)
         self.adapter = AiocqhttpAdapter({
@@ -125,6 +129,7 @@ class Runtime:
         app.router.add_post("/blog", self.blog)
         app.router.add_post("/detail", self.detail)
         app.router.add_get("/image.png", self.image)
+        app.router.add_get("/video.mp4", self.video)
         self.http = await self.stack.enter_async_context(TestServer(app))
         import lofter.client as client_module
         self.client_module = client_module
@@ -162,6 +167,10 @@ class Runtime:
         fields = await self._read(request)
         permalink = f"{int(fields['blogId']):x}_{int(fields['postid']):x}"
         return self._reply(self.post_pages.get(permalink, []), "posts")
+
+    async def video(self, request):
+        self.video_requests += 1
+        return web.Response(body=self.video_body, content_type="video/mp4")
 
     async def image(self, request):
         self.image_requests += 1
