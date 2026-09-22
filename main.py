@@ -14,7 +14,6 @@ from lofter.models import POST_TYPE_VIDEO
 from .core.author_block import AuthorBlockStorage, filter_blocked_posts, is_author_blocked
 from .core.count_commands import LofterCountCommandsMixin
 from .core.db import LofterDB
-from .core.files import build_file_component
 from .core.llm_tools import LofterLLMToolsMixin
 from .core.filter import parse_tag_expr
 from .core.formatter import format_post, is_photo_post
@@ -223,11 +222,12 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         video = await self._fetch_video(url)
         yield event.chain_result([Comp.Plain(format_post(post, header=VIDEO_HEADER))])
         if video is None:
+            yield event.plain_result("视频地址获取失败，请点击上方链接查看")
             return
 
         directory = Path(self._db._path).parent / VIDEO_DIR_NAME
         prune_old_videos(directory)
-        target = directory / video_filename(post.title, post.post_id)
+        target = directory / video_filename(post.post_id)
         try:
             await download_video(video.url, target, max_bytes=self._video_max_bytes)
         except Exception as e:
@@ -235,11 +235,7 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             yield event.plain_result(f"视频下载失败：{e}")
             return
 
-        component = build_file_component(target)
-        if component is None:
-            logger.warning("Lofter: 当前适配器不支持文件发送，视频留在 %s", target)
-            return
-        yield event.chain_result([component])
+        yield event.chain_result([Comp.Video.fromFileSystem(target)])
 
     async def _fetch_video(self, url: str):
         try:

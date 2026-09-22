@@ -312,7 +312,7 @@ def video_entry(runtime, index):
     return entry
 
 
-async def test_video_post_downloads_the_video_and_sends_it_as_a_file(runtime):
+async def test_video_post_downloads_the_video_and_sends_it_as_a_video(runtime):
     runtime.post_pages[permalink(0x7304)] = [video_entry(runtime, 0x7304)]
     before = runtime.video_requests
 
@@ -320,13 +320,13 @@ async def test_video_post_downloads_the_video_and_sends_it_as_a_file(runtime):
 
     assert runtime.video_requests == before + 1
     segments = [segment for request in requests for segment in request["params"].get("message", [])]
-    file_segment, = [segment for segment in segments if segment["type"] == "file"]
-    assert "我的视频作品.mp4" in json.dumps(file_segment, ensure_ascii=False)
+    video_segment, = [segment for segment in segments if segment["type"] == "video"]
+    assert Path(unquote(urlparse(video_segment["data"]["file"]).path)).name == f"{permalink(0x7304)}.mp4"
     text = json.dumps(requests, ensure_ascii=False)
     assert "🎬 视频作品" in text
 
 
-async def test_video_post_over_the_size_limit_reports_instead_of_sending_a_file(runtime):
+async def test_video_post_over_the_size_limit_reports_instead_of_sending_a_video(runtime):
     runtime.post_pages[permalink(0x7305)] = [video_entry(runtime, 0x7305)]
     original = runtime.plugin._video_max_bytes
     runtime.plugin._video_max_bytes = 16
@@ -336,7 +336,7 @@ async def test_video_post_over_the_size_limit_reports_instead_of_sending_a_file(
         runtime.plugin._video_max_bytes = original
 
     segments = [segment for request in requests for segment in request["params"].get("message", [])]
-    assert not [segment for segment in segments if segment["type"] == "file"]
+    assert not [segment for segment in segments if segment["type"] == "video"]
     assert "视频下载失败" in json.dumps(requests, ensure_ascii=False)
 
 
@@ -418,3 +418,12 @@ async def test_short_text_post_still_uses_forward_nodes_and_shows_the_count(runt
     forward, = [request for request in requests if request["action"] == "send_group_forward_msg"]
     header = forward["params"]["messages"][0]["data"]["content"][0]["data"]["text"]
     assert "7 字" in header
+async def test_video_post_without_a_playable_address_says_so(runtime):
+    """取不到视频地址时不能只丢一句标题就没了，用户会以为机器人卡住。"""
+    entry = post(0x7306, "视频测试")
+    entry["post"]["type"] = 4
+    runtime.post_pages[permalink(0x7306)] = [entry]
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7306)}")
+
+    assert "视频地址获取失败" in json.dumps(requests, ensure_ascii=False)
