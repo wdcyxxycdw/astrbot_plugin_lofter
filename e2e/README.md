@@ -6,7 +6,7 @@
 uv run --directory e2e --locked pytest -q
 ```
 
-测试使用固定版本 AstrBot 4.27.5、已发布的 `lftr==0.1.0` 和真实 OneBot v11 适配器，不依赖已部署的机器人。需要 Python 3.12+，依赖和环境由 uv 单独管理。
+测试使用固定版本 AstrBot 4.27.5、已发布的 `lftr>=0.2.0` 和真实 OneBot v11 适配器，不依赖已部署的机器人。需要 Python 3.12+，依赖和环境由 uv 单独管理。
 
 测试会确认插件实际使用 `lofter.LofterClient`，再让包的 HTTP 请求指向本地样本服务；不是保留插件内部抓取副本或直接调用消息处理函数。部署环境的 DWR 诊断也通过包的公开解析 API 验证。
 
