@@ -385,3 +385,17 @@ async def test_video_post_without_a_playable_address_says_so(runtime):
     _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7306)}")
 
     assert "视频地址获取失败" in json.dumps(requests, ensure_ascii=False)
+
+
+async def test_video_post_ends_the_reaction_by_outcome(runtime):
+    """视频分支单独 return，收尾表情得自己贴：漏了 👀 就永远留着，贴错了下载失败也显示成功。"""
+    runtime.post_pages[permalink(0x7307)] = [video_entry(runtime, 0x7307)]
+    _, sent = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7307)}")
+
+    broken = post(0x7308, "视频测试")
+    broken["post"]["type"] = 4
+    runtime.post_pages[permalink(0x7308)] = [broken]
+    _, failed = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7308)}")
+
+    assert emoji_reactions(sent) == [(128064, True), (128064, False), (124, True)]
+    assert emoji_reactions(failed) == [(128064, True), (128064, False), (123, True)]
