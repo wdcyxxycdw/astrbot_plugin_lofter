@@ -2,7 +2,7 @@ import asyncio
 from typing import Callable, Awaitable
 
 from astrbot.api import logger
-from lofter import LofterClient, Post, parse_blog_posts, parse_dwr_response, parse_post_page
+from lofter import LofterClient, Post
 
 from .author_block import AuthorBlockStorage, filter_blocked_posts
 from .db import LofterDB
@@ -12,7 +12,6 @@ from .storage import Subscription, SubscriptionStorage
 
 SendFunc = Callable[[str, str, list], Awaitable[None]]
 
-BLOG_URL = "https://{username}.lofter.com"
 MAX_PUSH_POSTS = 5
 
 
@@ -35,13 +34,12 @@ async def fetch_tag_posts(search_tags: list[str], client: LofterClient, *, db: L
 
 
 async def _fetch_tag_pages(tag: str, client: LofterClient, db: LofterDB | None, session_id: str) -> list[Post]:
-    offset, before = await db.tag_scan_cursor(session_id, tag) if db else (0, 0)
+    offset = await db.tag_scan_cursor(session_id, tag) if db else 0
     result = []
     page_ids: set[str] = set()
     warm = db is not None and await db.seen_count(session_id, "tag") > 0
     while True:
-        raw = await client.search_tag(tag, limit=20, offset=offset, before=before)
-        posts = await parse_dwr_response(raw)
+        posts = await client.fetch_tag_posts(tag, offset=offset)
         ids = {post.post_id for post in posts}
         if not ids:
             break
@@ -55,19 +53,15 @@ async def _fetch_tag_pages(tag: str, client: LofterClient, db: LofterDB | None, 
         pending = {post.post_id for post in await db.pending_posts(session_id, "tag", "")}
         if not unseen - pending:
             break
-        timestamps = [post.publish_time_ms for post in posts if post.publish_time_ms > 0]
-        if timestamps:
-            before = min(timestamps)
-        offset += 20
-        await db.save_tag_page(session_id, tag, [post for post in posts if post.post_id in unseen], offset, before)
+        offset += len(posts)
+        await db.save_tag_page(session_id, tag, [post for post in posts if post.post_id in unseen], offset)
     if db:
         await db.clear_tag_scan_cursor(session_id, tag)
     return result
 
 
 async def fetch_blog_posts(sub: Subscription, client: LofterClient) -> list[Post]:
-    html = await client.get(BLOG_URL.format(username=sub.target))
-    return await parse_blog_posts(html)
+    return await client.fetch_blog_posts(sub.target)
 
 
 def _build_tag_rule(subs: list[Subscription]) -> FilterRule:
@@ -97,17 +91,7 @@ async def _push_blog_post(session_id: str, post: Post, username: str, send_func:
 
 
 async def _enrich_blog_posts(posts: list[Post], client: LofterClient) -> list[Post]:
-    enriched = []
-    for post in posts:
-        try:
-            html = await client.get(post.url)
-            rich = await parse_post_page(html, post.url)
-            rich.post_id = post.post_id
-            enriched.append(rich)
-        except Exception as e:
-            logger.warning("获取博主帖子详情失败 %s: %s", post.url, e)
-            enriched.append(post)
-    return enriched
+    return await client.enrich_posts(posts)
 
 
 async def _check_tag_session(

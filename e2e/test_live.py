@@ -2,7 +2,8 @@ import json
 import os
 
 import pytest
-from lofter import LofterClient, parse_dwr_response
+from harness import API_URLS
+from lofter import LofterClient
 
 
 pytestmark = pytest.mark.live
@@ -11,36 +12,36 @@ pytestmark = pytest.mark.live
 @pytest.fixture
 async def live_client(runtime):
     original = runtime.plugin._client
-    fixture_url = runtime.client_module.DWR_SEARCH_URL
-    runtime.client_module.DWR_SEARCH_URL = runtime.original_dwr_url
-    async with LofterClient(os.environ["LOFTER_COOKIE"]) as client:
+    fixture_urls = {name: getattr(runtime.client_module, name) for name in API_URLS}
+    for name, url in runtime.original_api_urls.items():
+        setattr(runtime.client_module, name, url)
+    async with LofterClient(os.getenv("LOFTER_COOKIE", "")) as client:
         runtime.plugin._client = client
         try:
             yield client
         finally:
             runtime.plugin._client = original
-            runtime.client_module.DWR_SEARCH_URL = fixture_url
+            for name, url in fixture_urls.items():
+                setattr(runtime.client_module, name, url)
 
 
-async def test_real_dwr_search_reaches_onebot_receiver(runtime, live_client):
+async def test_real_tag_search_reaches_onebot_receiver(runtime, live_client):
     tag = os.environ["LOFTER_TAG"]
     _, requests = await runtime.message(f"/lofter search {tag}", timeout=120)
     assert any("标签搜索结果" in json.dumps(request, ensure_ascii=False) for request in requests), "插件未报告成功获取搜索结果"
     content_messages = [request for request in requests if "/post/" in json.dumps(request)]
-    assert content_messages, "真实 DWR 未产生可发送作品；检查 Cookie、标签和风控状态"
+    assert content_messages, "真实接口未产生可发送作品；检查标签是否有公开作品和风控状态"
     assert all(request["action"] == "send_group_msg" for request in content_messages)
 
 
-async def test_real_dwr_pagination_returns_new_ids(runtime, live_client):
+async def test_real_pagination_returns_new_ids(runtime, live_client):
     tag = os.environ["LOFTER_TAG"]
-    first = await parse_dwr_response(await live_client.search_tag(tag))
+    first = await live_client.fetch_tag_posts(tag)
     assert first, "分页样本标签必须有作品"
-    before = min(post.publish_time_ms for post in first)
-    assert before > 0, "缺少分页所需的毫秒时间戳"
-    second = await parse_dwr_response(await live_client.search_tag(tag, offset=20, before=before))
+    second = await live_client.fetch_tag_posts(tag, offset=len(first))
     assert second, "分页样本标签需要足够多的作品以验证第二页"
-    assert {post.post_id for post in second} - {post.post_id for post in first}, "DWR 第二页没有新增 ID，分页仍未生效"
-    assert min(post.publish_time_ms for post in second) <= before
+    assert {post.post_id for post in second} - {post.post_id for post in first}, "第二页没有新增 ID，分页仍未生效"
+    assert min(post.publish_time_ms for post in second) <= min(post.publish_time_ms for post in first)
 
 
 async def test_real_count_against_known_expected_number(runtime, live_client):

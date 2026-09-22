@@ -1,7 +1,7 @@
 import json
 import sqlite3
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 DDL = """
 CREATE TABLE IF NOT EXISTS config (
@@ -62,7 +62,6 @@ CREATE TABLE IF NOT EXISTS tag_scan_cursors (
     session_id TEXT NOT NULL,
     target TEXT NOT NULL,
     offset INTEGER NOT NULL,
-    before_time INTEGER NOT NULL,
     PRIMARY KEY (session_id, target)
 );
 """
@@ -82,6 +81,8 @@ def migrate(conn: sqlite3.Connection, from_ver: int):
         _migrate_v3_to_v4(conn)
     if from_ver < 5:
         _migrate_v4_to_v5(conn)
+    if from_ver < 6:
+        _migrate_v5_to_v6(conn)
     conn.execute(
         "INSERT INTO config(key,value) VALUES('schema_version',?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -130,6 +131,19 @@ def _migrate_v4_to_v5(conn: sqlite3.Connection):
             target TEXT NOT NULL,
             offset INTEGER NOT NULL,
             before_time INTEGER NOT NULL,
+            PRIMARY KEY (session_id, target)
+        )
+    """)
+
+
+def _migrate_v5_to_v6(conn: sqlite3.Connection):
+    """丢弃 before_time：app 接口只按 offset 翻页。游标是扫描中途的临时位置，重建即可。"""
+    conn.execute("DROP TABLE IF EXISTS tag_scan_cursors")
+    conn.execute("""
+        CREATE TABLE tag_scan_cursors (
+            session_id TEXT NOT NULL,
+            target TEXT NOT NULL,
+            offset INTEGER NOT NULL,
             PRIMARY KEY (session_id, target)
         )
     """)

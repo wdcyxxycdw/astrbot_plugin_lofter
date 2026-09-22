@@ -7,9 +7,8 @@ dependencies = [
     "pytest>=8",
     "pytest-asyncio>=1",
     "pytest-dotenv>=0.5",
-    "lftr==0.1.0",
+    "lftr>=0.2.0",
     "aiohttp>=3.8.0",
-    "cryptography>=42",
     "brotli>=1",
 ]
 
@@ -20,4 +19,4 @@ asyncio_default_test_loop_scope = "session"
 testpaths = ["."]
 env_files = ["../.env.test"]
 addopts = "--confcutdir=."
-markers = ["live: requests the real LOFTER DWR service"]
+markers = ["live: requests the real LOFTER app JSON API"]

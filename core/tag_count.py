@@ -9,7 +9,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Literal
 
-from lofter import Post, parse_dwr_response
+from lofter import Post
 
 
 class CountExpressionError(ValueError):
@@ -296,8 +296,6 @@ async def count_posts(
     expression: str,
     client,
     *,
-    parse_posts=parse_dwr_response,
-    page_size: int = 20,
     tag_concurrency: int = 5,
 ) -> CountResult:
     expr = parse_count_expression(expression)
@@ -306,10 +304,8 @@ async def count_posts(
         raise CountExpressionError("至少需要一个正向 tag")
     if not _has_positive_anchor(expr):
         raise CountExpressionError("每个 OR 分支都需要正向 tag 约束，例如 A|-B 无法完整统计")
-    if page_size < 1 or page_size > 20:
-        raise ValueError("page_size 必须在 1 到 20 之间")
 
-    results = await _scan_positive_tags(positive_tags, client, page_size, parse_posts, expr, tag_concurrency)
+    results = await _scan_positive_tags(positive_tags, client, expr, tag_concurrency)
     seen_candidates: set[str] = set()
     matched: set[str] = set()
     scanned_pages: dict[str, int] = {}
@@ -339,13 +335,11 @@ async def count_posts(
 async def _scan_positive_tags(
     tags: list[str],
     client,
-    page_size: int,
-    parse_posts,
     expr: ExprNode,
     tag_concurrency: int,
 ) -> list[TagScanResult]:
     semaphore = asyncio.Semaphore(max(1, tag_concurrency))
-    tasks = [asyncio.create_task(_scan_tag_with_limit(tag, semaphore, client, page_size, parse_posts, expr)) for tag in tags]
+    tasks = [asyncio.create_task(_scan_tag_with_limit(tag, semaphore, client, expr)) for tag in tags]
     try:
         return await asyncio.gather(*tasks)
     except BaseException:
@@ -359,23 +353,18 @@ async def _scan_tag_with_limit(
     tag: str,
     semaphore: asyncio.Semaphore,
     client,
-    page_size: int,
-    parse_posts,
     expr: ExprNode,
 ) -> TagScanResult:
     async with semaphore:
-        return await _scan_tag_pages(tag, client, page_size, parse_posts, expr)
+        return await _scan_tag_pages(tag, client, expr)
 
 
 async def _scan_tag_pages(
     tag: str,
     client,
-    page_size: int,
-    parse_posts,
     expr: ExprNode,
 ) -> TagScanResult:
     offset = 0
-    before = 0
     seen_for_tag: set[str] = set()
     candidate_ids: set[str] = set()
     matched_ids: set[str] = set()
@@ -383,7 +372,7 @@ async def _scan_tag_pages(
     warnings: list[str] = []
     while True:
         try:
-            posts = await _fetch_page(tag, client, offset, page_size, parse_posts, before)
+            posts = await client.fetch_tag_posts(tag, offset=offset)
         except (RuntimeError, aiohttp.ClientError, asyncio.TimeoutError) as e:
             warnings.append(f"标签「{tag}」扫描失败：{e}")
             return TagScanResult(tag, candidate_ids, matched_ids, scanned_pages, warnings)
@@ -393,22 +382,13 @@ async def _scan_tag_pages(
         if not _count_new_posts(posts, expr, seen_for_tag, candidate_ids, matched_ids):
             _append_repeat_page_warning(tag, offset, warnings)
             return TagScanResult(tag, candidate_ids, matched_ids, scanned_pages, warnings)
-        offset += page_size
-        timestamps = [post.publish_time_ms for post in posts if post.publish_time_ms > 0]
-        if timestamps:
-            before = min(timestamps)
+        offset += len(posts)
 
 
 def _append_repeat_page_warning(tag: str, offset: int, warnings: list[str]):
     if offset <= 0:
         return
     warnings.append(f"标签「{tag}」疑似分页未生效或接口返回重复页")
-
-
-async def _fetch_page(tag: str, client, offset: int, page_size: int, parse_posts, before: int = 0) -> list[Post]:
-    cursor = {"before": before} if before else {}
-    raw = await client.search_tag(tag, offset=offset, limit=page_size, **cursor)
-    return await parse_posts(raw)
 
 
 def _count_new_posts(

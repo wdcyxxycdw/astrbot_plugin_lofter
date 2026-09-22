@@ -24,7 +24,7 @@ uv run --directory e2e --locked pytest -q
 
 ## 真实 LOFTER 测试
 
-将根目录 `.env.test.example` 复制为 `.env.test`，填写自己的 `LOFTER_COOKIE` 和 `LOFTER_TAG`。分页样本标签需要至少两页可见作品。
+将根目录 `.env.test.example` 复制为 `.env.test`，填写 `LOFTER_TAG`。分页样本标签需要至少两页可见作品。`LOFTER_COOKIE` 可留空——抓取走 app 接口，公开内容无需登录。
 
 ```sh
 uv run --directory e2e --locked pytest -q --live
@@ -44,7 +44,7 @@ uv run --directory e2e --locked pytest -q --live
 - 完整 count 命令返回“扫描结束：已发现 31 个作品”。
 - 搜索结果经正式 AstrBot 消息管线发送到本地 OneBot 协议端。
 
-运行 `uv run --directory e2e --locked pytest -q --live test_live.py`，3 个真实网络测试全部通过。Cookie 只保存在被 Git 忽略的根目录 `.env.test`，不包含在测试样本或文档中。
+运行 `uv run --directory e2e --locked pytest -q --live test_live.py`，3 个真实网络测试全部通过。如确实填了 Cookie，它只保存在被 Git 忽略的根目录 `.env.test`，不包含在测试样本或文档中。
 
 ## 测试范围
 

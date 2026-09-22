@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from lofter import Post, parse_dwr_response
+from lofter import Post
 
 from .filter import FilterRule, apply_filter, parse_tag_expr
 from .formatter import format_post
@@ -14,19 +14,12 @@ class FlowStepsMixin:
         t0 = self._timed_start()
         details: list[str] = []
         try:
-            pages = await self._client.search_tag_paged(self.TEST_TAG, total=25)
-            details.append(f"search_tag_paged → {len(pages)} 页")
+            all_posts: list[Post] = await self._client.fetch_tag_posts_paged(self.TEST_TAG, total=25)
+            seen_ids = {p.post_id for p in all_posts}
 
-            seen_ids: set[str] = set()
-            all_posts: list[Post] = []
-            for raw in pages:
-                for p in await parse_dwr_response(raw):
-                    all_posts.append(p)
-                    seen_ids.add(p.post_id)
-
-            details.append(f"合计 {len(all_posts)} 条，去重后 {len(seen_ids)} 个 ID")
+            details.append(f"fetch_tag_posts_paged(total=25) → {len(all_posts)} 条，{len(seen_ids)} 个 ID")
             assert len(seen_ids) > 0, "搜索结果为空"
-            assert len(seen_ids) <= len(all_posts), "去重后数量异常"
+            assert len(seen_ids) == len(all_posts), "翻页结果存在重复 ID"
             return self._pass(name, self._timed_end(t0), details)
         except Exception as e:
             return self._fail(name, self._timed_end(t0), e, details)
@@ -81,7 +74,7 @@ class FlowStepsMixin:
             return self._fail(name, self._timed_end(t0), e, details)
 
     async def _step_14_subtag_full(self) -> object:
-        name = "subtag 完整链路"
+        name = "sub-tag 完整链路"
         t0 = self._timed_start()
         details: list[str] = []
         s = self.TEST_SESSION
@@ -116,7 +109,7 @@ class FlowStepsMixin:
             return self._fail(name, self._timed_end(t0), e, details)
 
     async def _step_15_subblog_full(self) -> object:
-        name = "subblog 完整链路"
+        name = "sub-blog 完整链路"
         t0 = self._timed_start()
         details: list[str] = []
         s = self.TEST_SESSION
@@ -139,7 +132,7 @@ class FlowStepsMixin:
             return self._fail(name, self._timed_end(t0), e, details)
 
     async def _step_16_subtagpreview(self, real_session_id: str) -> object:
-        name = "subtagpreview 推送"
+        name = "sub-tag-preview 推送"
         t0 = self._timed_start()
         details: list[str] = []
         s = self.TEST_SESSION

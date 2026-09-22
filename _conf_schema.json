@@ -1,6 +1,6 @@
 {
     "lofter_cookie": {
-        "description": "Lofter 登录 Cookie（用于访问需要登录的内容）",
+        "description": "Lofter 登录 Cookie（可选，遗留配置）。抓取已改用 app 接口，公开内容无需登录即可获取；留空即可",
         "type": "string",
         "default": ""
     },

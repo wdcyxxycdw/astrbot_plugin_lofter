@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from lofter import Post, parse_blog_posts, parse_dwr_response, parse_post_page
+from lofter import Post, decode_permalink
 
 from .filter import FilterRule, apply_filter, parse_tag_expr
 from .formatter import format_post
@@ -19,7 +19,7 @@ class NetworkStepsMixin:
         details: list[str] = []
         try:
             cookie = await self._db.get_config("lofter_cookie") or ""
-            details.append(f"Cookie 存在，长度 {len(cookie)}")
+            details.append(f"Cookie 长度 {len(cookie)}（遗留配置，留空不影响抓取）")
 
             await self._db.set_config(self.TEST_CONFIG_KEY, "v1")
             val = await self._db.get_config(self.TEST_CONFIG_KEY)
@@ -33,21 +33,14 @@ class NetworkStepsMixin:
         except Exception as e:
             return self._fail(name, self._timed_end(t0), e, details)
 
-    async def _step_02_dwr_engine(self) -> object:
-        name = "DWR 引擎"
+    async def _step_02_permalink_decode(self) -> object:
+        name = "帖子 ID 解码"
         t0 = self._timed_start()
         details: list[str] = []
         try:
-            details.append("lftr DWR 解析器加载成功")
-
-            sample_js = (
-                "dwr.engine._remoteHandleCallback('0','0',[{post:{"
-                "blogPageUrl:'https://diagnostic.lofter.com/post/e2e',title:'诊断帖子',"
-                "content:'<p>诊断</p>',tagList:['诊断'],publishTime:1720000000000}}]);"
-            )
-            posts = await parse_dwr_response(sample_js)
-            assert posts and posts[0].post_id == "e2e"
-            details.append(f"样本 DWR 解析结果: {posts[0].post_id}")
+            blog_id, post_id = decode_permalink("1d038690_34f54df9c")
+            assert (blog_id, post_id) == (486770320, 14215864220), f"解码结果异常：{blog_id}, {post_id}"
+            details.append(f"样本 permalink 解码结果: blogId={blog_id}, postId={post_id}")
             return self._pass(name, self._timed_end(t0), details)
         except Exception as e:
             return self._fail(name, self._timed_end(t0), e, details)
@@ -64,29 +57,14 @@ class NetworkStepsMixin:
         except Exception as e:
             return self._fail(name, self._timed_end(t0), e, details)
 
-    async def _step_04_dwr_search(self) -> object:
-        name = "DWR 标签搜索"
+    async def _step_04_tag_fetch(self) -> object:
+        name = "标签抓取"
         t0 = self._timed_start()
         details: list[str] = []
         try:
-            raw = await self._client.search_tag(self.TEST_TAG, limit=20)
-            self._artifacts["raw_dwr"] = raw
-            details.append(f"search_tag('{self.TEST_TAG}', limit=20) → {len(raw)} bytes")
-            return self._pass(name, self._timed_end(t0), details)
-        except Exception as e:
-            return self._fail(name, self._timed_end(t0), e, details)
-
-    async def _step_05_dwr_parse(self) -> object:
-        name = "DWR 响应解析"
-        t0 = self._timed_start()
-        details: list[str] = []
-        raw_dwr = self._artifacts.get("raw_dwr")
-        if raw_dwr is None:
-            return self._skip(name, "依赖 step 4 (raw_dwr) 未就绪")
-        try:
-            posts = await parse_dwr_response(raw_dwr)
+            posts = await self._client.fetch_tag_posts(self.TEST_TAG)
             self._artifacts["tag_posts"] = posts
-            details.append(f"解析出 {len(posts)} 条帖子")
+            details.append(f"fetch_tag_posts('{self.TEST_TAG}') → {len(posts)} 条")
             if posts:
                 p = posts[0]
                 details.append(f"样本 #1: title={p.title!r}, author={p.author!r}, images={len(p.images)}")
@@ -94,47 +72,60 @@ class NetworkStepsMixin:
         except Exception as e:
             return self._fail(name, self._timed_end(t0), e, details)
 
-    async def _step_06_blog_fetch(self) -> object:
-        name = "博主主页抓取"
+    async def _step_05_tag_detail(self) -> object:
+        name = "标签详情字段"
         t0 = self._timed_start()
         details: list[str] = []
         try:
-            url = f"https://{self.TEST_BLOG}.lofter.com"
-            html = await self._client.get(url)
-            self._artifacts["blog_html"] = html
-            details.append(f"GET {url} → {len(html)} bytes")
+            items = await self._client.fetch_tag_posts_detailed(self.TEST_TAG)
+            details.append(f"fetch_tag_posts_detailed('{self.TEST_TAG}') → {len(items)} 条")
+            if items:
+                d = items[0]
+                details.append(f"样本 #1: type={d.post_type}, 字数={d.word_count}, 置顶={d.is_top}")
+                details.append(f"互动: 回复={d.stats.responses}, 推荐={d.stats.favorites}, 浏览={d.stats.views}")
             return self._pass(name, self._timed_end(t0), details)
         except Exception as e:
             return self._fail(name, self._timed_end(t0), e, details)
 
-    async def _step_07_blog_parse(self) -> object:
-        name = "博主主页解析"
+    async def _step_06_blog_fetch(self) -> object:
+        name = "博主作品抓取"
         t0 = self._timed_start()
         details: list[str] = []
-        blog_html = self._artifacts.get("blog_html")
-        if blog_html is None:
-            return self._skip(name, "依赖 step 6 (blog_html) 未就绪")
         try:
-            posts = await parse_blog_posts(blog_html)
+            posts = await self._client.fetch_blog_posts(self.TEST_BLOG)
             self._artifacts["blog_posts"] = posts
-            details.append(f"解析出 {len(posts)} 条帖子")
+            details.append(f"fetch_blog_posts('{self.TEST_BLOG}') → {len(posts)} 条")
             if posts:
                 details.append(f"样本 #1: title={posts[0].title!r}, url={posts[0].url}")
             return self._pass(name, self._timed_end(t0), details)
         except Exception as e:
             return self._fail(name, self._timed_end(t0), e, details)
 
-    async def _step_08_post_parse(self) -> object:
-        name = "单帖解析"
+    async def _step_07_blog_content(self) -> object:
+        name = "博主作品正文完整性"
         t0 = self._timed_start()
         details: list[str] = []
         blog_posts: list[Post] | None = self._artifacts.get("blog_posts")
         if not blog_posts:
-            return self._skip(name, "依赖 step 7 (blog_posts) 未就绪或为空")
+            return self._skip(name, "依赖 step 6 (blog_posts) 未就绪或为空")
+        try:
+            filled = [p for p in blog_posts if p.content or p.images or p.summary]
+            details.append(f"{len(filled)}/{len(blog_posts)} 条在列表接口就带有正文或图片")
+            assert filled, "博主作品列表没有任何正文/图片，接口可能已变化"
+            return self._pass(name, self._timed_end(t0), details)
+        except Exception as e:
+            return self._fail(name, self._timed_end(t0), e, details)
+
+    async def _step_08_post_fetch(self) -> object:
+        name = "单帖抓取"
+        t0 = self._timed_start()
+        details: list[str] = []
+        blog_posts: list[Post] | None = self._artifacts.get("blog_posts")
+        if not blog_posts:
+            return self._skip(name, "依赖 step 6 (blog_posts) 未就绪或为空")
         try:
             post = blog_posts[0]
-            html = await self._client.get(post.url)
-            rich = await parse_post_page(html, post.url)
+            rich = await self._client.fetch_post(post.url)
             self._artifacts["rich_post"] = rich
             details.append(f"URL: {post.url}")
             details.append(f"title={rich.title!r}, author={rich.author!r}, images={len(rich.images)}")
@@ -172,7 +163,7 @@ class NetworkStepsMixin:
         details: list[str] = []
         tag_posts: list[Post] | None = self._artifacts.get("tag_posts")
         if tag_posts is None:
-            return self._skip(name, "依赖 step 5 (tag_posts) 未就绪")
+            return self._skip(name, "依赖 step 4 (tag_posts) 未就绪")
         try:
             excl = f"{self.TEST_TAG}_unlikely_excl"
             subs, excls = parse_tag_expr(f"{self.TEST_TAG} -{excl}")

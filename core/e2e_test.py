@@ -52,13 +52,13 @@ class E2ETestRunner(NetworkStepsMixin, FlowStepsMixin):
 
         steps = [
             self._step_01_config_rw,
-            self._step_02_dwr_engine,
+            self._step_02_permalink_decode,
             self._step_03_http_get,
-            self._step_04_dwr_search,
-            self._step_05_dwr_parse,
+            self._step_04_tag_fetch,
+            self._step_05_tag_detail,
             self._step_06_blog_fetch,
-            self._step_07_blog_parse,
-            self._step_08_post_parse,
+            self._step_07_blog_content,
+            self._step_08_post_fetch,
             self._step_09_auto_parse,
             self._step_10_filter,
             self._step_11_format,
