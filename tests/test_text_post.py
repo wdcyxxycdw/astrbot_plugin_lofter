@@ -1,7 +1,14 @@
 import pytest
 from lofter import Post, PostDetail
 
-from core.text_post import build_text_file, post_word_count, text_filename, write_text_file
+from core.text_post import (
+    build_text_file,
+    post_word_count,
+    prune_old_texts,
+    text_display_name,
+    text_filename,
+    write_text_file,
+)
 
 
 def make_detail(content="正文", word_count=0, **kwargs):
@@ -29,16 +36,26 @@ def test_word_count_is_zero_for_empty_posts():
     assert post_word_count(make_detail(content="")) == 0
 
 
-def test_text_filename_uses_the_article_title():
-    assert text_filename("我的文章", "abc_123") == "我的文章.txt"
+def test_text_filename_is_the_post_id():
+    assert text_filename("abc_123") == "abc_123.txt"
 
 
-def test_text_filename_drops_path_separators():
-    assert text_filename("上/下", "abc_123") == "上下.txt"
+def test_display_name_uses_the_article_title():
+    assert text_display_name("我的文章", "abc_123") == "我的文章.txt"
 
 
-def test_text_filename_falls_back_to_post_id():
-    assert text_filename("", "abc_123") == "abc_123.txt"
+def test_display_name_drops_path_separators():
+    assert text_display_name("上/下", "abc_123") == "上下.txt"
+
+
+def test_display_name_falls_back_to_post_id():
+    assert text_display_name("", "abc_123") == "abc_123.txt"
+
+
+def test_two_posts_sharing_a_title_are_stored_separately():
+    """标题撞名很常见（《无题》《第一章》），撞了就会把别人的正文发出去。"""
+    assert text_filename("abc_123") != text_filename("abc_124")
+    assert text_display_name("第一章", "abc_123") == text_display_name("第一章", "abc_124")
 
 
 def test_text_file_keeps_the_whole_body():
@@ -74,8 +91,38 @@ def test_write_text_file_creates_the_directory_and_returns_the_path(tmp_path, ti
     path = write_text_file(tmp_path / "articles", detail.post, 4)
 
     assert path.parent.name == "articles"
-    assert path.name == text_filename(title, "abc_123")
+    assert path.name == text_filename("abc_123")
     assert "正文内容" in path.read_text(encoding="utf-8")
+
+
+def test_write_text_file_leaves_no_temporary_files(tmp_path):
+    write_text_file(tmp_path, make_detail(content="正文").post, 2)
+
+    assert list(tmp_path.glob("*.part")) == []
+
+
+def test_prune_old_texts_removes_stale_files_and_keeps_fresh_ones(tmp_path):
+    import os
+    import time
+
+    stale = tmp_path / "old.txt"
+    leftover = tmp_path / "old.txt.deadbeef.part"
+    fresh = tmp_path / "new.txt"
+    for path in (stale, leftover, fresh):
+        path.write_text("x", encoding="utf-8")
+    old_time = time.time() - 7200
+    os.utime(stale, (old_time, old_time))
+    os.utime(leftover, (old_time, old_time))
+
+    prune_old_texts(tmp_path, keep_seconds=3600)
+
+    assert not stale.exists()
+    assert not leftover.exists()
+    assert fresh.exists()
+
+
+def test_prune_old_texts_tolerates_missing_directory(tmp_path):
+    prune_old_texts(tmp_path / "nope")
 
 
 def test_write_text_file_overwrites_a_previous_run(tmp_path):

@@ -353,7 +353,29 @@ async def test_long_text_post_is_sent_as_a_txt_file_named_after_the_title(runtim
     assert not [request for request in requests if request["action"] == "send_group_forward_msg"]
     segments = [segment for request in requests for segment in request["params"].get("message", [])]
     file_segment, = [segment for segment in segments if segment["type"] == "file"]
-    assert "我的长篇作品.txt" in json.dumps(file_segment, ensure_ascii=False)
+    assert file_segment["data"]["name"] == "我的长篇作品.txt"
+    # 磁盘上按帖子 ID 存，标题只是收件人看到的名字——否则两篇同名文章会互相覆盖
+    on_disk = Path(unquote(urlparse(file_segment["data"]["file"]).path or file_segment["data"]["file"]))
+    assert on_disk.name == f"{permalink(0x7401)}.txt"
+
+
+async def test_long_text_falls_back_to_forward_nodes_when_files_are_unsupported(runtime, monkeypatch):
+    """适配器发不了文件时不能只丢个头部就没了，用户会以为全文永远不来。"""
+    import astrbot.api.message_components as Comp
+
+    body = "降级正文内容。" * 400
+    entry = post(0x7404, "长文文件")
+    entry["post"]["type"] = 1
+    entry["post"]["content"] = f"<p>{body}</p>"
+    runtime.post_pages[permalink(0x7404)] = [entry]
+    monkeypatch.delattr(Comp, "File")
+
+    _, requests = await runtime.message(f"https://author.lofter.com/post/{permalink(0x7404)}")
+
+    forward, = [request for request in requests if request["action"] == "send_group_forward_msg"]
+    nodes = forward["params"]["messages"]
+    paragraphs = [segment["data"]["text"] for node in nodes[1:-1] for segment in node["data"]["content"]]
+    assert "".join(paragraphs) == body
 
 
 async def test_the_sent_txt_file_contains_the_whole_article(runtime):
@@ -366,7 +388,7 @@ async def test_the_sent_txt_file_contains_the_whole_article(runtime):
 
     await runtime.message(f"https://author.lofter.com/post/{permalink(0x7402)}")
 
-    written = Path(runtime.plugin._db._path).parent / "articles" / "全文校验.txt"
+    written = Path(runtime.plugin._db._path).parent / "articles" / f"{permalink(0x7402)}.txt"
     text = written.read_text(encoding="utf-8")
     assert body in text
     assert "原文：https://author.lofter.com/post/" in text

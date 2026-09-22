@@ -20,7 +20,14 @@ from .core.filter import parse_tag_expr
 from .core.formatter import format_post, is_photo_post
 from .core.scheduler import SubscriptionScheduler, fetch_tag_posts
 from .core.storage import SubscriptionStorage
-from .core.text_post import DEFAULT_FILE_THRESHOLD, TEXT_DIR_NAME, post_word_count, write_text_file
+from .core.text_post import (
+    DEFAULT_FILE_THRESHOLD,
+    TEXT_DIR_NAME,
+    post_word_count,
+    prune_old_texts,
+    text_display_name,
+    write_text_file,
+)
 from .core.utils import _split_text, extract_message_body_text
 from .core.video import VIDEO_DIR_NAME, download_video, prune_old_videos, video_filename
 
@@ -189,18 +196,21 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             return
 
         directory = Path(self._db._path).parent / TEXT_DIR_NAME
+        prune_old_texts(directory)
         try:
             path = write_text_file(directory, post, count)
-        except OSError as e:
+        except Exception as e:
             logger.warning("Lofter: 写全文文件失败 %s: %s", post.url, e)
             yield self._render_short_text_post(event, post, url, count)
             return
 
-        yield event.chain_result([Comp.Plain(format_post(post, word_count=count))])
-        component = build_file_component(path)
+        component = build_file_component(path, text_display_name(post.title, post.post_id))
         if component is None:
             logger.warning("Lofter: 当前适配器不支持文件发送，全文留在 %s", path)
+            yield self._render_short_text_post(event, post, url, count)
             return
+
+        yield event.chain_result([Comp.Plain(format_post(post, word_count=count))])
         yield event.chain_result([component])
 
     def _render_short_text_post(self, event: AstrMessageEvent, post, url: str, count: int):

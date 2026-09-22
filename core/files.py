@@ -16,7 +16,8 @@ def safe_filename(title: str, fallback: str, suffix: str) -> str:
     return f"{name[:MAX_NAME_LENGTH] or fallback}{suffix}"
 
 
-def build_file_component(path: Path):
+def build_file_component(path: Path, display_name: str = ""):
+    """display_name 是接收方看到的文件名，可以和磁盘上的名字不同。"""
     try:
         import astrbot.api.message_components as Comp
     except Exception:
@@ -24,6 +25,8 @@ def build_file_component(path: Path):
     file_cls = getattr(Comp, "File", None)
     if file_cls is None:
         return None
+    if display_name:
+        return _try_direct_file(file_cls, path, display_name)
     return _try_file_factories(file_cls, path)
 
 
@@ -32,7 +35,7 @@ def _try_file_factories(file_cls, path: Path):
         component = _try_file_factory(getattr(file_cls, name, None), path)
         if component is not None:
             return component
-    return _try_direct_file(file_cls, path)
+    return _try_direct_file(file_cls, path, path.name)
 
 
 def _try_file_factory(factory, path: Path):
@@ -44,8 +47,8 @@ def _try_file_factory(factory, path: Path):
         return None
 
 
-def _try_direct_file(file_cls, path: Path):
-    for args, kwargs in _file_constructor_candidates(path):
+def _try_direct_file(file_cls, path: Path, display_name: str):
+    for args, kwargs in _file_constructor_candidates(path, display_name):
         try:
             return file_cls(*args, **kwargs)
         except Exception:
@@ -53,6 +56,6 @@ def _try_direct_file(file_cls, path: Path):
     return None
 
 
-def _file_constructor_candidates(path: Path):
+def _file_constructor_candidates(path: Path, display_name: str):
     text = str(path)
-    return [((path.name,), {"file": text}), ((text,), {}), ((), {"path": text}), ((), {"file": text})]
+    return [((display_name,), {"file": text}), ((text,), {}), ((), {"path": text}), ((), {"file": text})]
