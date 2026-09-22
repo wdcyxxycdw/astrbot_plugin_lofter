@@ -19,7 +19,8 @@ from core.tag_count import (
     parse_count_command_arg,
     parse_count_expression,
 )
-from core.count_commands import LofterCountCommandsMixin, _file_constructor_candidates, _try_direct_file
+from core.count_commands import LofterCountCommandsMixin
+from core.files import _file_constructor_candidates, _try_direct_file
 
 
 def _post(tags: list[str]) -> Post:
@@ -429,7 +430,7 @@ def test_build_count_csv():
 def test_file_constructor_candidates_official_first(tmp_path):
     """验证官方标准构造（name, file=path）是第一个候选"""
     path = tmp_path / "test_file.csv"
-    candidates = _file_constructor_candidates(path)
+    candidates = _file_constructor_candidates(path, path.name)
 
     # 第一个候选必须是官方标准构造
     assert len(candidates) >= 1
@@ -451,7 +452,7 @@ def test_try_direct_file_with_official_constructor(tmp_path):
     path = tmp_path / "report.csv"
     path.write_text("test content")
 
-    result = _try_direct_file(FakeFile, path)
+    result = _try_direct_file(FakeFile, path, path.name)
 
     assert result is not None, "_try_direct_file 应该成功构造 FakeFile 对象"
     assert result.name == path.name, f"name 应该是文件名 '{path.name}'，实际 '{result.name}'"

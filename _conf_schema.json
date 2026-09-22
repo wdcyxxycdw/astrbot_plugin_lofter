@@ -18,5 +18,40 @@
         "description": "搜索结果最多返回的条数（最大 100，超过 20 条自动翻页）",
         "type": "int",
         "default": 3
+    },
+    "text_file_threshold": {
+        "description": "文字贴超过这个字数时，整理成 .txt 文件发送而不是合并转发；文件名取文章标题",
+        "type": "int",
+        "default": 1000
+    },
+    "video_max_mb": {
+        "description": "解析视频贴时允许下载的最大体积（MB），超过则只发文字不发文件",
+        "type": "int",
+        "default": 100
+    },
+    "temp_file_ttl_hours": {
+        "description": "生成的全文 .txt 和视频文件保留多久（小时），到期后由后台定期清理；最小 1 小时",
+        "type": "int",
+        "default": 1
+    },
+    "parse_reaction": {
+        "description": "自动解析链接时，给触发的消息贴表情表示进度（仅 QQ/OneBot 平台生效）",
+        "type": "bool",
+        "default": true
+    },
+    "parse_reaction_emoji": {
+        "description": "「正在解析」的表情 ID，默认 128064（👀）。QQ 只接受白名单内的 ID，贴不上时日志会记录 NapCat 的报错，换一个即可",
+        "type": "int",
+        "default": 128064
+    },
+    "parse_reaction_done_emoji": {
+        "description": "「解析完成」的表情 ID，默认 124（OK）",
+        "type": "int",
+        "default": 124
+    },
+    "parse_reaction_failed_emoji": {
+        "description": "「解析失败」的表情 ID，默认 123（NO）",
+        "type": "int",
+        "default": 123
     }
 }

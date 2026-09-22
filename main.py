@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from pathlib import Path
 
 import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
@@ -8,18 +9,48 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.star import StarTools
 from lofter import LofterClient
+from lofter.models import POST_TYPE_VIDEO
 
 from .core.author_block import AuthorBlockStorage, filter_blocked_posts, is_author_blocked
+from .core.card import card_links
+from .core.cleanup import DEFAULT_TTL_HOURS, TempFileCleaner
 from .core.count_commands import LofterCountCommandsMixin
 from .core.db import LofterDB
+from .core.files import build_file_component
 from .core.llm_tools import LofterLLMToolsMixin
 from .core.filter import parse_tag_expr
-from .core.formatter import format_post
+from .core.formatter import format_post, is_photo_post
+from .core.reaction import EMOJI_DONE, EMOJI_FAILED, EMOJI_PARSING, replace_reaction, set_reaction
 from .core.scheduler import SubscriptionScheduler, fetch_tag_posts
 from .core.storage import SubscriptionStorage
+from .core.text_post import (
+    DEFAULT_FILE_THRESHOLD,
+    TEXT_DIR_NAME,
+    post_word_count,
+    text_display_name,
+    write_text_file,
+)
 from .core.utils import _split_text, extract_message_body_text
+from .core.video import VIDEO_DIR_NAME, download_video, video_filename
 
 POST_PATTERN = re.compile(r"[a-zA-Z0-9_-]+\.lofter\.com/post/[a-zA-Z0-9_-]+")
+VIDEO_HEADER = "🎬 视频作品"
+
+
+def _forward_nodes(post, url: str, word_count: int = 0) -> list:
+    author_name = post.author or "Lofter"
+    header_lines = [f"▸ {post.title or '(无标题)'}"]
+    if post.author:
+        header_lines.append(f"作者：{post.author}")
+    if word_count:
+        header_lines.append(f"{word_count} 字")
+    if post.tags:
+        header_lines.append(f"#{' #'.join(post.tags)}")
+    nodes = [Comp.Node(content=[Comp.Plain("\n".join(header_lines))], name=author_name, uin="0")]
+    for chunk in _split_text(post.content):
+        nodes.append(Comp.Node(content=[Comp.Plain(chunk)], name=author_name, uin="0"))
+    nodes.append(Comp.Node(content=[Comp.Plain(url)], name=author_name, uin="0"))
+    return nodes
 
 
 @register(
@@ -35,6 +66,12 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
         self._max_images: int = int(config.get("max_images", 3))
         self._search_limit: int = int(config.get("search_limit", 3))
         self._interval: int = int(config.get("poll_interval", 30))
+        self._video_max_bytes: int = int(config.get("video_max_mb", 100)) * (1 << 20)
+        self._text_file_threshold: int = int(config.get("text_file_threshold", DEFAULT_FILE_THRESHOLD))
+        self._reaction_enabled: bool = bool(config.get("parse_reaction", True))
+        self._emoji_parsing: int = int(config.get("parse_reaction_emoji", EMOJI_PARSING))
+        self._emoji_done: int = int(config.get("parse_reaction_done_emoji", EMOJI_DONE))
+        self._emoji_failed: int = int(config.get("parse_reaction_failed_emoji", EMOJI_FAILED))
         db_path = os.path.join(StarTools.get_data_dir(), "lofter.db")
         self._db = LofterDB(db_path)
         self._client = LofterClient("")
@@ -48,6 +85,10 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             block_storage=self._author_blocks,
             interval_minutes=self._interval,
         )
+        self._cleaner = TempFileCleaner(
+            Path(db_path).parent,
+            ttl_hours=int(config.get("temp_file_ttl_hours", DEFAULT_TTL_HOURS)),
+        )
 
     async def initialize(self):
         await self._db.initialize()
@@ -60,9 +101,11 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
             await self._db.set_config("lofter_cookie", cookie)
         self._client.update_cookie(cookie)
         self._scheduler.start()
+        self._cleaner.start()
 
     async def terminate(self):
         await self._scheduler.stop()
+        await self._cleaner.stop()
         await self._client.close()
         await self._db.close()
 
@@ -120,50 +163,125 @@ class LofterPlugin(LofterLLMToolsMixin, LofterCountCommandsMixin, Star):
     # 自动解析消息中的 Lofter 链接
     # ──────────────────────────────────────────
 
+    async def _end_reaction(self, event: AstrMessageEvent, emoji_id: int | None):
+        """解析结束，把「处理中」换成结果表情；emoji_id 为 None 时只撤不贴。"""
+        if self._reaction_enabled:
+            await replace_reaction(event, self._emoji_parsing, emoji_id)
+
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
     async def auto_parse(self, event: AstrMessageEvent):
         msg = extract_message_body_text(event.message_obj, event.message_str)
-        match = POST_PATTERN.search(msg)
+        match = POST_PATTERN.search(msg) or POST_PATTERN.search(card_links(event.message_obj))
         if not match:
             return
         url = "https://" + match.group(0)
+        logger.debug("Lofter: 开始解析 %s", url)
+        if self._reaction_enabled:
+            await set_reaction(event, self._emoji_parsing)
         try:
-            post = await self._client.fetch_post(url)
+            detail = await self._client.fetch_post_detailed(url)
+            blocks = await self._author_blocks.list_by_session(event.unified_msg_origin)
         except Exception as e:
-            logger.error("获取 Lofter 帖子失败: %s", e)
+            logger.error("解析 Lofter 帖子失败 %s: %s", url, e)
+            await self._end_reaction(event, self._emoji_failed)
             return
 
-        blocks = await self._author_blocks.list_by_session(event.unified_msg_origin)
+        post = detail.post
         if is_author_blocked(post, blocks):
+            await self._end_reaction(event, None)
+            return
+
+        if detail.post_type == POST_TYPE_VIDEO:
+            async for result in self._render_video_post(event, post, url):
+                yield result
+            return
+
+        if detail.post_type == POST_TYPE_VIDEO:
+            async for result in self._render_video_post(event, post, url):
+                yield result
+            return
+
+        if detail.post_type == POST_TYPE_VIDEO:
+            async for result in self._render_video_post(event, post, url):
+                yield result
             return
         if not post.summary and not post.images and not post.content:
+            await self._end_reaction(event, self._emoji_failed)
             return
 
-        if post.images:
-            chain = [Comp.Plain(format_post(post))]
-            chain += [Comp.Image.fromURL(u) for u in post.images[:self._max_images]]
-            yield event.chain_result(chain)
+        await self._end_reaction(event, self._emoji_done)
+
+        if is_photo_post(detail):
+            yield self._render_photo_post(event, post)
         elif post.content:
-            is_private = "FriendMessage" in event.unified_msg_origin
-            if is_private:
-                preview = post.content[:500] + ("…\n（全文请点击链接）" if len(post.content) > 500 else "")
-                yield event.chain_result([Comp.Plain(format_post(post, body=preview))])
-            else:
-                author_name = post.author or "Lofter"
-                header_lines = [f"▸ {post.title or '(无标题)'}"]
-                if post.author:
-                    header_lines.append(f"作者：{post.author}")
-                if post.tags:
-                    header_lines.append(f"#{' #'.join(post.tags)}")
-                node_header = "\n".join(header_lines)
-                chunks = _split_text(post.content)
-                nodes = [Comp.Node(content=[Comp.Plain(node_header)], name=author_name, uin="0")]
-                for chunk in chunks:
-                    nodes.append(Comp.Node(content=[Comp.Plain(chunk)], name=author_name, uin="0"))
-                nodes.append(Comp.Node(content=[Comp.Plain(url)], name=author_name, uin="0"))
-                yield event.chain_result([Comp.Nodes(nodes=nodes)])
+            for result in self._render_text_post(event, detail, url):
+                yield result
         else:
             yield event.chain_result([Comp.Plain(format_post(post))])
+
+    def _render_photo_post(self, event: AstrMessageEvent, post):
+        chain = [Comp.Plain(format_post(post))]
+        chain += [Comp.Image.fromURL(u) for u in post.images[:self._max_images]]
+        return event.chain_result(chain)
+
+    def _render_text_post(self, event: AstrMessageEvent, detail, url: str):
+        post = detail.post
+        count = post_word_count(detail)
+        if count < self._text_file_threshold:
+            yield self._render_short_text_post(event, post, url, count)
+            return
+
+        directory = Path(self._db._path).parent / TEXT_DIR_NAME
+        try:
+            path = write_text_file(directory, post, count)
+        except Exception as e:
+            logger.warning("Lofter: 写全文文件失败 %s: %s", post.url, e)
+            yield self._render_short_text_post(event, post, url, count)
+            return
+
+        component = build_file_component(path, text_display_name(post.title, post.post_id))
+        if component is None:
+            logger.warning("Lofter: 当前适配器不支持文件发送，全文留在 %s", path)
+            yield self._render_short_text_post(event, post, url, count)
+            return
+
+        yield event.chain_result([Comp.Plain(format_post(post, word_count=count))])
+        yield event.chain_result([component])
+
+    def _render_short_text_post(self, event: AstrMessageEvent, post, url: str, count: int):
+        if "FriendMessage" in event.unified_msg_origin:
+            preview = post.content[:500] + ("…\n（全文请点击链接）" if len(post.content) > 500 else "")
+            return event.chain_result([Comp.Plain(format_post(post, body=preview, word_count=count))])
+        return event.chain_result([Comp.Nodes(nodes=_forward_nodes(post, url, count))])
+
+    async def _render_video_post(self, event: AstrMessageEvent, post, url: str):
+        video = await self._fetch_video(url)
+        yield event.chain_result([Comp.Plain(format_post(post, header=VIDEO_HEADER))])
+        if video is None:
+            await self._end_reaction(event, self._emoji_failed)
+            yield event.plain_result("视频地址获取失败，请点击上方链接查看")
+            return
+
+        directory = Path(self._db._path).parent / VIDEO_DIR_NAME
+        target = directory / video_filename(post.post_id)
+        try:
+            await download_video(video.url, target, max_bytes=self._video_max_bytes)
+        except Exception as e:
+            logger.warning("Lofter: 下载视频失败 %s: %s", video.url, e)
+            await self._end_reaction(event, self._emoji_failed)
+            yield event.plain_result(f"视频下载失败：{e}")
+            return
+
+        await self._end_reaction(event, self._emoji_done)
+        yield event.chain_result([Comp.Video.fromFileSystem(target)])
+
+    async def _fetch_video(self, url: str):
+        try:
+            video = await self._client.fetch_post_video(url)
+        except Exception as e:
+            logger.warning("Lofter: 获取视频地址失败 %s: %s", url, e)
+            return None
+        return video if video and video.url else None
 
     # ──────────────────────────────────────────
     # /lofter 命令组
